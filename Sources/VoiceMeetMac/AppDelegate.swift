@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let lend = Lend()
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
+    private var recordDot: RecordDotView?
     private var shownStatusIcon = ""
     private var terminationSignal: DispatchSourceSignal?
     private var grantWatch: Timer?
@@ -29,6 +30,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
         self.statusItem = statusItem
+        if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: IterateIcon.plain.size) }
 
         let panel = Panel(
             state: panelState,
@@ -239,33 +241,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// The iterate mark: green while a banner shows, red for 3 seconds at each use by a
     /// mind, orange while the microphone or a camera is on. Else the lend at a glance: plain while
-    /// live, dimmed while it connects, dimmed and slashed while it is not lent.
+    /// live, dimmed while it connects, dimmed and slashed while it is not lent. The record adds a
+    /// red dot at its lower right, filled while it records, a ring while it is paused, and does not
+    /// change the ink (`MenuBarMark`).
     private func updateStatusButton() {
         guard let button = statusItem?.button else { return }
         let isInUse = model.lastUse.map { Date().timeIntervalSince($0.at) < 3 } ?? false
         if isInUse {
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { [weak self] in self?.updateStatusButton() }
         }
-        let isCapturing = model.microphone.isRunning || model.isAnyCameraRunning || self.isCapturing || model.record.isRecording
+        let record = model.record
+        let isCapturing = model.microphone.isRunning || model.isAnyCameraRunning || self.isCapturing
         let banner = model.banners.state.showing
         let glance = lend.state.phase.glance
-        let shown = banner != nil ? "green" : isInUse ? "red" : isCapturing ? "orange" : glance.rawValue
-        button.image =
-            banner != nil ? IterateIcon.green : isInUse ? IterateIcon.red : isCapturing ? IterateIcon.orange : IterateIcon.lend(glance)
+        let mark = MenuBarMark.of(
+            bannerShows: banner != nil, inUse: isInUse, microphoneOrCameraOn: isCapturing, glance: glance,
+            isRecording: record.isRecording, isPaused: record.isPaused)
+        button.image = IterateIcon.image(mark)
+        recordDot?.dot = mark.dot
         let lendWords: String
         switch glance {
         case .live: lendWords = "iterate: lent"
         case .connecting: lendWords = "iterate: connecting"
         case .down: lendWords = "iterate: not lent"
         }
-        let label =
+        let words =
             banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
-            ?? (isInUse ? "iterate: a mind uses this Mac now" : self.isCapturing ? "iterate: your capture runs" : model.record.isRecording ? "iterate: recording into the mind" : isCapturing ? "iterate: microphone or camera on" : lendWords)
+            ?? (isInUse ? "iterate: a mind uses this Mac now" : self.isCapturing ? "iterate: your capture runs" : isCapturing ? "iterate: microphone or camera on" : lendWords)
+        let label = [words, mark.dot.words(tracks: record.tracks.count, pausedBecause: record.pausedBecause)].compactMap { $0 }.joined(separator: ", ")
         button.toolTip = label
         button.setAccessibilityLabel(label)
-        if shown != shownStatusIcon {
-            shownStatusIcon = shown
-            log.info("menu-bar icon: the iterate mark, \(shown)")
+        if mark.name != shownStatusIcon {
+            shownStatusIcon = mark.name
+            log.info("menu-bar icon: the iterate mark, \(mark.name)")
         }
     }
 

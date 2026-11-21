@@ -44,7 +44,14 @@ final class DeviceRecord: ObservableObject {
         RecordSource.allCases.filter { UserDefaults.standard.bool(forKey: "record.\($0.rawValue)") })
     /// The quiet line of state under the switches.
     @Published private(set) var line = "Off"
+    /// A recorder runs (the dot on the mark); it may be paused.
     @Published private(set) var isRecording = false
+    /// The recorder runs and is paused: the Mac is locked or its displays sleep (a ring on the mark).
+    @Published private(set) var isPaused = false
+    /// Why it is paused: the presence, "locked" or "asleep".
+    private(set) var pausedBecause: String?
+    /// The tracks the recorder writes now: "screen-1", "mic-1".
+    private(set) var tracks: [String] = []
 
     var destination: () -> Destination? = { nil }
     /// The device's presence: "active", "idle", "locked", "asleep" (`DeviceEvents.presence`).
@@ -62,10 +69,25 @@ final class DeviceRecord: ObservableObject {
     private var uploaderInput: FileHandle?
     private var uploaderEndedAt = Date.distantPast
     private var uploadFailure: String?
+    private var waiting = 0
     private var pending = ""
     private var timer: Timer?
 
     func isOn(_ source: RecordSource) -> Bool { on.contains(source) }
+
+    /// For `record.state()` on the endpoint (`AppModel` adds the window text).
+    func state() -> [String: Any] {
+        var answer: [String: Any] = [
+            "sources": Dictionary(uniqueKeysWithValues: Self.switches.map { ($0.source.rawValue, on.contains($0.source)) }),
+            "recording": isRecording, "paused": isPaused, "line": line, "tracks": tracks, "waitingSlots": waiting,
+        ]
+        if let uploadFailure, waiting > 0 { answer["uploadFailure"] = uploadFailure }
+        if let recordsTo {
+            answer["mind"] = recordsTo.mind
+            answer["device"] = recordsTo.name
+        }
+        return answer
+    }
 
     func set(_ source: RecordSource, _ value: Bool) {
         UserDefaults.standard.set(value, forKey: "record.\(source.rawValue)")
@@ -149,11 +171,16 @@ final class DeviceRecord: ObservableObject {
         if let uploadFailure, waiting > 0 { parts.append("upload failing: \(uploadFailure)") }
         let line = parts.joined(separator: " · ")
         let isRecording = recorder != nil
+        let isPaused = isRecording && paused
+        let tracks = recorder?.trackIDs ?? []
+        let pausedBecause = isPaused ? presence() ?? "locked" : nil
+        // the mark shows these: it changes with them
+        let markChanges = isRecording != self.isRecording || isPaused != self.isPaused || tracks.count != self.tracks.count || pausedBecause != self.pausedBecause
+        (self.waiting, self.tracks, self.pausedBecause) = (waiting, tracks, pausedBecause)
         if line != self.line { self.line = line }
-        if isRecording != self.isRecording {
-            self.isRecording = isRecording
-            onChange()
-        }
+        if isRecording != self.isRecording { self.isRecording = isRecording }
+        if isPaused != self.isPaused { self.isPaused = isPaused }
+        if markChanges { onChange() }
     }
 
     /// The slots in the spool that wait for the uploader.

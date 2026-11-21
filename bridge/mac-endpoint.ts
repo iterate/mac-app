@@ -21,7 +21,7 @@ import { join } from "node:path";
  *  characters ("a rewrite rule's description is one line: a string of at most 500 chars"), and the
  *  lend then never goes live: keep this well under it. The detail is in `instructions` below. */
 export const description =
-  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, and banners on the screen with buttons (banner.show; call.ring looks like a call). Compute: commands. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
+  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, and banners on the screen with buttons (banner.show; call.ring looks like a call). Compute: commands. A record into the mind: record.state, record.set. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
 
 const socketPath = join(homedir(), "Library/Application Support/voice-meet-mac/endpoint.sock");
 
@@ -178,6 +178,29 @@ type BannerInput = {
   seconds?: number;
 };
 
+/** The switches of the record (`record.set`): each left out stays as it is. */
+type RecordSwitches = {
+  screens?: boolean;
+  cameras?: boolean;
+  mics?: boolean;
+  speakers?: boolean;
+  windowText?: boolean;
+};
+
+/** The record's state (`record.state`), as DeviceRecord.swift and AppModel.swift give it. */
+type RecordState = {
+  sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean };
+  windowText: boolean;
+  recording: boolean;
+  paused: boolean;
+  line: string;
+  tracks: string[];
+  waitingSlots: number;
+  uploadFailure?: string;
+  mind?: string;
+  device?: string;
+};
+
 /** THE PROVIDED OBJECT: what `iterate provide` lends. Each call fails with the app's own words
  *  when the owner has the thing off, does not approve the use, or macOS has not given the app the
  *  permission. */
@@ -189,7 +212,8 @@ export default async function macEndpoint() {
      *  `presence`: whether a person is likely at the Mac now. `idleSeconds` since the last key
      *  press, mouse move or click in any app; `screenLocked` (or another user's session in front);
      *  `displayAsleep` (every display). Idle under a few minutes, not locked and a display awake
-     *  is the sign that a person is likely there; it says nothing of who. */
+     *  is the sign that a person is likely there; it says nothing of who. `record`: the record's
+   *  short state (`record.state()` has all of it). */
     state: () => ask("state"),
     screen: {
       /** One still picture of a whole display, as JPEG bytes. `display` is the number
@@ -244,6 +268,18 @@ export default async function macEndpoint() {
        *  replaces it, but never a call), at most 6 a minute. */
       show: (input: BannerInput) => ask("banner.show", input).then(bannerAnswerOf),
     },
+    record: {
+      /** The record of this Mac into the mind (`/devices/<name>/record/`): which sources are on,
+       *  whether it records or is paused (the Mac is locked or asleep), its tracks, the slots that
+       *  wait for upload. Reading it is no use of the Mac's powers. */
+      state: () => ask("record.state") as Promise<RecordState>,
+      /** Turns sources of the record on or off; returns the new state. Off is always allowed. On is
+       *  a use of that power under the owner's choice, as a snapshot is: Screens and Speakers go by
+       *  every display's, Camera by every camera's, Microphone by the microphone's, Window text by
+       *  the window text's. Off refuses, Ask asks the owner, Shared does it; Activity shows it. The
+       *  sources turned off stay off when a source turned on is then refused. */
+      set: (input: RecordSwitches) => ask("record.set", input) as Promise<RecordState>,
+    },
     call: {
       /** A banner that looks like a call: `from` (who calls; the agent's path when none) and
        *  `reason`, Decline and Accept as round phone buttons, the ring sound, 30 s. Accept opens
@@ -256,7 +292,7 @@ export default async function macEndpoint() {
       return {
         instructions: `${description} Say what you looked at or did, and why.`,
         types:
-          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>;",
+          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean }; record: { recording: boolean; paused: boolean; line: string } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>; record.state(): Promise<RecordState>; record.set(input: { screens?: boolean; cameras?: boolean; mics?: boolean; speakers?: boolean; windowText?: boolean }): Promise<RecordState> (a source turned on is a use under its power's choice; off is always allowed); type RecordState = { sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean }; windowText: boolean; recording: boolean; paused: boolean; line: string; tracks: string[]; waitingSlots: number; uploadFailure?: string; mind?: string; device?: string };",
       };
     },
   };

@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import Combine
+import Record
 import VoiceMeetCore
 
 /// Answers the local endpoint's callers (a mind, through `iterate provide`) from the Mac's screen,
@@ -117,7 +118,12 @@ final class AppModel {
                 },
                 "microphone": microphone.statusLine,
                 "presence": Self.presence().dictionary,
+                "record": ["recording": record.isRecording, "paused": record.isPaused, "line": record.line],
             ]
+        case "record.state":
+            return recordState()
+        case "record.set":
+            return try await setRecord(parameters)
         case "screen.snapshot":
             let display = try Screen.resolve(parameters["display"] as? Int)
             return try await act(display, what: "A still picture of the display \"\(display.title)\".", doing: "Taking a picture of the display “\(display.title)”", did: "Took a picture of the display “\(display.title)”") {
@@ -202,7 +208,7 @@ final class AppModel {
             return [:]
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set."
             )
         }
     }
@@ -210,19 +216,88 @@ final class AppModel {
     /// Refuses a thing that is off or not permitted, asks the person first when its choice is
     /// "Ask", then counts the use, so that the menu bar and the panel show it.
     private func use(_ thing: Shareable, what: String) async throws {
-        let sharing = thing.sharing
-        guard sharing != .off else {
+        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: approval.isApproved(thing) != nil) {
+        case .off:
             throw EndpointRefusal("The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
-        }
-        if let permission = thing.power.permission, !permission.isGranted {
+        case .notPermitted:
             throw EndpointRefusal(
-                "macOS has not given this app \(permission.title). The Mac's owner gives it from the iterate panel, at \(thing.title)."
+                "macOS has not given this app \(thing.power.permission?.title ?? "a permission"). The Mac's owner gives it from the iterate panel, at \(thing.title)."
             )
-        }
-        if sharing == .ask, approval.isApproved(thing) == nil {
+        case .ask:
             try await approval.ask(for: thing, what: what)
+        case .go:
+            break
         }
         count(thing)
+    }
+
+    // MARK: - The record's switches
+
+    /// The record's switches and its state, for `state()` and `record.state()`. Reading it is no use.
+    private func recordState() -> [String: Any] {
+        var answer = record.state()
+        answer["windowText"] = deviceWindow.readsWindowText
+        return answer
+    }
+
+    private var recordOn: Set<RecordSwitch> {
+        var on = Set(record.on.compactMap { RecordSwitch(rawValue: $0.rawValue) })
+        if deviceWindow.readsWindowText { on.insert(.windowText) }
+        return on
+    }
+
+    /// `record.set`: a switch turned off is off at once; a switch turned on is a use of its power,
+    /// under that power's choice in the panel (`use`), for each display or camera it records. The
+    /// switches turned off stay off when a use is then refused; no switch is turned on then.
+    private func setRecord(_ parameters: [String: Any]) async throws -> [String: Any] {
+        var wanted: [RecordSwitch: Bool] = [:]
+        for item in RecordSwitch.allCases {
+            guard let value = parameters[item.rawValue] else { continue }
+            guard let on = value as? Bool else { throw EndpointRefusal("record.set: \(item.rawValue) is true or false.") }
+            wanted[item] = on
+        }
+        let unknown = Set(parameters.keys).subtracting(RecordSwitch.allCases.map(\.rawValue) + ["method"])
+        guard unknown.isEmpty else {
+            throw EndpointRefusal("record.set knows screens, cameras, mics, speakers and windowText, not \(unknown.sorted().joined(separator: ", ")).")
+        }
+        let on = recordOn
+        for item in RecordSwitch.turnedOff(from: on, by: wanted) { setRecordSwitch(item, false) }
+        let turnedOn = RecordSwitch.turnedOn(from: on, by: wanted)
+        for item in turnedOn {
+            let things = recordThings(item)
+            guard !things.isEmpty else { throw EndpointRefusal("This Mac has nothing to \(item.does) now.") }
+            for thing in things {
+                try await use(thing, what: "To \(item.does) into the mind, \(thing.title) among them, until it is switched off in the panel or by a call.")
+            }
+        }
+        for item in turnedOn {
+            setRecordSwitch(item, true)
+            let symbol = DeviceRecord.switches.first { $0.source.rawValue == item.rawValue }?.symbol ?? "text.viewfinder"
+            let act = Shareable(id: "record.\(item.rawValue)", power: .screen, title: item.rawValue, does: item.does, symbol: symbol)
+            let words = item.does.prefix(1).uppercased() + item.does.dropFirst()
+            acts.ended(acts.began(act, doing: "\(words) until switched off", did: "Turned on: \(item.does) until switched off"))
+        }
+        return recordState()
+    }
+
+    private func setRecordSwitch(_ item: RecordSwitch, _ value: Bool) {
+        log.info("endpoint: a caller turns the record's \(item.rawValue) \(value ? "on" : "off")")
+        if item == .windowText {
+            deviceWindow.readsWindowText = value
+        } else if let source = RecordSource(rawValue: item.rawValue) {
+            record.set(source, value)
+        }
+    }
+
+    /// The things whose choice decides a switch: every display for the screens and the speakers
+    /// (the record has them all), every camera, the microphone, the window text.
+    private func recordThings(_ item: RecordSwitch) -> [Shareable] {
+        switch item.power {
+        case "screen": return Screen.displays.map(Shareable.display)
+        case "camera": return Camera.devices.map(Shareable.camera)
+        case "microphone": return [.microphone]
+        default: return [.accessibility]
+        }
     }
 
     /// One act of a caller with `thing`: `use` first, then `body`, and the person sees it in the

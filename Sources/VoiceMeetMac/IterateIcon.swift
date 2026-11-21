@@ -19,27 +19,69 @@ enum IterateIcon {
 
     /// A template image: the system draws it light or dark with the menu bar.
     static let plain = mark(height: menuBarHeight, color: nil)
-    /// The lend at a glance, as Apple's own items show a state: the plain mark while lent; dimmed
-    /// while it connects; dimmed with a slash through it while it is not lent (as `wifi.slash`
-    /// and `mic.slash` do). All are template images, readable in a light and a dark bar.
-    static let connecting = mark(height: menuBarHeight, color: nil, alpha: 0.4)
-    static let down = mark(height: menuBarHeight, color: nil, alpha: 0.4, slash: true)
 
-    static func lend(_ glance: LendGlance) -> NSImage {
-        switch glance {
-        case .live: return plain
-        case .connecting: return connecting
-        case .down: return down
+    /// Each ink of the mark (`MenuBarMark.Ink`), with and without the gap where the record's dot
+    /// sits. The lend at a glance, as Apple's own items show a state: plain while lent; dimmed while
+    /// it connects; dimmed with a slash through it while it is not lent (as `wifi.slash` and
+    /// `mic.slash` do), all template images, readable in a light and a dark bar. Red, orange and
+    /// green are in colour.
+    private static let marks: [String: NSImage] = {
+        var marks: [String: NSImage] = [:]
+        for ink in MenuBarMark.Ink.allCases {
+            for gap in [false, true] {
+                let image: NSImage
+                switch ink {
+                case .green: image = mark(height: menuBarHeight, color: .systemGreen, dotGap: gap)
+                case .red: image = mark(height: menuBarHeight, color: .systemRed, dotGap: gap)
+                case .orange: image = mark(height: menuBarHeight, color: .systemOrange, dotGap: gap)
+                case .live: image = mark(height: menuBarHeight, color: nil, dotGap: gap)
+                case .connecting: image = mark(height: menuBarHeight, color: nil, alpha: 0.4, dotGap: gap)
+                case .down: image = mark(height: menuBarHeight, color: nil, alpha: 0.4, slash: true, dotGap: gap)
+                }
+                marks["\(ink.rawValue)\(gap)"] = image
+            }
+        }
+        return marks
+    }()
+
+    /// The mark's image for `mark`: its ink, with a gap cut where the dot sits when it has one.
+    /// The dot itself is drawn by `RecordDotView` over the image, so that a template image stays
+    /// one: the system draws it light or dark with the bar, and the dot stays red.
+    static func image(_ mark: MenuBarMark) -> NSImage {
+        marks["\(mark.ink.rawValue)\(mark.dot != .none)"] ?? plain
+    }
+
+    // MARK: - The record's dot
+
+    /// The dot's centre in the mark's image (y down), and its sizes. It sits at the lower right,
+    /// beside the foot of the "i", inside the mark's width.
+    static let dotCenter = NSPoint(x: 9.2, y: 10.6)
+    static let dotRadius: CGFloat = 2.3
+    /// The gap cut out of the mark around the dot, so that the dot reads beside every ink.
+    private static let dotGapRadius: CGFloat = 3.3
+    /// The red of macOS's own recording marks.
+    static let dotColor = NSColor.systemRed
+
+    /// Draws the dot around `center`, in the current context: filled while it records, a ring while paused.
+    static func drawDot(_ dot: RecordDot, at center: NSPoint, scale: CGFloat = 1) {
+        let lineWidth = 1.3 * scale
+        switch dot {
+        case .none:
+            return
+        case .recording:
+            let r = dotRadius * scale
+            dotColor.setFill()
+            NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r)).fill()
+        case .paused:
+            let r = dotRadius * scale - lineWidth / 2
+            let ring = NSBezierPath(ovalIn: NSRect(x: center.x - r, y: center.y - r, width: 2 * r, height: 2 * r))
+            ring.lineWidth = lineWidth
+            dotColor.setStroke()
+            ring.stroke()
         }
     }
-    /// While the screen is shared.
-    static let red = mark(height: menuBarHeight, color: .systemRed)
-    /// While only the microphone is on.
-    static let orange = mark(height: menuBarHeight, color: .systemOrange)
-    /// While a banner shows, a call's among them.
-    static let green = mark(height: menuBarHeight, color: .systemGreen)
 
-    static func mark(height: CGFloat, color: NSColor?, alpha: CGFloat = 1, slash: Bool = false) -> NSImage {
+    static func mark(height: CGFloat, color: NSColor?, alpha: CGFloat = 1, slash: Bool = false, dotGap: Bool = false) -> NSImage {
         let glyph = glyph()
         let bounds = glyph.bounds
         let scale = height / bounds.height
@@ -67,6 +109,12 @@ enum IterateIcon {
                 line.lineWidth = 1.3
                 line.stroke()
             }
+            if dotGap {
+                let r = dotGapRadius
+                NSGraphicsContext.current?.compositingOperation = .clear
+                NSBezierPath(ovalIn: NSRect(x: dotCenter.x - r, y: dotCenter.y - r, width: 2 * r, height: 2 * r)).fill()
+                NSGraphicsContext.current?.compositingOperation = .sourceOver
+            }
             return true
         }
         image.isTemplate = color == nil
@@ -75,37 +123,70 @@ enum IterateIcon {
 
     /// Each lend mark on a light and a dark menu bar, as the system tints a template image, 8 times
     /// its size, one PNG each in `folder` (`--render-icons <folder>`), for a look with no Mac bar.
+    /// And `marks-light.png`, `marks-dark.png`: each ink (a row: plain, dimmed, slashed, red,
+    /// orange, green) with each record's dot (a column: none, recording, paused).
     static func render(to folder: URL) -> Bool {
         let zoom: CGFloat = 8
-        let bar = NSSize(width: 40, height: 24)
-        for glance in LendGlance.allCases {
-            for (look, background, ink) in [("light", NSColor(white: 0.93, alpha: 1), NSColor.black), ("dark", NSColor(white: 0.16, alpha: 1), NSColor.white)] {
-                let mark = lend(glance)
-                guard let bitmap = NSBitmapImageRep(
-                    bitmapDataPlanes: nil, pixelsWide: Int(bar.width * zoom), pixelsHigh: Int(bar.height * zoom), bitsPerSample: 8,
-                    samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-                else { return false }
-                NSGraphicsContext.saveGraphicsState()
-                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
-                background.setFill()
-                NSRect(x: 0, y: 0, width: bar.width * zoom, height: bar.height * zoom).fill()
-                // a template image: its alpha, in the bar's ink
-                let size = NSSize(width: mark.size.width * zoom, height: mark.size.height * zoom)
-                let place = NSRect(x: (bar.width * zoom - size.width) / 2, y: (bar.height * zoom - size.height) / 2, width: size.width, height: size.height)
-                let tinted = NSImage(size: size, flipped: false) { rect in
-                    mark.draw(in: rect)
-                    ink.setFill()
-                    rect.fill(using: .sourceAtop)
-                    return true
-                }
-                tinted.draw(in: place)
-                NSGraphicsContext.restoreGraphicsState()
-                guard let png = bitmap.representation(using: .png, properties: [:]),
-                    (try? png.write(to: folder.appendingPathComponent("mark-\(glance.rawValue)-\(look).png"))) != nil
+        let cell = NSSize(width: 40 * zoom, height: 24 * zoom)
+        let inks: [MenuBarMark.Ink] = [.live, .connecting, .down, .red, .orange, .green]
+        for (look, background, ink) in [("light", NSColor(white: 0.93, alpha: 1), NSColor.black), ("dark", NSColor(white: 0.16, alpha: 1), NSColor.white)] {
+            for glance in LendGlance.allCases {
+                let mark = MenuBarMark.of(bannerShows: false, inUse: false, microphoneOrCameraOn: false, glance: glance, isRecording: false, isPaused: false)
+                guard
+                    write(size: cell, to: folder.appendingPathComponent("mark-\(glance.rawValue)-\(look).png"), draw: {
+                        background.setFill()
+                        NSRect(origin: .zero, size: cell).fill()
+                        draw(mark, in: NSRect(origin: .zero, size: cell), zoom: zoom, ink: ink)
+                    })
                 else { return false }
             }
+            let sheet = NSSize(width: cell.width * CGFloat(RecordDot.allCases.count), height: cell.height * CGFloat(inks.count))
+            guard
+                write(size: sheet, to: folder.appendingPathComponent("marks-\(look).png"), draw: {
+                    background.setFill()
+                    NSRect(origin: .zero, size: sheet).fill()
+                    for (row, markInk) in inks.enumerated() {
+                        for (column, dot) in RecordDot.allCases.enumerated() {
+                            let place = NSRect(x: CGFloat(column) * cell.width, y: sheet.height - CGFloat(row + 1) * cell.height, width: cell.width, height: cell.height)
+                            draw(MenuBarMark(ink: markInk, dot: dot), in: place, zoom: zoom, ink: ink)
+                        }
+                    }
+                })
+            else { return false }
         }
         return true
+    }
+
+    /// One mark, centred in `cell`, `zoom` times its size: a template image in the bar's `ink`, a
+    /// coloured one as it is, then the dot, as `RecordDotView` draws it over the button.
+    private static func draw(_ mark: MenuBarMark, in cell: NSRect, zoom: CGFloat, ink: NSColor) {
+        let image = image(mark)
+        let size = NSSize(width: image.size.width * zoom, height: image.size.height * zoom)
+        let place = NSRect(x: cell.midX - size.width / 2, y: cell.midY - size.height / 2, width: size.width, height: size.height)
+        let tinted = NSImage(size: size, flipped: false) { rect in
+            image.draw(in: rect)
+            if image.isTemplate {
+                ink.setFill()
+                rect.fill(using: .sourceAtop)
+            }
+            return true
+        }
+        tinted.draw(in: place)
+        // the image's y runs down; the bitmap's runs up
+        drawDot(mark.dot, at: NSPoint(x: place.minX + dotCenter.x * zoom, y: place.maxY - dotCenter.y * zoom), scale: zoom)
+    }
+
+    private static func write(size: NSSize, to file: URL, draw: () -> Void) -> Bool {
+        guard let bitmap = NSBitmapImageRep(
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height), bitsPerSample: 8,
+            samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { return false }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+        draw()
+        NSGraphicsContext.restoreGraphicsState()
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { return false }
+        return (try? png.write(to: file)) != nil
     }
 
     static func glyph() -> NSBezierPath {
@@ -150,5 +231,38 @@ enum IterateIcon {
             }
         }
         return path
+    }
+}
+
+/// The record's dot over the mark in the menu bar (`IterateIcon.drawDot`). A view of its own on
+/// the status button, so that the mark's template image stays a template.
+final class RecordDotView: NSView {
+    var dot: RecordDot = .none {
+        didSet { if dot != oldValue { needsDisplay = true } }
+    }
+
+    override var isFlipped: Bool { true }
+
+    /// Clicks go to the button under it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        IterateIcon.drawDot(dot, at: NSPoint(x: bounds.midX, y: bounds.midY))
+    }
+
+    /// Puts the view on `button`, its centre where the dot sits in the mark's image (which the
+    /// button centres).
+    static func attach(to button: NSStatusBarButton, imageSize: NSSize) -> RecordDotView {
+        let view = RecordDotView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(view)
+        let side = IterateIcon.dotRadius * 2 + 2
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: side),
+            view.heightAnchor.constraint(equalToConstant: side),
+            view.centerXAnchor.constraint(equalTo: button.centerXAnchor, constant: IterateIcon.dotCenter.x - imageSize.width / 2),
+            view.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: IterateIcon.dotCenter.y - imageSize.height / 2),
+        ])
+        return view
     }
 }
