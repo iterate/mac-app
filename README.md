@@ -112,8 +112,10 @@ of state is one line in the app's log.
 
 The 𝑖 in the menu bar shows the lend at a glance: plain while live, dimmed while it connects or
 reconnects, and dimmed with a slash through it while it is not lent (no mind, stopped, not allowed,
-incompatible). Green, red and orange (a banner, a use, a capture) show over it while they last.
-`--render-icons <folder>` draws each mark on a light and a dark bar.
+incompatible). Green, red and orange (a banner, a use, the microphone or a camera on) show over it
+while they last. A small red dot at its lower right is the record: filled while it records, a ring
+while it is paused, none while it is off. `--render-icons <folder>` draws each mark on a light and
+a dark bar, and `marks-light.png` and `marks-dark.png`: each colour of the mark with each dot.
 
 Needs macOS 14 or later and Node 22.18 or later.
 
@@ -168,6 +170,8 @@ await mac.banner.show({
 }); // { pressed: "Join" }, or { pressed: null, why: "no answer" | "dismissed" | "replaced" | "off", words }
 await mac.call.ring({ agent: "/agents/lunch", from: "Lunch planner", reason: "Friday's table" });
 // { accepted: true }, or { accepted: false, why: "declined" | "no answer" | "replaced" | "off", words }
+await mac.record.state(); // { sources: { screens, cameras, mics, speakers }, windowText, recording, paused, line, tracks, … }
+await mac.record.set({ screens: true, mics: false }); // the new state; "on" is a use, as a snapshot is
 ```
 
 ### Presence
@@ -270,8 +274,19 @@ to a mind, into that mind, and starts again by itself when the app starts. A sou
 permission macOS has not given says so in its row and stays off. Screens and cameras pause as
 soon as the Mac is locked or its displays sleep, and start again by themselves: a paused camera is
 off, its light too. Microphones and speakers go on. The line under the
-switches says what happens ("Recording 4 tracks · 2 slots waiting"), and the 𝑖 in the menu bar is
-orange while the Mac records.
+switches says what happens ("Recording 4 tracks · 2 slots waiting"), and the 𝑖 in the menu bar has
+a red dot at its lower right while the Mac records, a red ring while the record is paused. The
+record does not change the colour of the 𝑖: orange still says that a call or a capture has the
+microphone or a camera on.
+
+A mind's agent reads and sets the same switches: `mac.record.state()` (no use of the Mac's powers)
+and `mac.record.set({ screens, cameras, mics, speakers, windowText })`, which answers the new
+state. Turning a source off is always allowed. Turning one on is a use of its power under your
+choice for it, as a snapshot or a listen is: **Screens** and **Speakers** go by each display's
+choice, **Camera** by each camera's, **Microphone** by the microphone's, **Window text** by the
+window text's. Off refuses, Ask asks you with Touch ID, Shared does it, and Activity shows it
+("Record the screens until switched off"). Your own hand on the panel's switches asks nothing.
+`mac.state()` has the record's short state too (`record: { recording, paused, line }`).
 
 Time is cut into **slots** of 30 seconds on the UTC clock. For each slot each **track**
 (`screen-<display>`, `camera-0`, `mic-0`, `speaker-0`) is one file in the mind's files, named by
@@ -410,7 +425,7 @@ script of the bridge parses. Every push to `main` publishes a version to npm
 ./run-on-mac.sh               # build, install in /Applications, open, follow the logs
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
-swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record
+swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark and record.set's rule
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
 ```
