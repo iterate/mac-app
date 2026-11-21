@@ -1,0 +1,53 @@
+# Every push to main publishes the package to npm as a version that names the commit
+# (`<version>-main.<time>-<commit>`), under the dist-tags `main` and `latest`: the app on a Mac asks
+# npm for `latest` once an hour and updates itself. A commit that changes no published file
+# publishes nothing.
+#
+# npm takes the token from GitHub's OIDC (trusted publishing): the package @iterate-com/mac-app
+# trusts this repository's release.yml on npmjs.com, with "Allow npm publish" and "Allow npm
+# dist-tag".
+name: Release
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - run: npm install -g npm@latest
+      - name: Publish when the packed files changed
+        run: |
+          set -euo pipefail
+          base=$(node -p 'require("./package.json").version')
+          version="$base-main.$(date -u +%Y%m%dT%H%M%SZ)-${GITHUB_SHA::7}"
+          # what latest holds now, packed the same way, without its version and gitHead
+          mkdir -p /tmp/now /tmp/new
+          if npm pack @iterate-com/mac-app@latest --pack-destination /tmp/now >/dev/null 2>&1; then
+            tar -xzf /tmp/now/*.tgz -C /tmp/now
+          fi
+          npm pack --pack-destination /tmp/new >/dev/null
+          tar -xzf /tmp/new/*.tgz -C /tmp/new
+          strip() { node -e 'const p=require(process.argv[1]); delete p.version; delete p.gitHead; console.log(JSON.stringify(p))' "$1"; }
+          if [ -d /tmp/now/package ] \
+            && diff -r -x package.json /tmp/now/package /tmp/new/package >/dev/null \
+            && [ "$(strip /tmp/now/package/package.json)" = "$(strip /tmp/new/package/package.json)" ]; then
+            echo "No published file changed: nothing to publish."
+            exit 0
+          fi
+          npm version --no-git-tag-version "$version" >/dev/null
+          npm publish --access public --tag main --provenance
+          until npm view "@iterate-com/mac-app@$version" version >/dev/null 2>&1; do sleep 10; done
+          npm dist-tag add "@iterate-com/mac-app@$version" latest
+          echo "Published $version as main and latest."

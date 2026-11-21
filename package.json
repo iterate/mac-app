@@ -5,8 +5,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/iterate/packages",
-    "directory": "packages/mac-app"
+    "url": "git+https://github.com/iterate/mac-app"
   },
   "type": "module",
   "bin": {
@@ -30,5 +29,6 @@
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "homepage": "https://github.com/iterate/mac-app#readme"
 }

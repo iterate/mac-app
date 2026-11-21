@@ -400,6 +400,12 @@ Notes from the first runs (macOS 15.7.4, a MacBook Pro):
 
 ## Developing
 
+This repository is the app's home: `git clone https://github.com/iterate/mac-app`, then build and
+install from the checkout with `node cli.mjs update` (or `./run-on-mac.sh`). A pull request is
+checked by `.github/workflows/ci.yml` on a macOS runner: `swift build`, `swift test`, and every
+script of the bridge parses. Every push to `main` publishes a version to npm
+(`.github/workflows/release.yml`), and a Mac that installed from npm updates itself within the hour.
+
 ```sh
 ./run-on-mac.sh               # build, install in /Applications, open, follow the logs
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
