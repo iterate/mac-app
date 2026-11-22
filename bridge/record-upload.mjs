@@ -153,8 +153,10 @@ function put(url, path, contentType) {
   });
 }
 
-/** The largest file that may go through the connection when the signed route fails. */
-const MOST_THROUGH_CONNECTION = 16 * 1024 * 1024;
+/** The largest file that may go through the connection when the signed route fails: below the
+ *  12 MB `r2.put` that the mind once refused, printing its bytes into the error, which reset a
+ *  Durable Object's isolate (21 Nov 2026). A slot's files measured 0.03 to 2 MB. */
+const MOST_THROUGH_CONNECTION = 8 * 1024 * 1024;
 let saidFallback = false;
 
 async function upload(t) {

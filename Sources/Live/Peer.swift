@@ -95,7 +95,9 @@ public final class LivePeer: NSObject, CaptureSink, @unchecked Sendable {
             if signal["want"] as? Bool == true {
                 self.run(self.watchers.want(from: from, who: who, now: now))
             } else if signal["bye"] != nil {
-                self.run(self.watchers.end(from, why: "the watcher left", tell: false, now: now))
+                // the page says why it left ("you turned Live off", "the page was hidden", an error)
+                let reason = (signal["reason"] as? String).map { String($0.prefix(200)) }
+                self.run(self.watchers.end(from, why: reason.map { "the watcher left: \($0)" } ?? "the watcher left", tell: false, now: now))
             } else if let d = signal["description"] as? [String: Any], d["type"] as? String == "answer", let sdp = d["sdp"] as? String {
                 self.run(self.watchers.answer(from: from, sdp: sdp))
             } else if let c = signal["candidate"] as? [String: Any], let line = c["candidate"] as? String, !line.isEmpty,
