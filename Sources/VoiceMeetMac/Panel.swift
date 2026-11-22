@@ -68,6 +68,15 @@ struct Panel: View {
     /// The person presses a button of the banner (its index), or closes it (nil).
     var pressBanner: (Int?) -> Void = { _ in }
     var lendActions = LendActions()
+    /// The height the scrolling middle needs; it is at most `middleMaxHeight`.
+    @State private var middleHeight: CGFloat = 400
+
+    /// The middle's room: the screen's height under the menu bar, less the banner, the lend
+    /// section, the footer and the popover's own margins (about 330 points together).
+    static var middleMaxHeight: CGFloat {
+        let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
+        return max(240, (screen?.visibleFrame.height ?? 900) - 330)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -81,6 +90,11 @@ struct Panel: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
             Divider()
+            // The middle scrolls when the panel would be taller than the screen, so the mind at the
+            // top and Quit at the bottom are always reachable (seen on 22 Nov 2026: with the record's
+            // rows the panel ran past a laptop's screen and its top could not be reached).
+            ScrollView(.vertical) {
+            VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 16) {
                 section("Displays", of: .screen)
                 section("Cameras", of: .camera)
@@ -106,6 +120,13 @@ struct Panel: View {
             ActivityList(log: model.acts, isOpen: $state.isActivityOpen)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
+            }
+            .background(GeometryReader { geometry in
+                Color.clear.preference(key: MiddleHeight.self, value: geometry.size.height)
+            })
+            }
+            .frame(height: min(middleHeight, Panel.middleMaxHeight))
+            .onPreferenceChange(MiddleHeight.self) { middleHeight = $0 }
             Divider()
             HStack(spacing: 12) {
                 Button(state.didCopy ? "Copied" : "Copy Prompt", action: copyPrompt)
@@ -320,6 +341,11 @@ struct Panel: View {
     }
 }
 
+private struct MiddleHeight: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
 extension Panel {
     /// Draws the panel, with the choices as they are stored, to a PNG file. It opens nothing on
     /// screen and starts no capture: a way to look at the interface from a script.
@@ -336,6 +362,12 @@ extension Panel {
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = view
         view.layoutSubtreeIfNeeded()
+        // The scrolling middle learns its height in the first layout: size the window again to it.
+        for _ in 0..<3 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
+            window.setContentSize(view.fittingSize)
+            view.layoutSubtreeIfNeeded()
+        }
         guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
         view.cacheDisplay(in: view.bounds, to: picture)
         guard let png = picture.representation(using: .png, properties: [:]) else { return false }
