@@ -153,6 +153,10 @@ function put(url, path, contentType) {
   });
 }
 
+/** The largest file that may go through the connection when the signed route fails. */
+const MOST_THROUGH_CONNECTION = 16 * 1024 * 1024;
+let saidFallback = false;
+
 async function upload(t) {
   const { device, files } = await connect();
   const payload = JSON.parse(readFileSync(slotFile(t), "utf8"));
@@ -169,7 +173,21 @@ async function upload(t) {
     Promise.all(gone.map(([path]) => files.head(path.slice(1)))),
   ]);
   await Promise.all(
-    present.map(([path, contentType], index) => put(links[index].url, local(path), contentType)),
+    present.map(([path, contentType], index) =>
+      put(links[index].url, local(path), contentType).catch((error) => {
+        // The mind's signed upload route answered 5xx (seen 22 Nov 2026 from 11:35 UTC: every
+        // signed PUT got "error code: 1101" after a platform change to request bodies). A file of
+        // a slot is small, so it then goes through this connection, as bytes: slower, and it holds
+        // the file in memory once on each side. Larger files wait for the route.
+        const size = statSync(local(path)).size;
+        if (!/HTTP 5\d\d/.test(String(error?.message)) || size > MOST_THROUGH_CONNECTION) throw error;
+        if (!saidFallback) say({ fallback: "signed upload failing; files go through the connection" });
+        saidFallback = true;
+        return files.put(path.slice(1), readFileSync(local(path)), { httpMetadata: { contentType } }).then((stored) => {
+          if (stored.size !== size) throw new Error(`${path}: the mind has ${stored.size} bytes, not ${size}`);
+        });
+      }),
+    ),
   );
   const missing = gone.filter((_, index) => !heads[index]).map(([path]) => path);
   if (missing.length) {
