@@ -193,3 +193,36 @@ public struct LiveWatchers: Equatable, Sendable {
         watches.map(\.id).flatMap { end($0, why: why, tell: true, now: now) }
     }
 }
+
+/// The watcher's answer, as the device applies it. A browser answers H.264 at the level it names by
+/// default, often 3.1 (`profile-level-id=42e01f`): 1280×720 at most. A screen is larger (a MacBook
+/// Pro's is 3024×1964), and the encoder then writes a stream that claims level 3.1 and is not: Chrome
+/// decodes it, iOS Safari showed black (22 Nov 2026), while the camera at 1280×720 showed. So the
+/// device reads the answer's H.264 level as at least 5.2 (`…34`: 36,864 macroblocks a frame, up to
+/// 4096×2304), which every phone and Mac of the last years decodes in hardware, and the encoder writes
+/// that level into the stream. A screen above 5.2's frame size (a 5K display) is still too large.
+public enum LiveAnswer {
+    /// The lowest H.264 level the device takes from an answer, in hex: 5.2.
+    public static let lowestH264Level = "34"
+
+    /// `sdp` with every H.264 format's `profile-level-id` level raised to `lowestH264Level` where
+    /// it is lower. Other codecs and other parameters are untouched.
+    public static func raisingH264Level(_ sdp: String) -> String {
+        let lines = sdp.components(separatedBy: "\r\n")
+        let h264 = Set(lines.compactMap { line -> String? in
+            guard line.hasPrefix("a=rtpmap:"), line.uppercased().contains(" H264/") else { return nil }
+            return line.dropFirst("a=rtpmap:".count).split(separator: " ").first.map(String.init)
+        })
+        return lines.map { line -> String in
+            guard line.hasPrefix("a=fmtp:"),
+                let type = line.dropFirst("a=fmtp:".count).split(separator: " ").first.map(String.init),
+                h264.contains(type),
+                let range = line.range(of: #"profile-level-id=[0-9a-fA-F]{6}"#, options: .regularExpression)
+            else { return line }
+            let value = line[range].suffix(6)
+            let level = value.suffix(2)
+            guard let current = Int(level, radix: 16), let lowest = Int(lowestH264Level, radix: 16), current < lowest else { return line }
+            return line.replacingCharacters(in: range, with: "profile-level-id=\(value.prefix(4))\(lowestH264Level)")
+        }.joined(separator: "\r\n")
+    }
+}

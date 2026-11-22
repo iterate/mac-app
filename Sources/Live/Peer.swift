@@ -155,7 +155,8 @@ public final class LivePeer: NSObject, CaptureSink, @unchecked Sendable {
             case let .setAnswer(id, sdp):
                 guard let connection = connections[id] else { continue }
                 connection.remoteSet = false
-                connection.pc.setRemoteDescription(LKRTCSessionDescription(type: .answer, sdp: sdp)) { error in
+                // A screen is larger than the level a browser answers by default (LiveAnswer).
+                connection.pc.setRemoteDescription(LKRTCSessionDescription(type: .answer, sdp: LiveAnswer.raisingH264Level(sdp))) { error in
                     self.work.async {
                         if let error { self.log("live: \(id.prefix(8)): the answer was refused: \(error.localizedDescription)") }
                         connection.remoteSet = true

@@ -126,3 +126,21 @@ final class LiveWatchersTests: XCTestCase {
         XCTAssertEqual(w.watches, [])
     }
 }
+
+final class LiveAnswerTests: XCTestCase {
+    func testRaisesTheH264LevelAndNothingElse() {
+        let answer = [
+            "v=0", "m=video 9 UDP/TLS/RTP/SAVPF 96 98 100",
+            "a=rtpmap:96 H264/90000", "a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f",
+            "a=rtpmap:98 H264/90000", "a=fmtp:98 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=640c34",
+            "a=rtpmap:100 VP8/90000", "a=fmtp:100 profile-level-id=42e01f", "",
+        ].joined(separator: "\r\n")
+        let raised = LiveAnswer.raisingH264Level(answer)
+        XCTAssertTrue(raised.contains("a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e034"))
+        // already high enough: unchanged
+        XCTAssertTrue(raised.contains("profile-level-id=640c34"))
+        // not H.264: unchanged
+        XCTAssertTrue(raised.contains("a=fmtp:100 profile-level-id=42e01f"))
+        XCTAssertEqual(LiveAnswer.raisingH264Level(raised), raised)
+    }
+}
