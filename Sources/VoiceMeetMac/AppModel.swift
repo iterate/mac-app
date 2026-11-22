@@ -37,6 +37,8 @@ final class AppModel {
     let record = DeviceRecord()
     /// The window in front, as events: `device/app-focused`, `device/window-read` (`DeviceWindow`).
     let deviceWindow = DeviceWindow()
+    /// Live: a member's page watches this Mac now (`DeviceLive`).
+    let live = DeviceLive()
     private var presenceWatch: AnyCancellable?
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
@@ -68,11 +70,24 @@ final class AppModel {
         presenceWatch = deviceEvents.$presence.removeDuplicates().sink { [weak self] _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.record.tick() } }
         }
+        record.sink = live.peer
+        live.decide = { [weak self] who in await self?.liveTracks(who: who) ?? ([], "the app is closing") }
+        live.sourcesChanged = { [weak self] sources in
+            guard let self, sources != self.record.live else { return }
+            self.record.live = sources
+            self.record.tick()
+        }
+        live.began = { [weak self] who, tracks in
+            self?.acts.began(.live, doing: "Watched live by \(who)", did: "Watched live by \(who)", detail: LiveSection.words(tracks)) ?? 0
+        }
+        live.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
         record.start()
+        live.start()
     }
 
     func shutDown() {
         endpoint.stop()
+        live.stop()
         acts.stop()
         deviceEvents.stop()
         deviceWindow.stop()
@@ -119,11 +134,21 @@ final class AppModel {
                 "microphone": microphone.statusLine,
                 "presence": Self.presence().dictionary,
                 "record": ["recording": record.isRecording, "paused": record.isPaused, "line": record.line],
+                "live": ["watchers": live.watchers.map(\.who)],
             ]
         case "record.state":
             return recordState()
         case "record.set":
             return try await setRecord(parameters)
+        case "live.state":
+            return live.state()
+        case "live.end":
+            // Ending a watch is no use of the Mac: always allowed.
+            guard let watcher = parameters["watcher"] as? String, live.watchers.contains(where: { $0.id == watcher }) else {
+                throw EndpointRefusal("live.end needs a watcher of live.state(): no such watcher now.")
+            }
+            live.end(watcher, why: "ended by a call to live.end")
+            return live.state()
         case "screen.snapshot":
             let display = try Screen.resolve(parameters["display"] as? Int)
             return try await act(display, what: "A still picture of the display \"\(display.title)\".", doing: "Taking a picture of the display “\(display.title)”", did: "Took a picture of the display “\(display.title)”") {
@@ -208,7 +233,7 @@ final class AppModel {
             return [:]
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end."
             )
         }
     }
@@ -229,6 +254,50 @@ final class AppModel {
             break
         }
         count(thing)
+    }
+
+    // MARK: - Live
+
+    /// The owner changed a choice in the panel: a watch that has a track whose thing is now Off
+    /// (or lost its permission) ends at once. Ask and Shared go on: the watch was approved.
+    func liveChoicesChanged() {
+        let cameras = Camera.devices.map(Shareable.camera)
+        let things = { (track: String) -> [Shareable] in
+            track == "camera-0" ? cameras : track == "mic-0" ? [.microphone] : Screen.displays.filter { "screen-\($0.id)" == track }.map(Shareable.display)
+        }
+        for watcher in live.watchers {
+            let off = watcher.tracks.first { track in things(track).contains { $0.sharing == .off || !$0.isPermitted } }
+            if let off { live.end(watcher.id, why: "the owner turned \(off) off") }
+        }
+    }
+
+    /// The tracks a watcher gets: a watch is a use of each display, the cameras and the
+    /// microphone under their choices, through the same gate as every use (`UseGate`). Off: not
+    /// offered. Ask: one question for the whole watch. Shared: offered. Live shows one camera,
+    /// and goes by every camera's choice, as the record's switch does.
+    private func liveTracks(who: String) async -> (tracks: [String], reason: String) {
+        let gate = { (thing: Shareable) in
+            UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: self.approval.isApproved(thing) != nil)
+        }
+        let cameras = Camera.devices.map(Shareable.camera)
+        let things: [(track: String, things: [Shareable])] =
+            Screen.displays.map { ("screen-\($0.id)", [Shareable.display($0)]) } + [("camera-0", cameras), ("mic-0", [.microphone])]
+        let gates = things.map { (track: $0.track, gate: UseGate.strictest($0.things.map(gate))) }
+        let asked = LiveTracks.asks(gates)
+        var approved = false
+        if asked {
+            let asking = zip(things, gates).filter { $0.1.gate == .ask }.flatMap { $0.0.things }
+            let names = asking.map(\.title).joined(separator: ", ")
+            do {
+                try await approval.ask(for: asking, does: "show this Mac live to \(who)", what: "\(who) wants to watch this Mac live: \(names). It lasts until they leave or you end it in the panel.")
+                approved = true
+            } catch {
+                log.info("live: \(who) is not approved: \(AppLog.describe(error))")
+            }
+        }
+        let tracks = LiveTracks.offered(gates, approved: approved)
+        for (item, _) in zip(things, gates) where tracks.contains(item.track) { item.things.forEach(count) }
+        return (tracks, LiveTracks.nothing(asked: asked, approved: approved))
     }
 
     // MARK: - The record's switches

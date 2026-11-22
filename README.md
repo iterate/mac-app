@@ -255,6 +255,8 @@ CLI's own sign-in; the Mac's key lends and does nothing else):
 | `device/app-focused`      | Always while the Mac is lent: the front app or its window's title changed                                                                                               | `app`, `bundle`, `title`                                      |
 | `device/window-read`      | While **Window text** is ticked under Record: on a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s, only when the text changed | `app`, `title`, `text` (at most 20,000 characters), `trigger` |
 | `record/slot-stored`      | While a switch under **Record** is on: once for each 30 seconds, after its files are in the mind                                                                        | `t`, `tracks` (below)                                         |
+| `device/live-watch-started` | A member's page began to watch this Mac live (below, "Live")                                                                                                          | `watcher`, `who`, `tracks`                                    |
+| `device/live-watch-ended` | The watch ended                                                                                                                                                         | `watcher`, `who`, `seconds`, `why`                            |
 
 A key event holds the key itself, so what you type goes to the mind, a password too. Keyboard and
 mouse is off until you turn it on. Its events are ephemeral: they reach whoever listens at that
@@ -315,6 +317,44 @@ bytes, codec, … } } }`: a video track also has `width`, `height`, `frames`, `p
 offset, ms from the slot's start], …]`, one per fragment), `picture`, and a screen's `x`, `y`,
 `scale`; an audio track has `rate`, `channels`, `rms`, `peak` and `levels` (60 half seconds, in
 dBFS).
+
+## Live: a member watches this Mac now
+
+A member of the mind (or a member's agent) opens the device on `record.<domain>` and presses
+**Watch live**: the page shows the screens, the camera and hears the microphone of this Mac, about
+a tenth of a second behind, peer to peer over WebRTC. The mind carries only the signalling: a few
+ephemeral `device/live-signal` events on `/devices/<name>`. The contract is the mind app's README,
+"Live".
+
+- **Your choices decide.** A watch is a use of each display, the camera and the microphone under
+  your choice for it, as a snapshot is: Off, that track is not offered; Ask, you are asked once
+  for the whole watch (Touch ID); Shared, it is sent. A Mac that may show nothing answers with the
+  reason, and the page shows nothing. There is no switch of its own.
+- **You see it.** While somebody watches, Activity shows "Watched live by <who>" as a running act
+  (the pill stays at the top right), and the panel lists each watcher under **Watched live** with
+  an **End** button. Each watch is also on the device's log in the mind:
+  `device/live-watch-started { watcher, who, tracks }` and
+  `device/live-watch-ended { watcher, who, seconds, why }`.
+- **One capture, two sinks.** The record's own capture feeds live (`CaptureSink` in
+  `Sources/Record`): the same frames, no copy. A source that only live wants starts with the first
+  watcher and stops with the last. While somebody watches, a screen captures 30 frames a second and
+  the record keeps its 10 by time, so its files are the same with or without a watcher.
+- **What a watcher gets:** each display (`screen-<display>`, at its own pixels), one camera
+  (`camera-0`, 1280×720 at most) and one sound (`mic-0`), H.264 in hardware, at most 4 watchers.
+  The page is told to show each picture at once, and the sound is in a stream of its own.
+- **On the same network** the page connects to this Mac directly, and macOS asks once whether
+  iterate may find devices on the local network. From another network it goes through STUN (or
+  TURN, when the mind gives it), and macOS does not ask.
+
+A mind's agent reads and ends watches: `mac.live.state()` (each watcher, its tracks, since when)
+and `mac.live.end({ watcher })`. A watch starts only from a page.
+
+How it is built: `Sources/Live` holds everything that touches WebRTC (LiveKit's build of WebRTC,
+a binary target of `Package.swift`, carried in the bundle's `Contents/Frameworks`). `LivePeer` is
+the sink and one peer connection per watcher; the signalling's rules are `LiveWatchers` in
+`VoiceMeetCore`, tested on their own. `bridge/device-live.mjs` connects to the mind as you,
+subscribes to `device/live-signal`, appends the Mac's signals in order, and asks the facet
+`record` for the ICE servers (STUN alone when it has none).
 
 ## Capture: show an agent what you mean
 
@@ -425,7 +465,7 @@ script of the bridge parses. Every push to `main` publishes a version to npm
 ./run-on-mac.sh               # build, install in /Applications, open, follow the logs
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
-swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark and record.set's rule
+swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
 ```
@@ -441,6 +481,13 @@ A script can also draw a mark in the capture that runs, for a test with no hand:
 permission; `--screens --cameras --mics --speakers` record the real sources, which need the app's
 permissions (run it through the app's `run` method). `node bridge/record-upload.mjs /tmp/spool
 --name test.mac --iterate <iterate.js> --mind <address>` sends a spool to a mind.
+
+`swift build --product live-run` drives live from a terminal with the same libraries and bridge:
+`.build/debug/live-run --device test.mac --node $(which node) --bridge bridge/device-live.mjs --iterate <iterate.js>
+--mind <address> --synthetic --seconds 90` answers every watcher of `/devices/test.mac` with the
+test picture and beep (no switch is asked); `--record <spool>` records them too; `--screens
+--cameras --mics` are the real sources (through the app's `run` method), and `--loopback-only
+--no-stun` keeps the media on this Mac for a watcher here. stderr has a line of statistics a second.
 
 `.build/release/VoiceMeetMac --render-panel panel.png` draws the panel to a file without opening
 anything. A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or

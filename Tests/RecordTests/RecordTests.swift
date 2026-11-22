@@ -247,3 +247,56 @@ final class SpoolTests: XCTestCase {
         XCTAssertTrue(second.opening(track: "screen-1", slot: t + 30_000))
     }
 }
+
+final class CaptureTests: XCTestCase {
+    func testTheRecordKeeps10FramesASecondByTimeOutOf30() {
+        // 30 frames a second for 3 s, with a millisecond of jitter
+        var frames: [Double] = []
+        for n in 0..<90 { frames.append(Double(n) / 30 + (n % 2 == 0 ? 0.001 : -0.001)) }
+        let kept = { (fps: Int) -> [Double] in
+            var last: Double?
+            var kept: [Double] = []
+            for t in frames where CaptureRate.keeps(last: last, now: t, fps: fps) {
+                last = t
+                kept.append(t)
+            }
+            return kept
+        }
+        XCTAssertEqual(kept(10).count, 30)
+        XCTAssertEqual(kept(10).prefix(4).map { ($0 * 1000).rounded() }, [1, 99, 201, 299])
+        // a camera of 30 at 15
+        XCTAssertEqual(kept(15).count, 45)
+        // a clock that went back: kept
+        XCTAssertTrue(CaptureRate.keeps(last: 5, now: 4, fps: 10))
+        XCTAssertEqual(CaptureRate.capture(record: 10, watched: false), 10)
+        XCTAssertEqual(CaptureRate.capture(record: 10, watched: true), 30)
+    }
+
+    func testTheCaptureRunsForTheUnionOfRecordAndLive() {
+        let none: Set<RecordSource> = []
+        // live alone starts a source; the record and live together run it once
+        XCTAssertEqual(CapturePlan.changes(running: none, record: (none, none), live: (none, [.screens, .mics])), [.start(.screens), .start(.mics)])
+        XCTAssertEqual(CapturePlan.changes(running: none, record: (none, [.screens]), live: (none, [.screens])), [.start(.screens)])
+        // the first watcher of a source the record has: faster; the last one leaves: as before
+        XCTAssertEqual(CapturePlan.changes(running: [.screens], record: ([.screens], [.screens]), live: (none, [.screens])), [.rate(.screens)])
+        XCTAssertEqual(CapturePlan.changes(running: [.screens], record: ([.screens], [.screens]), live: ([.screens], none)), [.rate(.screens)])
+        // the last watcher of a source only live wanted: it stops
+        XCTAssertEqual(CapturePlan.changes(running: [.cameras], record: (none, none), live: ([.cameras], none)), [.stop(.cameras)])
+        // the record turned off while somebody watches: its tracks end, the capture goes on
+        XCTAssertEqual(CapturePlan.changes(running: [.screens], record: ([.screens], none), live: ([.screens], [.screens])), [.stopRecording(.screens)])
+        // the record turned on for a source live alone ran: it starts again, with its tracks
+        XCTAssertEqual(CapturePlan.changes(running: [.mics], record: (none, [.mics]), live: ([.mics], [.mics])), [.restart(.mics)])
+        // stops first
+        XCTAssertEqual(
+            CapturePlan.changes(running: [.screens], record: ([.screens], [.cameras]), live: (none, none)), [.stop(.screens), .start(.cameras)])
+        XCTAssertEqual(CapturePlan.changes(running: [.screens], record: ([.screens], [.screens]), live: (none, none)), [])
+    }
+
+    func testTheSourceOfATrack() {
+        XCTAssertEqual(RecordSource.of(track: "screen-1"), .screens)
+        XCTAssertEqual(RecordSource.of(track: "camera-0"), .cameras)
+        XCTAssertEqual(RecordSource.of(track: "mic-0"), .mics)
+        XCTAssertEqual(RecordSource.of(track: "test-2"), .synthetic)
+        XCTAssertNil(RecordSource.of(track: "nothing"))
+    }
+}

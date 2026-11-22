@@ -12,7 +12,7 @@ import ScreenCaptureKit
 final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     private let r: Recorder
     private let queue = DispatchQueue(label: "record.screens")
-    private var streams: [SCStream: (track: VideoTrack, display: CGDirectDisplayID)] = [:]
+    private var streams: [SCStream: (track: VideoTrack, display: CGDirectDisplayID, config: SCStreamConfiguration)] = [:]
     private var tracks: [String: VideoTrack] = [:]
     private var restartPending = false
     private var stopped = false
@@ -62,7 +62,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         let ids = Set(content.displays.map { "screen-\($0.displayID)" })
         for (id, track) in queue.sync(execute: { tracks }) where !ids.contains(id) {
             log("\(id): the display is gone; its track ends")
-            track.end()
+            r.ended(track.id)
         }
         for display in content.displays {
             let id = "screen-\(display.displayID)"
@@ -76,7 +76,8 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             let config = SCStreamConfiguration()
             config.width = Int(width) & ~1
             config.height = Int(height) & ~1
-            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(r.options.fps))
+            let fps = r.captureFps(.screens)
+            config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
             config.showsCursor = true
             // allow-high-entropy-next-line: the name of Apple's pixel format constant, not a secret
             config.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
@@ -88,7 +89,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
                 guard !stopped else { return nil }
                 let track = tracks[id] ?? VideoTrack(id: id, recorder: r)
                 tracks[id] = track
-                streams[stream] = (track, display.displayID)
+                streams[stream] = (track, display.displayID, config)
                 return track
             }) else { return }
             // Global display points and pixels per point, so that a mouse position maps to a screen.
@@ -96,7 +97,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             do {
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
                 try await stream.startCapture()
-                log("\(id): capturing \(config.width)×\(config.height) at up to \(r.options.fps) fps")
+                log("\(id): capturing \(config.width)×\(config.height) at up to \(fps) fps")
             } catch {
                 log("\(id): not started, \(error.localizedDescription)")
                 _ = queue.sync { streams.removeValue(forKey: stream) }
@@ -108,7 +109,17 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         guard type == .screen, let track = streams[stream]?.track, let buffer = sample.imageBuffer else { return }
         let info = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
         guard let raw = info?.first?[.status] as? Int, SCFrameStatus(rawValue: raw) == .complete else { return }
-        track.append(buffer, hostTime: sample.presentationTimeStamp)
+        r.video(track.id, buffer, hostTime: sample.presentationTimeStamp)
+    }
+
+    /// A watcher came or the last one left: each stream captures `fps` frames a second from now on.
+    func rate(_ fps: Int) {
+        for (stream, s) in queue.sync(execute: { streams }) {
+            s.config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+            stream.updateConfiguration(s.config) { error in
+                log("\(s.track.id): \(error.map { "frames a second not changed: \($0.localizedDescription)" } ?? "up to \(fps) fps")")
+            }
+        }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
@@ -174,8 +185,6 @@ final class DeviceCapture: NSObject, Source, AVCaptureVideoDataOutputSampleBuffe
     private let media: AVMediaType
     private var open: [String: (session: AVCaptureSession, track: Track)] = [:]  // by unique id
     private var byOutput: [AVCaptureOutput: (Track, AVCaptureSession)] = [:]
-    /// The time of the last camera frame that was kept, per output.
-    private var lastKept: [AVCaptureOutput: CMTime] = [:]
     private var observers: [NSObjectProtocol] = []
     private let queue: DispatchQueue
 
@@ -258,7 +267,7 @@ final class DeviceCapture: NSObject, Source, AVCaptureVideoDataOutputSampleBuffe
         guard let (session, track) = open.removeValue(forKey: uid) else { return }
         session.stopRunning()
         byOutput = byOutput.filter { $0.value.1 !== session }
-        (track as? VideoTrack)?.end()
+        r.ended(track.id)
         log("\(track.id): the device is gone; its track ends")
     }
 
@@ -266,15 +275,11 @@ final class DeviceCapture: NSObject, Source, AVCaptureVideoDataOutputSampleBuffe
         guard let (track, session) = byOutput[output] else { return }
         // The session's clock is the host clock on macOS; convert anyway, in case it is not.
         let host = CMSyncConvertTime(sample.presentationTimeStamp, from: session.synchronizationClock ?? CMClockGetHostTimeClock(), to: CMClockGetHostTimeClock())
-        if let video = track as? VideoTrack, let buffer = sample.imageBuffer {
-            // At most `cameraFps`: 4 ms of slack, so that every second frame of 30 passes for 15.
-            if let last = lastKept[output], CMTimeGetSeconds(host - last) < 1 / Double(r.options.cameraFps) - 0.004, CMTimeCompare(host, last) >= 0 {
-                return
-            }
-            lastKept[output] = host
-            video.append(buffer, hostTime: host)
-        } else if let audio = track as? AudioTrack {
-            audio.append(sample, hostTime: host)
+        // Every frame to the sinks: the record keeps at most `cameraFps` of them (`RecordSink`).
+        if track is VideoTrack, let buffer = sample.imageBuffer {
+            r.video(track.id, buffer, hostTime: host)
+        } else if track is AudioTrack {
+            r.sound(track.id, sample, hostTime: host)
         }
     }
 
@@ -388,7 +393,7 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .audio, sample.isValid, sample.numSamples > 0 else { return }
         if restarts > 0, ProcessInfo.processInfo.systemUptime - openedAt >= 60 { restarts = 0 }
-        track.append(sample, hostTime: sample.presentationTimeStamp)
+        r.sound(track.id, sample, hostTime: sample.presentationTimeStamp)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {

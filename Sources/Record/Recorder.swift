@@ -1,4 +1,5 @@
 import AppKit
+import CoreMedia
 import Foundation
 
 /// What a recorder may record. Each one is a switch of its own.
@@ -17,6 +18,9 @@ public enum RecordSource: String, CaseIterable, Sendable {
         case .synthetic: return "test-"
         }
     }
+
+    /// The source of a track id: `screen-1` is `screens`.
+    public static func of(track: String) -> RecordSource? { allCases.first { track.hasPrefix($0.prefix) } }
 }
 
 public struct RecordOptions: Sendable {
@@ -55,6 +59,11 @@ public final class Recorder: @unchecked Sendable {
     private var sources: [RecordSource: Source] = [:]
     private var tracks: [Track] = []
     private var paused = false
+    /// What the record wants and what live wants (`watch`): the sources run for both.
+    private var recorded: Set<RecordSource> = []
+    private var watched: Set<RecordSource> = []
+    /// Who gets each frame and sound buffer: the record's own tracks first, then live.
+    private lazy var sinks: [CaptureSink] = [RecordSink(recorder: self)]
     private let control = DispatchQueue(label: "record.control")
     private let slots = DispatchQueue(label: "record.slots")
     private var entries: [Int64: [String: [String: Any]]] = [:]
@@ -70,7 +79,11 @@ public final class Recorder: @unchecked Sendable {
     }
 
     var isPaused: Bool { lock.withLock { paused } }
-    func add(_ track: Track) { lock.withLock { tracks.append(track) } }
+    /// A track writes files only while the record wants its source; one made for live alone is
+    /// not added, so it gets no frame and writes nothing.
+    func add(_ track: Track) {
+        lock.withLock { if recorded.contains(where: { track.id.hasPrefix($0.prefix) }) { tracks.append(track) } }
+    }
     func track(_ id: String) -> Track? { lock.withLock { tracks.first { $0.id == id } } }
 
     /// The ids of the tracks that record now.
@@ -103,35 +116,84 @@ public final class Recorder: @unchecked Sendable {
         log("record: device \(options.device), spool \(options.spool.path), slots sealed up to \(sealed)")
     }
 
-    /// Starts the sources that are in `wanted` and stops the others, each with its tracks: a track
-    /// that stops writes what it has, and its slot is sealed when its other tracks close.
-    public func set(_ wanted: Set<RecordSource>) {
-        control.async {
-            let running = Set(self.lock.withLock { self.sources.keys })
-            for kind in running.subtracting(wanted) {
-                guard let source = self.lock.withLock({ self.sources.removeValue(forKey: kind) }) else { continue }
+    /// The sources the record wants: each records into the spool. A source that live alone wants
+    /// runs, and writes nothing.
+    public func set(_ wanted: Set<RecordSource>) { control.async { self.apply(record: wanted, live: nil) } }
+
+    /// The sources live wants (`Sources/Live`): they run while somebody watches. A screen then
+    /// captures `CaptureRate.live` frames a second; the record keeps its own `fps` of them by time.
+    public func watch(_ wanted: Set<RecordSource>) { control.async { self.apply(record: nil, live: wanted) } }
+
+    /// Another receiver of every frame and sound buffer (live). It gets them on the capture's queue.
+    public func add(sink: CaptureSink) { lock.withLock { sinks.append(sink) } }
+    public func remove(sink: CaptureSink) { lock.withLock { sinks.removeAll { $0 === sink } } }
+
+    /// On `control`: starts and stops the sources by `CapturePlan`. A source that stops takes its
+    /// tracks with it: each writes what it has, and its slot is sealed when its other tracks close.
+    private func apply(record: Set<RecordSource>?, live: Set<RecordSource>?) {
+        let (running, recordBefore, liveBefore) = lock.withLock { (Set(sources.keys), recorded, watched) }
+        let plan = CapturePlan.changes(running: running, record: (recordBefore, record ?? recordBefore), live: (liveBefore, live ?? liveBefore))
+        lock.withLock { (recorded, watched) = (record ?? recordBefore, live ?? liveBefore) }
+        for change in plan {
+            switch change {
+            case .stop(let kind), .restart(let kind):
+                guard let source = lock.withLock({ sources.removeValue(forKey: kind) }) else { continue }
                 source.stop()
-                let stopping = self.lock.withLock { () -> [Track] in
-                    defer { self.tracks.removeAll { $0.id.hasPrefix(kind.prefix) } }
-                    return self.tracks.filter { $0.id.hasPrefix(kind.prefix) }
-                }
-                for track in stopping { track.stop() }
+                endTracks(kind)
                 log("record: \(kind.rawValue) off")
-            }
-            for kind in wanted.subtracting(running) {
-                let source: Source
-                switch kind {
-                case .screens: source = Screens(recorder: self)
-                case .cameras: source = DeviceCapture(recorder: self, media: .video)
-                case .mics: source = DeviceCapture(recorder: self, media: .audio)
-                case .speakers: source = Speakers(recorder: self)
-                case .synthetic: source = Synthetic(recorder: self)
-                }
-                self.lock.withLock { self.sources[kind] = source }
-                source.start()
-                log("record: \(kind.rawValue) on")
+                if case .restart = change { start(kind) }
+            case .start(let kind):
+                start(kind)
+            case .stopRecording(let kind):
+                endTracks(kind)
+                log("record: \(kind.rawValue) off (live goes on)")
+            case .rate(let kind):
+                lock.withLock { sources[kind] }?.rate(captureFps(kind))
             }
         }
+    }
+
+    private func start(_ kind: RecordSource) {
+        let source: Source
+        switch kind {
+        case .screens: source = Screens(recorder: self)
+        case .cameras: source = DeviceCapture(recorder: self, media: .video)
+        case .mics: source = DeviceCapture(recorder: self, media: .audio)
+        case .speakers: source = Speakers(recorder: self)
+        case .synthetic: source = Synthetic(recorder: self)
+        }
+        lock.withLock { sources[kind] = source }
+        source.start()
+        let (records, watches) = lock.withLock { (recorded.contains(kind), watched.contains(kind)) }
+        let fast = watches && (kind == .screens || kind == .synthetic)
+        log("record: \(kind.rawValue) on\(records ? "" : " for live alone")\(fast ? ", watched at \(captureFps(kind)) fps" : "")")
+    }
+
+    /// The tracks of a source stop: each writes what it has.
+    private func endTracks(_ kind: RecordSource) {
+        let stopping = lock.withLock { () -> [Track] in
+            defer { tracks.removeAll { $0.id.hasPrefix(kind.prefix) } }
+            return tracks.filter { $0.id.hasPrefix(kind.prefix) }
+        }
+        for track in stopping { track.stop() }
+    }
+
+    /// The frames a second a screen or the synthetic picture captures now.
+    func captureFps(_ kind: RecordSource) -> Int {
+        CaptureRate.capture(record: options.fps, watched: lock.withLock { watched.contains(kind) })
+    }
+
+    /// Hands a frame to every sink (from a source, on its capture queue).
+    func video(_ track: String, _ frame: CVPixelBuffer, hostTime: CMTime) {
+        for sink in lock.withLock({ sinks }) { sink.video(track, frame, hostTime: hostTime) }
+    }
+
+    func sound(_ track: String, _ sample: CMSampleBuffer, hostTime: CMTime) {
+        for sink in lock.withLock({ sinks }) { sink.sound(track, sample, hostTime: hostTime) }
+    }
+
+    func ended(_ track: String) {
+        for sink in lock.withLock({ sinks }) { sink.ended(track) }
     }
 
     /// The Mac is locked or its displays sleep: screens and cameras pause and start again by
@@ -149,7 +211,7 @@ public final class Recorder: @unchecked Sendable {
 
     /// Stops every source and track, writes what is left and seals every slot.
     public func stop() {
-        set([])
+        control.async { self.apply(record: [], live: []) }
         control.sync {}
         timer?.cancel()
         tickQueue.sync {}
@@ -299,9 +361,12 @@ protocol Source: AnyObject {
     func paused()
     /// After an unlock or a wake: open again what could not open (a locked Mac lists no display).
     func resumed()
+    /// A watcher came or the last one left: a screen captures this many frames a second now.
+    func rate(_ fps: Int)
 }
 
 extension Source {
     func paused() {}
     func resumed() {}
+    func rate(_ fps: Int) {}
 }

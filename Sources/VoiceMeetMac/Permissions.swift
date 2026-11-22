@@ -179,6 +179,9 @@ struct Shareable: Identifiable, Hashable {
     static let speaker = Shareable(id: "speaker", power: .speaker, title: "Speakers", does: "play sound through the speakers", symbol: "speaker.wave.2")
     static let accessibility = Shareable(id: "accessibility", power: .accessibility, title: "Window text", does: "read the window in front", symbol: "text.viewfinder")
     static let commands = Shareable(id: "commands", power: .commands, title: "Commands", does: "run commands", symbol: "terminal")
+    /// A live watch: its act in Activity. It has no switch: the screen, the camera and the
+    /// microphone decide (`AppModel.liveTracks`).
+    static let live = Shareable(id: "live", power: .screen, title: "Live", does: "watch this Mac live", symbol: "eye")
     /// Ask and Shared both show: a button is pressed by the person alone.
     static let banners = Shareable(id: "banners", power: .banners, title: "Banners", does: "show banners on the screen", symbol: "bell.badge")
 
