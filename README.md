@@ -243,7 +243,11 @@ An act that was refused (the thing is off, or you said no) is no act and shows i
 
 A lent Mac has a context of its own in the mind, `/devices/<name>`, with the name of its lend
 (`itx.<name>`). The app adds events there, through `bridge/device-events.mjs`, as you (the iterate
-CLI's own sign-in; the Mac's key lends and does nothing else):
+CLI's own sign-in; the Mac's key lends and does nothing else). When that connection ends (a
+session's sign-in lasts 4 hours, a network goes), the bridge connects again
+(`bridge/mind-connection.mjs`: 1 s, then twice as long, at most 60 s); the events wait meanwhile
+(at most 2,000: the oldest moves and keys go first), go up in order, and the app says its presence
+again:
 
 | Event                     | When                                                                                                                                                                    | Payload                                                       |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
@@ -354,7 +358,9 @@ a binary target of `Package.swift`, carried in the bundle's `Contents/Frameworks
 the sink and one peer connection per watcher; the signalling's rules are `LiveWatchers` in
 `VoiceMeetCore`, tested on their own. `bridge/device-live.mjs` connects to the mind as you,
 subscribes to `device/live-signal`, appends the Mac's signals in order, and asks the facet
-`record` for the ICE servers (STUN alone when it has none).
+`record` for the ICE servers (STUN alone when it has none). It connects again when its connection
+ends, and once a minute it checks that its subscription still hears (an ephemeral
+`device/live-ping` that only it hears); watches that run go on through a reconnect, peer to peer.
 
 ## Capture: show an agent what you mean
 
@@ -457,8 +463,8 @@ Notes from the first runs (macOS 15.7.4, a MacBook Pro):
 
 This repository is the app's home: `git clone https://github.com/iterate/mac-app`, then build and
 install from the checkout with `node cli.mjs update` (or `./run-on-mac.sh`). A pull request is
-checked by `.github/workflows/ci.yml` on a macOS runner: `swift build`, `swift test`, and every
-script of the bridge parses. Every push to `main` publishes a version to npm
+checked by `.github/workflows/ci.yml` on a macOS runner: `swift build`, `swift test`, every
+script of the bridge parses, and the bridges' tests pass (`node --test 'bridge/*.test.mjs'`). Every push to `main` publishes a version to npm
 (`.github/workflows/release.yml`), and a Mac that installed from npm updates itself within the hour.
 
 ```sh
@@ -466,6 +472,7 @@ script of the bridge parses. Every push to `main` publishes a version to npm
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
 swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live
+node --test 'bridge/*.test.mjs'  # the bridges' tests: a fake mind that ends sessions (1008) and subscriptions
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
 ```
