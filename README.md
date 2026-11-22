@@ -8,8 +8,8 @@ a lend reads those lines; the lines for a person go to stderr. See
 [`provide`](https://github.com/iterate/core/blob/main/core/lib/src/cli/README.md#provide) and
 [its states](https://github.com/iterate/core/blob/main/core/lib/src/cli/provide-state.ts).
 
-**This app is one thing built on it, and a starting point.** Copy it, change it, build it from
-your copy: see [Two ways in](#two-ways-in) and [Make your own thing](#make-your-own-thing).
+**This app is one thing built on it, and a starting point.** Clone it, change it, build it from
+your clone: see [Install: clone it](#install-clone-it) and [Make your own thing](#make-your-own-thing).
 
 A Mac's menu-bar app for an [iterate](https://iterate.com) mind. It makes this Mac an endpoint
 device of the mind, which a person is often near. Its inputs are the screen, the camera, the
@@ -17,40 +17,40 @@ microphone and the window in front as text; its outputs, the speakers and banner
 (a call's among them); its compute, commands (AppleScript, Swift, shell). You choose for each thing: **Off**, **Ask** (you
 approve each use with Touch ID) or **Shared**. Everything starts at Off.
 
-## Two ways in
+## Install: clone it
 
-### Own it: copy the source
-
-```sh
-npx @iterate-com/mac-app init                 # into ~/src/iterate-mac-app
-npx @iterate-com/mac-app init ~/src/my-mac    # or a folder you name (new or empty)
-```
-
-`init` copies the source (Swift sources, tests, the bridge, `run-on-mac.sh`, this README) into the
-folder, makes it a git repository with one commit that names the upstream version, and records
-that version in `.iterate-mac-app.json`. Then it builds, installs and lends from that folder, as
-the plain install below does. Change anything there, then build and install it again:
+The way to have this app is a clone of this repository. You own the code: read it, change it, and
+pull what changed here when you want it.
 
 ```sh
-./run-on-mac.sh                      # in the copy: build, install, start the app and its lend again
-npx @iterate-com/mac-app diff        # in the copy: what upstream changed since your version
-npx @iterate-com/mac-app diff --files                # only the files
-npx @iterate-com/mac-app update      # in the copy: upstream's changes on top of yours
+git clone https://github.com/iterate/mac-app ~/src/mac-app
+cd ~/src/mac-app
+node cli.mjs                              # asks for your mind and this Mac's name, builds, installs, lends
+node cli.mjs --mind example.com --name jane.mac --login   # the same with no questions
 ```
 
-An app built from a copy runs what was built: **it does not update itself**, and the panel says
-"Built from ~/src/iterate-mac-app". `update` takes the two versions from npm (the recorded one and
-the newest; `--to <version>` names another) and applies upstream's changes on top of your commits
-with a three-way merge, as one commit; the record moves with it. Where your change and upstream's
-touch the same lines, the file keeps both between `<<<<<<<` and `>>>>>>>`: fix it, `git add` it,
-and `git cherry-pick --continue` (or `--abort` to go back). Commit your own work first: `update`
-refuses a work tree with changes. `--folder <copy>` runs `diff` or `update` from elsewhere.
+After a change of yours, or a `git pull`:
 
-### Just use it
+```sh
+node cli.mjs update                       # build and install again from the clone, with the saved answers
+./run-on-mac.sh                           # or: build, install, open and follow the logs
+```
+
+An app built from a clone runs what was built: **it does not update itself**, and the panel says
+"Built from ~/src/mac-app". You decide when to `git pull`.
+
+### Without a clone: npm
 
 ```sh
 npx @iterate-com/mac-app
 ```
+
+The same app from npm, for a Mac where you only want to use it. It updates itself once an hour
+from npm (below). `npx @iterate-com/mac-app init [folder]` turns it into a copy you own later:
+that copies the source into a git repository of its own, and `diff` and `update` there bring in
+what changed upstream. A clone of this repository does the same with plain `git`.
+
+### What the install does
 
 It asks for your mind's address, the name to lend this Mac under (`itx.<name>`) and whether to
 start at login. Then it:
