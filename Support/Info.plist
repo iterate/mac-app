@@ -32,6 +32,8 @@
 	<string>iterate lets your mind see the camera, and shows it in its menu. You can forbid it in the menu.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>iterate lets your mind hear the microphone. You can forbid it in the menu.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>iterate connects directly to a person of your mind on this network who watches this Mac live. You can forbid the screen, the camera and the microphone in the menu.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>iterate runs commands for your mind; a command may ask another app to do something. You can forbid commands in the menu.</string>
 </dict>

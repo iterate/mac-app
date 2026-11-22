@@ -54,6 +54,11 @@ final class DeviceRecord: ObservableObject {
     private(set) var tracks: [String] = []
 
     var destination: () -> Destination? = { nil }
+    /// The sources live wants now (`DeviceLive`): the recorder runs them too, and writes nothing
+    /// of those the record does not want.
+    var live: Set<RecordSource> = []
+    /// Live's sink of the capture (`LivePeer`): every recorder hands it each frame and buffer.
+    var sink: CaptureSink?
     /// The device's presence: "active", "idle", "locked", "asleep" (`DeviceEvents.presence`).
     var presence: () -> String? = { nil }
     var onChange: () -> Void = {}
@@ -64,6 +69,7 @@ final class DeviceRecord: ObservableObject {
     private var recorder: Recorder?
     private var recordsTo: Destination?
     private var running: Set<RecordSource> = []
+    private var watching: Set<RecordSource> = []
     private var paused = false
     private var uploader: Process?
     private var uploaderInput: FileHandle?
@@ -119,37 +125,46 @@ final class DeviceRecord: ObservableObject {
     /// Every 2 s, at each switch, and at once when the presence changes (`AppModel`).
     func tick() {
         let destination = destination()
-        let wanted = destination == nil ? [] : Set(on.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
+        let permitted = { (sources: Set<RecordSource>) in
+            destination == nil ? [] : Set(sources.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
+        }
+        // the record's switches, and live's watchers: the capture runs for both
+        let wanted = permitted(on), watched = permitted(live)
         // another mind, or none: the record follows the lend
-        if destination != recordsTo || wanted.isEmpty, let old = recorder {
+        if destination != recordsTo || wanted.union(watched).isEmpty, let old = recorder {
             lifecycle.async { old.stop() }
             recorder = nil
-            running = []
+            (running, watching) = ([], [])
         }
         if destination != recordsTo { endUploader() }
         recordsTo = destination
-        if let destination, !wanted.isEmpty {
+        if let destination, !wanted.union(watched).isEmpty {
             if recorder == nil {
                 let recorder = Recorder(options: RecordOptions(spool: Self.spool(for: destination.mind), device: destination.name))
+                if let sink { recorder.add(sink: sink) }
                 lifecycle.async { recorder.start() }
                 self.recorder = recorder
                 paused = false
             }
+            let recorder = recorder!
             if wanted != running {
-                let recorder = recorder!
                 lifecycle.async { recorder.set(wanted) }
                 running = wanted
             }
+            if watched != watching {
+                lifecycle.async { recorder.watch(watched) }
+                watching = watched
+            }
             if let state = presence() {
                 let shouldPause = state == "locked" || state == "asleep"
-                if shouldPause != paused, let recorder {
+                if shouldPause != paused {
                     paused = shouldPause
                     lifecycle.async { recorder.pause(shouldPause) }
                 }
             }
         }
         let waiting = destination.map { Self.waiting(in: Self.spool(for: $0.mind)) } ?? 0
-        if let destination, recorder != nil || waiting > 0 {
+        if let destination, !running.isEmpty || waiting > 0 {
             if uploader == nil, Date().timeIntervalSince(uploaderEndedAt) > 10 { startUploader(destination) }
         } else {
             endUploader()
@@ -161,7 +176,7 @@ final class DeviceRecord: ObservableObject {
         var parts: [String] = []
         if destination == nil {
             parts.append(on.isEmpty ? "Off" : "Waits for the Mac to be lent to a mind")
-        } else if let recorder {
+        } else if let recorder, !running.isEmpty {
             let tracks = recorder.trackIDs.count
             parts.append(paused ? "Paused: \(presence() ?? "locked")" : "Recording \(tracks) track\(tracks == 1 ? "" : "s")")
         } else {
@@ -170,9 +185,9 @@ final class DeviceRecord: ObservableObject {
         if waiting > 0 { parts.append("\(waiting) slot\(waiting == 1 ? "" : "s") waiting") }
         if let uploadFailure, waiting > 0 { parts.append("upload failing: \(uploadFailure)") }
         let line = parts.joined(separator: " · ")
-        let isRecording = recorder != nil
+        let isRecording = recorder != nil && !running.isEmpty
         let isPaused = isRecording && paused
-        let tracks = recorder?.trackIDs ?? []
+        let tracks = isRecording ? recorder?.trackIDs ?? [] : []
         let pausedBecause = isPaused ? presence() ?? "locked" : nil
         // the mark shows these: it changes with them
         let markChanges = isRecording != self.isRecording || isPaused != self.isPaused || tracks.count != self.tracks.count || pausedBecause != self.pausedBecause

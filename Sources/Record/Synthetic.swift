@@ -15,6 +15,7 @@ final class Synthetic: Source {
     private let audio: AudioTrack
     private let queue = DispatchQueue(label: "record.synthetic")
     private var timers: [DispatchSourceTimer] = []
+    private var frames: DispatchSourceTimer?
     private var pool: CVPixelBufferPool?
     private var audioStart = CMTime.zero
     private var samplesMade: Int64 = 0
@@ -33,21 +34,34 @@ final class Synthetic: Source {
 
     func start() {
         audioStart = r.clock.hostNow()
-        every(1.0 / Double(r.options.fps)) { self.frame() }
-        every(0.02) { self.sound() }
-        log("synthetic: test-1 video 1280×720 \(r.options.fps) fps, test-2 audio")
+        let fps = r.captureFps(.synthetic)
+        queue.sync { frames = every(1.0 / Double(fps)) { self.frame() } }
+        timers.append(every(0.02) { self.sound() })
+        log("synthetic: test-1 video 1280×720 \(fps) fps, test-2 audio")
     }
 
-    private func every(_ seconds: Double, _ body: @escaping () -> Void) {
+    private func every(_ seconds: Double, _ body: @escaping () -> Void) -> DispatchSourceTimer {
         let timer = DispatchSource.makeTimerSource(flags: .strict, queue: queue)
         timer.schedule(deadline: .now() + seconds, repeating: seconds, leeway: .milliseconds(1))
         timer.setEventHandler(handler: body)
         timer.resume()
-        timers.append(timer)
+        return timer
+    }
+
+    /// Live watches it, or no longer: the picture is drawn `fps` times a second from now on.
+    func rate(_ fps: Int) {
+        queue.async {
+            guard let old = self.frames else { return }
+            old.cancel()
+            self.frames = self.every(1.0 / Double(fps)) { self.frame() }
+        }
     }
 
     func stop() {
-        for timer in timers { timer.cancel() }
+        queue.sync {
+            for timer in timers + [frames].compactMap({ $0 }) { timer.cancel() }
+            frames = nil
+        }
         queue.sync {}  // a handler that is running now ends before the writers close
     }
 
@@ -79,7 +93,7 @@ final class Synthetic: Source {
             }
         }
         CVPixelBufferUnlockBaseAddress(buffer, [])
-        video.append(buffer, hostTime: host)
+        r.video(video.id, buffer, hostTime: host)
     }
 
     private func sound() {
@@ -115,6 +129,6 @@ final class Synthetic: Source {
             var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(raw.count), mData: raw.baseAddress))
             return CMSampleBufferSetDataBufferFromAudioBufferList(sample, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, bufferList: &list) == noErr
         }
-        if ok { audio.append(sample, hostTime: host) }
+        if ok { r.sound(audio.id, sample, hostTime: host) }
     }
 }

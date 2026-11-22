@@ -131,6 +131,7 @@ sign_with_local_identity() {
   list_signing_keychain add || return 1
   trap 'list_signing_keychain remove' EXIT
   signed=0
+  codesign --force --sign "$signing_name" "$app/Contents/Frameworks/LiveKitWebRTC.framework" 2>/dev/null || signed=1
   codesign --force --sign "$signing_name" "$app" 2>/dev/null || signed=1
   list_signing_keychain remove
   trap - EXIT
@@ -142,6 +143,7 @@ sign_app() {
     echo "Signed with the local certificate \"$signing_name\": permissions stay through rebuilds."
     return 0
   fi
+  codesign --force --sign - "$app/Contents/Frameworks/LiveKitWebRTC.framework"
   codesign --force --sign - "$app"
   echo "Signed ad hoc: macOS asks for the microphone again after each rebuild."
 }
@@ -239,6 +241,11 @@ if [ -n "${ITERATE_MAC_APP_VERSION:-}" ]; then
 fi
 mkdir -p "$app/Contents/Resources"
 cp Support/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+# Live's WebRTC library (Package.swift, LiveKitWebRTC): a framework beside the executable, found
+# through an @rpath. ditto keeps the framework's symbolic links.
+mkdir -p "$app/Contents/Frameworks"
+ditto "$bin_path/LiveKitWebRTC.framework" "$app/Contents/Frameworks/LiveKitWebRTC.framework"
+install_name_tool -add_rpath "@executable_path/../Frameworks" "$app/Contents/MacOS/iterate"
 sign_app
 
 echo "Built $(pwd)/$app"

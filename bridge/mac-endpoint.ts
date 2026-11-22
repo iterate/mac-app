@@ -21,7 +21,7 @@ import { join } from "node:path";
  *  characters ("a rewrite rule's description is one line: a string of at most 500 chars"), and the
  *  lend then never goes live: keep this well under it. The detail is in `instructions` below. */
 export const description =
-  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, and banners on the screen with buttons (banner.show; call.ring looks like a call). Compute: commands. A record into the mind: record.state, record.set. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
+  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, and banners on the screen with buttons (banner.show; call.ring looks like a call). Compute: commands. A record into the mind: record.state, record.set. Live: live.state, live.end. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
 
 const socketPath = join(homedir(), "Library/Application Support/voice-meet-mac/endpoint.sock");
 
@@ -201,6 +201,12 @@ type RecordState = {
   device?: string;
 };
 
+/** Who watches this Mac live now (`live.state`), as DeviceLive.swift gives it. */
+type LiveState = {
+  watchers: { watcher: string; who: string; tracks: string[]; since: number }[];
+  signalling: boolean;
+};
+
 /** THE PROVIDED OBJECT: what `iterate provide` lends. Each call fails with the app's own words
  *  when the owner has the thing off, does not approve the use, or macOS has not given the app the
  *  permission. */
@@ -280,6 +286,15 @@ export default async function macEndpoint() {
        *  sources turned off stay off when a source turned on is then refused. */
       set: (input: RecordSwitches) => ask("record.set", input) as Promise<RecordState>,
     },
+    live: {
+      /** Who watches this Mac live now: each watcher's id, who it is (an email or a name), its
+       *  tracks (`screen-<display>`, `camera-0`, `mic-0`) and since when (Unix ms). A watch starts
+       *  from a member's page (record.<domain>), never from here; the owner's choices for the
+       *  screen, the camera and the microphone decide what it gets. Reading it is no use. */
+      state: () => ask("live.state") as Promise<LiveState>,
+      /** Ends one watch now: the page hears `bye`. Always allowed. */
+      end: (input: { watcher: string }) => ask("live.end", input) as Promise<LiveState>,
+    },
     call: {
       /** A banner that looks like a call: `from` (who calls; the agent's path when none) and
        *  `reason`, Decline and Accept as round phone buttons, the ring sound, 30 s. Accept opens
@@ -292,7 +307,7 @@ export default async function macEndpoint() {
       return {
         instructions: `${description} Say what you looked at or did, and why.`,
         types:
-          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean }; record: { recording: boolean; paused: boolean; line: string } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>; record.state(): Promise<RecordState>; record.set(input: { screens?: boolean; cameras?: boolean; mics?: boolean; speakers?: boolean; windowText?: boolean }): Promise<RecordState> (a source turned on is a use under its power's choice; off is always allowed); type RecordState = { sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean }; windowText: boolean; recording: boolean; paused: boolean; line: string; tracks: string[]; waitingSlots: number; uploadFailure?: string; mind?: string; device?: string };",
+          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean }; record: { recording: boolean; paused: boolean; line: string }; live: { watchers: string[] } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>; record.state(): Promise<RecordState>; record.set(input: { screens?: boolean; cameras?: boolean; mics?: boolean; speakers?: boolean; windowText?: boolean }): Promise<RecordState> (a source turned on is a use under its power's choice; off is always allowed); live.state(): Promise<LiveState>; live.end(input: { watcher: string }): Promise<LiveState> (ends a watch; always allowed); type LiveState = { watchers: { watcher: string; who: string; tracks: string[]; since: number }[]; signalling: boolean }; type RecordState = { sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean }; windowText: boolean; recording: boolean; paused: boolean; line: string; tracks: string[]; waitingSlots: number; uploadFailure?: string; mind?: string; device?: string };",
       };
     },
   };

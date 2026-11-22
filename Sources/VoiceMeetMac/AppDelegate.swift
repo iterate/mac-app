@@ -72,6 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return DeviceRecord.Destination(node: config.node, iterateBin: config.iterateBin, uploader: uploader, mind: mind.mind, name: mind.name)
         }
         model.record.onChange = { [weak self] in self?.stateDidChange() }
+        model.live.destination = { [weak self] in
+            guard let config = self?.lend.config, let mind = config.activeMind else { return nil }
+            let script = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("device-live.mjs").path
+            return DeviceLive.Destination(node: config.node, iterateBin: config.iterateBin, script: script, mind: mind.mind, name: mind.name)
+        }
         model.banners.onChange = { [weak self] in self?.stateDidChange() }
         model.start()
         lend.isBusy = { [weak self] in
@@ -314,6 +319,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func choiceChanged() {
         log.info("sharing: " + Shareable.all.map(Self.line).joined(separator: "; "))
         stateDidChange()
+        model.liveChoicesChanged()
         if popover.isShown { syncPreviews() }
         // A thing was turned on whose permission macOS has not given: the guide starts.
         if let permission = Shareable.all.first(where: { $0.sharing != .off && !$0.isPermitted })?.power.permission,

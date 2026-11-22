@@ -86,6 +86,7 @@ struct Panel: View {
                 section("Cameras", of: .camera)
                 section("This Mac", of: .microphone, .speaker, .banners, .accessibility, .commands)
                 DeviceEventsSection(events: model.deviceEvents)
+                LiveWatching(live: model.live)
                 RecordSection(record: model.record, window: model.deviceWindow, allow: allow)
             }
             .padding(.horizontal, 16)
@@ -393,4 +394,13 @@ private struct LayerView: NSViewRepresentable {
     }
 
     func updateNSView(_ view: NSView, context: Context) {}
+}
+
+/// The panel's live watchers: nothing while nobody watches.
+private struct LiveWatching: View {
+    @ObservedObject var live: DeviceLive
+
+    var body: some View {
+        if !live.watchers.isEmpty { LiveSection(live: live) }
+    }
 }

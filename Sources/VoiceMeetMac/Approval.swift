@@ -26,14 +26,20 @@ final class Approval {
 
     /// Returns when the person approved; throws the refusal a caller reads when they did not.
     func ask(for thing: Shareable, what: String) async throws {
+        try await ask(for: [thing], does: thing.does, what: what)
+    }
+
+    /// One question for several things (a live watch: the screens, the camera, the microphone).
+    /// "Approve for 30 Minutes" holds for each of them.
+    func ask(for things: [Shareable], does: String, what: String) async throws {
         // One question at a time: a second caller waits for the first answer, which may cover it.
         while isAsking { try await Task.sleep(nanoseconds: 200_000_000) }
-        if isApproved(thing) != nil { return }
+        if things.allSatisfy({ isApproved($0) != nil }) { return }
         isAsking = true
         defer { isAsking = false }
 
         let alert = NSAlert()
-        alert.messageText = "Your mind wants to \(thing.does)"
+        alert.messageText = "Your mind wants to \(does)"
         alert.informativeText = what
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "Approve Once")
@@ -50,23 +56,23 @@ final class Approval {
 
         guard answer == .alertFirstButtonReturn || answer == .alertSecondButtonReturn else {
             let words = answer == .alertThirdButtonReturn ? "denied it" : "gave no answer in \(Int(Self.patience)) seconds"
-            log.info("to \(thing.does): the person \(words)")
-            throw EndpointRefusal("The Mac's owner \(words) to \(thing.does).")
+            log.info("to \(does): the person \(words)")
+            throw EndpointRefusal("The Mac's owner \(words) to \(does).")
         }
         do {
-            let reason = "approve that your mind may \(thing.does)"
+            let reason = "approve that your mind may \(does)"
             guard try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) else {
-                throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(thing.does).")
+                throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(does).")
             }
         } catch let refusal as EndpointRefusal {
             throw refusal
         } catch {
-            log.info("to \(thing.does): no confirmation: \(AppLog.describe(error))")
-            throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(thing.does).")
+            log.info("to \(does): no confirmation: \(AppLog.describe(error))")
+            throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(does).")
         }
         if answer == .alertSecondButtonReturn {
-            approvedUntil[thing.id] = Date().addingTimeInterval(Self.window)
+            for thing in things { approvedUntil[thing.id] = Date().addingTimeInterval(Self.window) }
         }
-        log.info("to \(thing.does): the person approved \(answer == .alertSecondButtonReturn ? "for 30 minutes" : "this one use")")
+        log.info("to \(does): the person approved \(answer == .alertSecondButtonReturn ? "for 30 minutes" : "this one use")")
     }
 }
