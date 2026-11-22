@@ -45,6 +45,8 @@ final class DeviceLive: ObservableObject {
     private var bridge: LiveBridge?
     private var bridgeTo: Destination?
     private var bridgeEndedAt = Date.distantPast
+    /// The bridge's word: its connection to the mind is up (`{ connected }`).
+    private var isSignalling = false
     private var acts: [String: Int] = [:]
     private var timer: Timer?
 
@@ -100,7 +102,7 @@ final class DeviceLive: ObservableObject {
     func state() -> [String: Any] {
         [
             "watchers": watchers.map { ["watcher": $0.id, "who": $0.who, "tracks": $0.tracks, "since": Int($0.since.timeIntervalSince1970 * 1000)] },
-            "signalling": bridge != nil,
+            "signalling": bridge != nil && isSignalling,
         ]
     }
 
@@ -110,20 +112,24 @@ final class DeviceLive: ObservableObject {
         if destination != bridgeTo, let old = bridge {
             peer.endAll(why: "the Mac is no longer lent to this mind")
             old.stop()
-            (bridge, bridgeTo, bridgeEndedAt) = (nil, nil, Date())
+            (bridge, bridgeTo, bridgeEndedAt, isSignalling) = (nil, nil, Date(), false)
         }
         guard let destination, bridge == nil, Date().timeIntervalSince(bridgeEndedAt) > 10 else { return }
         let made = LiveBridge(
             node: destination.node, script: destination.script,
             arguments: [destination.name, "--iterate", destination.iterateBin, "--mind", destination.mind], peer: peer)
-        made.said = { line in AppLog("live").info("bridge: \(line)") }
+        made.said = { [weak self] line in
+            AppLog("live").info("bridge: \(line)")
+            guard let up = line["connected"] as? Bool else { return }
+            DispatchQueue.main.async { MainActor.assumeIsolated { if self?.bridge === made { self?.isSignalling = up } } }
+        }
         made.exited = { [weak self] status in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     guard let self, self.bridge === made else { return }
                     self.log.info("the bridge ended (status \(status))")
                     self.peer.endAll(why: "the signalling stopped")
-                    (self.bridge, self.bridgeTo, self.bridgeEndedAt) = (nil, nil, Date())
+                    (self.bridge, self.bridgeTo, self.bridgeEndedAt, self.isSignalling) = (nil, nil, Date(), false)
                 }
             }
         }

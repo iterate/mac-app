@@ -5,7 +5,8 @@ import VoiceMeetCore
 /// back, as JSON lines.
 ///
 /// - from the bridge: `{ signal: { from, want | description | candidate | bye }, who }`,
-///   `{ iceServers: [...] }`, and `{ failed }` for the log;
+///   `{ iceServers: [...] }`, `{ connected: true | false, failed? }` (the signalling is up or
+///   down), and `{ failed }` for the log;
 /// - to the bridge: `{ signal: { to, description, tracks } | { to, candidate } | { to, bye, reason } }`,
 ///   `{ started: { watcher, who, tracks } }` and `{ ended: { watcher, who, seconds, why } }`.
 public final class LiveBridge: @unchecked Sendable {
@@ -13,7 +14,7 @@ public final class LiveBridge: @unchecked Sendable {
     private let input = Pipe()
     private let lock = NSLock()
     private var pending = ""
-    /// A line of the bridge for the log: `{ failed }`, `{ connected }`.
+    /// A line of the bridge for the log: `{ failed }`, and `{ connected: true | false }`.
     public var said: ([String: Any]) -> Void = { _ in }
     public var exited: (Int32) -> Void = { _ in }
 

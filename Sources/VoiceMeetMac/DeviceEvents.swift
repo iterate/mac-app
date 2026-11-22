@@ -52,6 +52,7 @@ final class DeviceEvents: ObservableObject {
     private var input: FileHandle?
     private var publishesTo: Destination?
     private var pending = ""
+    private var wasDown = false
     private var timer: Timer?
     private var monitors: [Any] = []
     private var lastMoveAt = Date.distantPast
@@ -225,6 +226,16 @@ final class DeviceEvents: ObservableObject {
                 if failure != why { log.error("not published: \(why)") }
                 failure = why
             }
+            // the bridge connected again: the mind hears the presence of now, not of before
+            if let up = said["connected"] as? Bool {
+                if up, wasDown {
+                    log.info("connected again")
+                    failure = nil
+                    presence = nil
+                    tick()
+                }
+                wasDown = !up
+            }
         }
     }
 
@@ -234,6 +245,7 @@ final class DeviceEvents: ObservableObject {
         publisher = nil
         publishesTo = nil
         presence = nil
+        wasDown = false
     }
 }
 
