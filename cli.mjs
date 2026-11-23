@@ -254,10 +254,9 @@ function buildApp() {
 
 /** The iterate CLI at one pinned version, in the app's own folder: npm's cache may be cleared, and
  *  `latest` moves with every release. A new version of this package pins the newest again: the one
- *  `main` names. Main's publish (scripts/ci/npm-publish.ts) publishes every package under `main`
- *  before it moves any `latest`, so when this package's `latest` is new, `iterate@main` is the CLI
- *  from the same commit or a newer one. `iterate@latest` may still be the one before: the app reads
- *  `iterate provide --json`, which that one may not have. */
+ *  `main` names. iterate/private's main publishes the CLI under `main` before it moves `latest`, so
+ *  `iterate@latest` may still be the one before: the app reads `iterate provide --json`, which that
+ *  one may not have. */
 function installIterateCli(config) {
   const wanted =
     config.iterateVersion && config.version === version

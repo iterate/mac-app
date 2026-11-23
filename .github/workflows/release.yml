@@ -1,7 +1,8 @@
 # Every push to main publishes the package to npm as a version that names the commit
-# (`<version>-main.<time>-<commit>`), under the dist-tags `main` and `latest`: the app on a Mac asks
-# npm for `latest` once an hour and updates itself. A commit that changes no published file
-# publishes nothing.
+# (`<version>-main.<time>-<commit>`), under the dist-tag `latest`: the app on a Mac asks npm for
+# `latest` once an hour and updates itself. A commit that changes no published file publishes
+# nothing. The publish sets `latest` itself, so the job does not wait for npm to serve the version
+# (npm took up to 56 minutes on 22 Nov 2026).
 #
 # npm takes the token from GitHub's OIDC (trusted publishing): the package @iterate-com/mac-app
 # trusts this repository's release.yml on npmjs.com, with "Allow npm publish" and "Allow npm
@@ -47,7 +48,10 @@ jobs:
             exit 0
           fi
           npm version --no-git-tag-version "$version" >/dev/null
-          npm publish --access public --tag main --provenance
-          until npm view "@iterate-com/mac-app@$version" version >/dev/null 2>&1; do sleep 10; done
-          npm dist-tag add "@iterate-com/mac-app@$version" latest
-          echo "Published $version as main and latest."
+          # npm asks for --tag with a prerelease version
+          npm publish --access public --tag latest --provenance
+          echo "Published $version as latest."
+          # releases before this one also set `main`; nothing reads it
+          if [ -n "$(npm view @iterate-com/mac-app dist-tags.main)" ]; then
+            npm dist-tag rm @iterate-com/mac-app main
+          fi
