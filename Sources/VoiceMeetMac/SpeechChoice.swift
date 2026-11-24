@@ -80,16 +80,13 @@ final class SpeechChoice: ObservableObject {
     }
 }
 
-/// The panel's speech section: the model, under a click the list of models (each with its size,
+/// The panel's speech row, under the action buttons: the model, under a click the list of models (each with its size,
 /// and whether it is on this Mac), and what keeps fn dictation from working.
 struct SpeechSection: View {
     @ObservedObject var choice: SpeechChoice
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("SPEECH")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.secondary)
             trigger
             if choice.isOpen {
                 list.transition(.opacity.combined(with: .move(edge: .top)))
@@ -115,12 +112,10 @@ struct SpeechSection: View {
             choice.isOpen.toggle()
         } label: {
             HStack(spacing: 10) {
-                Image(systemName: "waveform").font(.system(size: 14)).frame(width: 20).foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(choice.chosen.name).lineLimit(1)
-                    Text(status(of: choice.chosen) ?? "Dictation, the input and captures, on this Mac")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
+                Image(systemName: "waveform").font(.system(size: 13)).frame(width: 18).foregroundStyle(.secondary)
+                Text("Speech: \(choice.chosen.name)").font(.system(size: 12)).lineLimit(1)
+                Text(status(of: choice.chosen) ?? "on this Mac")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             }

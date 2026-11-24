@@ -2,18 +2,21 @@ import AppKit
 import SwiftUI
 
 /// The mind this Mac is lent to, at the top of the panel: its avatar with the lend's dot, its name,
-/// its address and this Mac's name there. A click opens the list of the minds under it (the active
-/// one has a check mark), then Add a Mind and Remove a Mind. A click on another mind lends this
-/// Mac to it (`LendActions.use`).
+/// its address and this Mac's name there, and at the right the lend's phase in two lines. A click
+/// opens the list of the minds under it (the active one has a check mark and its phase), then Add
+/// a Mind and Remove a Mind, and Reconnect Now while the lend has no block of its own (live or
+/// connecting). A click on another mind lends this Mac to it (`LendActions.use`).
 struct MindSwitcher: View {
     let lend: LendView
     @Binding var isOpen: Bool
     let actions: LendActions
     /// The lend's phase as a colour: the dot on the active mind's avatar.
     let dot: Color
+    /// The colour of the phase's name at the right.
+    var phaseColor: Color = .secondary
 
-    private static let avatar: CGFloat = 32
-    private static let rowAvatar: CGFloat = 24
+    private static let avatar: CGFloat = 34
+    private static let rowAvatar: CGFloat = 26
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -33,20 +36,31 @@ struct MindSwitcher: View {
         } label: {
             HStack(spacing: 10) {
                 if let active {
-                    MindLabel(mind: active.mind, size: Self.avatar, note: "itx.\(active.name)", badge: dot)
+                    MindLabel(mind: active.mind, size: Self.avatar, note: "itx.\(active.name)", badge: dot, titleSize: 15)
                 } else {
                     Circle()
-                        .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.2, dash: [3, 3]))
+                        .fill(Palette.fill)
                         .frame(width: Self.avatar, height: Self.avatar)
+                        .overlay(Image(systemName: "plus").font(.system(size: 14, weight: .medium)).foregroundStyle(.secondary))
                     VStack(alignment: .leading, spacing: 1) {
                         Text(lend.minds.isEmpty ? "No mind yet" : "Lent to no mind")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(lend.minds.isEmpty ? "Add a mind to lend this Mac to" : "Choose the mind to lend this Mac to")
-                            .font(.system(size: 11))
+                            .font(.system(size: 15, weight: .semibold))
+                        Text(lend.minds.isEmpty ? "This Mac is lent to no mind" : "Choose the mind to lend this Mac to")
+                            .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
                 }
                 Spacer(minLength: 8)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text(lend.words.title)
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(phaseColor)
+                    Text(lend.words.detail)
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                .lineLimit(1)
+                .fixedSize()
                 Image(systemName: "chevron.up.chevron.down")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.secondary)
@@ -54,6 +68,11 @@ struct MindSwitcher: View {
         }
         .buttonStyle(SwitcherRowStyle(isSelected: isOpen))
         .help("The mind this Mac is lent to: one at a time")
+    }
+
+    /// Reconnect Now is the list's last entry while the lend shows no block with its own.
+    private var reconnectsHere: Bool {
+        active != nil && (lend.phase == "live" || lend.phase == "connecting")
     }
 
     private var list: some View {
@@ -73,6 +92,10 @@ struct MindSwitcher: View {
                         HStack(spacing: 8) {
                             MindLabel(mind: mind.mind, size: Self.rowAvatar, note: "itx.\(mind.name)")
                             Spacer(minLength: 8)
+                            // the state of the active mind alone: the app knows no other's (HANDOFF 8.2)
+                            if mind.mind == lend.active {
+                                Text(lend.words.title).font(.system(size: 12)).foregroundStyle(phaseColor)
+                            }
                             Image(systemName: "checkmark")
                                 .font(.system(size: 12, weight: .semibold))
                                 .opacity(mind.mind == lend.active ? 1 : 0)
@@ -106,6 +129,17 @@ struct MindSwitcher: View {
                 .menuIndicator(.hidden)
                 .buttonStyle(SwitcherRowStyle())
                 .disabled(lend.isCommandRunning)
+            }
+            if reconnectsHere {
+                Button {
+                    isOpen = false
+                    actions.reconnect()
+                } label: {
+                    actionLabel("Reconnect Now", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(SwitcherRowStyle())
+                .help("Ends the connection, and starts the lend again at once")
+                .accessibilityIdentifier("panel.reconnect")
             }
         }
         .padding(4)
@@ -172,9 +206,10 @@ extension MindSwitcher {
         var drawn = true
         for (isOpen, open) in [(false, "closed"), (true, "open")] {
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                let view = MindSwitcher(lend: lend, isOpen: .constant(isOpen), actions: LendActions(), dot: .green)
-                    .frame(width: 398)
-                    .padding(16)
+                let view = MindSwitcher(lend: lend, isOpen: .constant(isOpen), actions: LendActions(), dot: .green, phaseColor: Palette.liveText)
+                    .frame(width: Panel.width - 12)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 6)
                     .background(Color(nsColor: .windowBackgroundColor))
                 drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("switcher-\(open)-\(tone).png")) && drawn
             }

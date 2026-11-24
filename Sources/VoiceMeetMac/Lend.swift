@@ -441,6 +441,19 @@ final class Lend {
 
     static var clock: (Date) -> String { AppEnvironment.current.clock }
 
+    /// A time of day to the minute, for the panel's "since 14:01" and "until 14:32": UTC and a
+    /// fixed form in a drawing, as `clock`.
+    static var shortClock: (Date) -> String {
+        guard AppEnvironment.current.isRendering else { return { $0.formatted(date: .omitted, time: .shortened) } }
+        return { date in
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(identifier: "UTC")
+            formatter.dateFormat = "HH:mm"
+            return formatter.string(from: date)
+        }
+    }
+
     private static func describe(_ event: LendEvent) -> String {
         switch event {
         case .started: return "started"

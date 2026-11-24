@@ -28,13 +28,22 @@ final class DeviceEvents: ObservableObject {
     /// The person's choice: keyboard and mouse events go to the mind.
     @Published var sharesInput = AppEnvironment.current.defaults.bool(forKey: "device.input") {
         didSet {
+            guard !isDrawing else { return }
             AppEnvironment.current.defaults.set(sharesInput, forKey: "device.input")
             watchInput()
         }
     }
     /// The person's choice: those events are kept in the mind's log. Off: they are ephemeral.
     @Published var keepsInput = AppEnvironment.current.defaults.bool(forKey: "device.keep") {
-        didSet { AppEnvironment.current.defaults.set(keepsInput, forKey: "device.keep") }
+        didSet { if !isDrawing { AppEnvironment.current.defaults.set(keepsInput, forKey: "device.keep") } }
+    }
+    /// A drawing's: the choices are set, and nothing is stored or watched.
+    private var isDrawing = false
+
+    /// For a drawing (`Rendering`): the choices as given, with no monitor and no stored value.
+    func fixForDrawing(sharesInput: Bool, keepsInput: Bool) {
+        isDrawing = true
+        (self.sharesInput, self.keepsInput) = (sharesInput, keepsInput)
     }
     /// How many events went to the mind in this run, and the last failure, for the panel.
     @Published private(set) var sent = 0
@@ -227,52 +236,68 @@ final class DeviceEvents: ObservableObject {
     }
 }
 
-/// The panel's rows for the device's events.
+/// The panel's "Events to the mind": at the title's right what always goes (the presence, and the
+/// app in front with its window's title), and in the card the one choice, keyboard and mouse.
 struct DeviceEventsSection: View {
     @ObservedObject var events: DeviceEvents
+    /// macOS has not given Accessibility: no key arrives.
+    let accessibilityMissing: Bool
+    let allow: (Permission) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("EVENTS TO THE MIND").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Image(systemName: "person.wave.2").font(.system(size: 14)).frame(width: 20).foregroundStyle(Color.accentColor)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Presence")
-                    Text(events.presence.map { "Now: \($0). Each change is an event." } ?? "Idle, active, locked, asleep: when the Mac is lent")
-                        .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                Text("Always").font(.caption).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 7) {
+            SectionTitle(title: "Events to the mind") {
+                Text("Presence and the app in front: always")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .help(help)
             }
-            HStack(spacing: 10) {
-                Image(systemName: "keyboard").font(.system(size: 14)).frame(width: 20).foregroundStyle(events.sharesInput ? Color.accentColor : Color.secondary)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text("Keyboard and mouse")
-                    Text("Every key you type, click, move and scroll").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Card(padding: 10) {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "keyboard")
+                        .font(.system(size: 14))
+                        .frame(width: 30, height: 18)
+                        .foregroundStyle(events.sharesInput ? Palette.redText : Color.secondary)
+                    VStack(alignment: .leading, spacing: 4) {
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text("Keyboard and mouse").font(.system(size: 13))
+                            Text(events.sharesInput ? "Every key goes to the mind, a password too" : "Every key you type, click, move and scroll")
+                                .font(.system(size: 11))
+                                .foregroundStyle(events.sharesInput ? Palette.redText : Color.secondary)
+                                .lineLimit(1)
+                        }
+                        if events.sharesInput {
+                            Toggle("Keep these events in the mind's log", isOn: $events.keepsInput)
+                                .toggleStyle(.checkbox)
+                                .font(.system(size: 12))
+                                .accessibilityIdentifier("device.keep")
+                                .help("Off: an event reaches whoever listens at that moment, and is in no log")
+                            if accessibilityMissing {
+                                MissingPermission(words: "macOS has not allowed Accessibility yet: no key arrives") { allow(.accessibility) }
+                                    .padding(.top, 2)
+                            }
+                        }
+                        if let failure = events.failure {
+                            Text("Not published: \(failure)")
+                                .font(.system(size: 11))
+                                .foregroundStyle(Palette.waitText)
+                                .lineLimit(2)
+                                .textSelection(.enabled)
+                        }
+                    }
+                    Spacer(minLength: 6)
+                    Toggle("", isOn: $events.sharesInput).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                        .accessibilityIdentifier("device.input")
                 }
-                Spacer(minLength: 8)
-                Toggle("", isOn: $events.sharesInput).toggleStyle(.switch).controlSize(.small).labelsHidden()
-                    .accessibilityIdentifier("device.input")
-            }
-            if events.sharesInput {
-                Toggle("Keep these events in the mind's log", isOn: $events.keepsInput)
-                    .toggleStyle(.checkbox)
-                    .accessibilityIdentifier("device.keep")
-                    .font(.caption)
-                    .padding(.leading, 30)
-                    .help("Off: an event reaches whoever listens at that moment, and is in no log")
-                if !Permission.accessibility.isGranted {
-                    Label("macOS has not allowed Accessibility yet: no key arrives", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption).foregroundStyle(.orange).padding(.leading, 30)
-                }
-            }
-            if let path = events.path {
-                Text(events.failure.map { "Not published: \($0)" } ?? "\(path) · \(events.sent) sent")
-                    .font(.caption)
-                    .foregroundStyle(events.failure == nil ? Color.secondary : Color.orange)
-                    .lineLimit(2)
-                    .textSelection(.enabled)
             }
         }
+    }
+
+    /// The context and its count, for the title's help.
+    private var help: String {
+        let what = "The presence (idle, active, locked, asleep), and the app in front with its window's title, go to the mind always while the Mac is lent."
+        guard let path = events.path else { return what }
+        return "\(what) \(path) · \(events.sent) sent\(events.presence.map { " · now \($0)" } ?? "")"
     }
 }

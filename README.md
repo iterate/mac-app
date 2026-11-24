@@ -79,8 +79,11 @@ npx @iterate-com/mac-app uninstall                                    # quit and
 
 This Mac can know several minds, each with its own key (`keys/<mind>.key`). The app lends it to
 one of them, the active one. The top of the panel is the mind switcher: the active mind's icon
-(with the lend's dot), its name, its address and this Mac's name there. A click lists the minds,
-with a check mark on the active one, then **Add a Mind…** and **Remove a Mind…**. It does the same
+(with the lend's dot), its name, its address and this Mac's name there, and at the right the
+lend's phase. A click lists the minds, with a check mark and the phase on the active one (the app
+knows no other mind's), then **Add a Mind…**, **Remove a Mind…**, and **Reconnect Now** while the
+lend is live or connecting. With no mind at all, the panel says how to add one, and only
+dictation works. It does the same
 as these commands (a switch and a removal the app writes into config.json itself, as the CLI does;
 **Add a Mind…** runs the CLI's `add`):
 
@@ -102,10 +105,12 @@ own words, unsigned, so the address is always shown beside it.
 
 ### The lend's state
 
-The panel says what the lend does, with its reason and time: **Connecting**, **Live** since when,
-**Reconnecting** (the attempt, the next try, the last failure in the CLI's words), **Stopped** (the
-lend process ended; when it starts again) or **Not allowed** (no member allowed the key, or it was
-removed: the link to allow it). **Reconnect Now** ends a wait or an attempt and starts at once; the
+The panel says what the lend does at the right of the mind: **Connecting** or **Live** since when
+(orange, green), **Reconnecting** with its attempt (orange), **Stopped**, **Not allowed** or
+**Incompatible** (red). While it is held up, a block under the mind has the reason in the CLI's
+words: the next try and the last failure, why the process ended and when it starts again, the link
+where a member allows the key, or the command that updates the CLI with **Copy Command**. **Reconnect
+Now** (in the block, or the switcher's last entry) ends a wait or an attempt and starts at once; the
 app does the same when the Mac wakes from sleep, and when the network comes back to a lend that is
 not live. Opening the panel does it too, for a lend that waits for its next start (stopped,
 refused, or the CLI between its tries); one that is connecting or live is left alone. Every change
@@ -243,9 +248,11 @@ Each act of a mind with this Mac shows twice:
   with the mind's face: "Running a command" with the command's words, "Taking a picture of the
   display", "Listening to the microphone for 5 s". The 𝑖 in the menu bar is red for that time. The
   pill is in no picture or recording of the screen, so a mind's own screenshot does not show it.
-- **In the panel.** "Activity" opens a list of the last acts with their times, how long each took,
-  and the reason when one failed. Its first line is the context it shows: `/devices/<name>` on the
-  mind, and the presence that context heard last.
+- **In the panel.** "Activity" shows the two newest acts and the count. **All** shows the Activity
+  page in place of the panel's middle (its back button returns): the last acts with their times,
+  how long each took, and the reason when one failed. Its first line is the context it shows:
+  `/devices/<name>` on the mind, and the presence that context heard last. In "A mind can use", the
+  row of a thing whose act runs says "running" in red, and a thing a watcher gets "watched".
 
 The list is a view of the device's context in the mind (below), not a store of the app. Each act
 is two kept events there, `device/act-started` and `device/act-ended`, by one act id; the list
@@ -260,9 +267,9 @@ mind. A start with no end in the context is an act that the app's end cut short.
 another context: the list starts empty and reads that one.
 
 The pill's × hides it until the next act begins, also while a long act runs on. "Show each act
-on the screen", in the open Activity list, turns the pill off; the list and the red 𝑖 stay.
+on the screen", on the Activity page, turns the pill off; the list and the red 𝑖 stay.
 An act that was refused (the thing is off, or you said no) is no act and shows in neither.
-`--render-activity <folder>` draws the pill and the list to PNG files, with sample acts.
+`--render-activity <folder>` draws the pill and the page to PNG files, with sample acts.
 
 ## What the Mac tells its mind: `/devices/<name>`
 
@@ -303,8 +310,9 @@ them away from its main thread, so an app that does not answer holds nothing up.
 
 ## The record: what the Mac saw and heard, in the mind
 
-The panel's **Record** group has a switch for each of **Screens**, **Camera**, **Microphone** and
-**Speakers**: all off until you turn one on, and remembered. The Mac records only while it is lent
+The panel's **Record into the mind** has a switch for each of **Screens**, **Camera**, **Microphone**,
+**Speakers** and **Window text**: all off until you turn one on, and remembered. A switch that is
+on is red; one that is on and held off by a permission macOS has not given is orange. The Mac records only while it is lent
 to a mind, into that mind, and starts again by itself when the app starts. A source whose
 permission macOS has not given says so in its row and stays off. Screens and cameras pause as
 soon as the Mac is locked or its displays sleep, and start again by themselves: a paused camera is
@@ -364,8 +372,8 @@ ephemeral `device/live-signal` events on `/devices/<name>`. The contract is the 
   for the whole watch (Touch ID); Shared, it is sent. A Mac that may show nothing answers with the
   reason, and the page shows nothing. There is no switch of its own.
 - **You see it.** While somebody watches, Activity shows "Watched live by <who>" as a running act
-  (the pill stays at the top right), and the panel lists each watcher under **Watched live** with
-  an **End** button. Each watch is also on the device's log in the mind:
+  (the pill stays at the top right), and the panel shows each watcher first under the mind, in a
+  red row, with an **End** button. Each watch is also on the device's log in the mind:
   `device/live-watch-started { watcher, who, tracks }` and
   `device/live-watch-ended { watcher, who, seconds, why }`.
 - **One capture, two sinks.** The record's own capture feeds live (`CaptureSink` in
@@ -471,7 +479,7 @@ echo '{"job":"capture","capture":"<id>","folder":"<folder>","finish":true}' \
 
 ## Input: say or type what you want to a mind
 
-Press **⌥⇧Space** in any app (or **Open** at the bottom of the panel). One bar opens, and it
+Press **⌥⇧Space** in any app (or **Input** in the panel). One bar opens, and it
 listens: talk, type, or both, and press **Return**. That is all the bar knows: it has no commands
 and no list of actions. What happens with your words is the mind's own matter.
 
@@ -498,7 +506,8 @@ Return closes the bar at once. One input goes at a time: while it goes, the bar 
 no new one. The input goes up as you, as a capture does: the job `input` of that mind's process
 (`bridge/input.mjs`) uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
 (no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
-reason, and Return sends the same input again. The panel's last line says how the last one ended.
+reason, and Return sends the same input again. The line under the panel's three buttons says how
+the newest of the last capture, input and dictation ended, in orange when it failed.
 
 **What the mind gets.** Each file is a file of the mind, and then ONE event is on the context
 `/devices/<name>` (the name of this Mac in that mind):
@@ -532,7 +541,7 @@ write", "hands-free · tap fn to stop").
 
 - **fn needs Accessibility.** The app reads fn from the keyboard's modifier keys in every app,
   which macOS gives only to an app with Accessibility (the permission that also writes the text
-  for you). Without it, the panel's speech section says so, with a button for the guide. macOS
+  for you). Without it, the panel's speech row says so, with a button for the guide. macOS
   can act on 🌐 too (the emoji picker, or its own dictation): when System Settings › Keyboard ›
   "Press 🌐 key to" is not "Do Nothing", the panel says to set it. The app changes no setting.
 - **One listening at a time.** Dictation and the input bar share one microphone listening
@@ -573,8 +582,8 @@ write", "hands-free · tap fn to stop").
 - **How the text goes in.** The text is put on the clipboard, ⌘V is pressed for you, and the
   clipboard gets back what it held. That needs the **Accessibility** permission. Without it the
   text stays on the clipboard, and the app opens the guide for the permission.
-- **Permissions.** The microphone, at the first use. The panel's last lines say how the last
-  dictation ended. `app.log` holds counts and times, never the words.
+- **Permissions.** The microphone, at the first use. The line under the panel's three buttons
+  says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
 
 While you talk, the text is written again twice a second from the stretch of speech that is going.
 A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final:
@@ -680,7 +689,9 @@ test picture and beep (no switch is asked); `--record <spool>` records them too;
 
 `.build/release/VoiceMeetMac --render-panel panel.png` draws the panel to a file without opening
 anything, with fixed minds, things and clock (see "Testing with no hand"). A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or
-`not-allowed`; `ringing` draws a call's banner at the top. `--render-banner banner.png ring`
+`not-allowed`, `incompatible`; `ringing` draws a call's banner at the top; `busy` (watched,
+recording, an act that runs), `blocked` (Screen Recording and Accessibility not given), `activity`
+(the Activity page) and `no-mind` draw the panel's own states. `--render-banner banner.png ring`
 draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearance);
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
@@ -731,7 +742,7 @@ connection, as the endpoint's; a mind never reaches it.
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
-`activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
+`activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
 `capture.discard`, `speech.model` (the speech model's row) and `speech.model.<id>` (a model in its list). The tree is read in the app's own process and needs no permission of macOS; to
 have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an
 assistive app does.
@@ -761,7 +772,8 @@ fails it, antialiasing does not; the pixel differences are reported, and a pictu
 
 **The scenarios.** `node harness/run.mjs <scenario|ci|all>` runs the app that `swift build` made
 (`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:
-`boot` (the panel opens, the tree has its controls, a segment is pressed), `input-send` (a text
+`boot` (the panel opens, the tree has its controls, a segment is pressed), `panel-pages` (**All**
+shows the Activity page, and its back button the main page), `input-send` (a text
 typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `activity` (a
 command run through the endpoint is `device/act-started` and `device/act-ended` in the fake mind,
 and `ui.state` shows its row once, echoed from the context), `record-upload` (a slot that waits in

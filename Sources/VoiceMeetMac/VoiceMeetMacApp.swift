@@ -19,7 +19,8 @@ enum VoiceMeetMacApp {
         }
         // A copy started only to draw the panel to a PNG file, for a look at it with no click.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-panel"), CommandLine.arguments.indices.contains(flag + 1) {
-            // an optional third word draws the lend in that phase: live, reconnecting, stopped, not-allowed
+            // an optional third word draws that phase (`Panel.renderPhases`): the lend's (live, reconnecting,
+            // stopped, not-allowed, incompatible), or the panel's own (ringing, busy, blocked, activity, no-mind)
             let phase = CommandLine.arguments.indices.contains(flag + 2) ? CommandLine.arguments[flag + 2] : nil
             exit(Panel.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1]), phase: phase) ? 0 : 1)
         }

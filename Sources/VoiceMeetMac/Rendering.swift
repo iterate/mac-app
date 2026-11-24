@@ -32,17 +32,90 @@ enum Rendering {
     /// Where the drawn app came from.
     static let source = UpdateSource.of(spec: "@iterate-com/mac-app", copy: nil, version: "0.1.0").line(home: "/Users/jane")
 
-    /// The things of a Mac with one display and one camera. Speakers are Shared and commands Ask:
-    /// neither needs a permission of macOS, so the drawing does not depend on this Mac's.
-    static var things: [Shareable] {
-        Shareable.speaker.sharing = .shared
-        Shareable.commands.sharing = .ask
-        return [
+    /// The things of a Mac with one display and one camera, each with the choice `sharing` gives
+    /// it (Off when it gives none), stored in the drawing's own home.
+    static func things(_ sharing: [String: Sharing] = [:]) -> [Shareable] {
+        let things: [Shareable] = [
             Shareable(id: "screen.1", power: .screen, title: "Built-in Retina Display", does: "see the display \"Built-in Retina Display\"", symbol: "display"),
             Shareable(id: "camera.fixture", power: .camera, title: "FaceTime HD Camera", does: "see the camera \"FaceTime HD Camera\"", symbol: "video"),
             .microphone, .speaker, .banners, .accessibility, .commands,
         ]
+        for thing in things { thing.sharing = sharing[thing.id] ?? .off }
+        return things
     }
+
+    /// The panel's state in one of `Panel.renderPhases`: the choices, the permissions, the notes,
+    /// the last result, and what watches, records and runs.
+    @MainActor
+    struct Sample {
+        var things: [Shareable]
+        var missing: Set<Permission> = []
+        var approvals: [String: Date] = [:]
+        var uses: [String: Int] = [:]
+        var lastResult: PanelState.LastResult?
+        let phase: String
+
+        init(phase: String) {
+            self.phase = phase
+            switch phase {
+            case "busy":
+                things = Rendering.things([
+                    "screen.1": .shared, "camera.fixture": .ask, "microphone": .shared, "accessibility": .shared, "speaker": .shared,
+                    "banners": .shared, "commands": .ask,
+                ])
+                approvals = ["camera.fixture": Rendering.now.addingTimeInterval(30 * 60)]
+                uses = ["accessibility": 12]
+                lastResult = .init(what: "Last capture", line: "Sent to iterate.example.com at 14:01:40, and copied", failed: false)
+            case "blocked":
+                things = Rendering.things([
+                    "screen.1": .shared, "accessibility": .shared, "speaker": .shared, "banners": .shared, "commands": .ask,
+                ])
+                missing = [.screenRecording, .accessibility]
+                lastResult = .init(
+                    what: "Last dictation", line: "12 words are on the clipboard (14:01:52): iterate needs Accessibility to write them for you",
+                    failed: true)
+            default:
+                things = Rendering.things([
+                    "screen.1": .ask, "accessibility": .shared, "speaker": .shared, "banners": .shared, "commands": .ask,
+                ])
+                uses = ["accessibility": 3]
+                lastResult = .init(what: "Last input", line: "Sent to iterate.example.com at 14:01:05", failed: false)
+            }
+        }
+
+        /// What watches, records and runs, on the drawing's model.
+        func fix(_ model: AppModel) {
+            switch phase {
+            case "busy":
+                model.live.fixForDrawing([
+                    DeviceLive.Watcher(id: "w1", who: "Misha", tracks: ["screen-0", "mic-0"], since: Rendering.now.addingTimeInterval(-100))
+                ])
+                model.deviceEvents.fixForDrawing(sharesInput: true, keepsInput: true)
+                model.record.fixForDrawing(on: [.screens, .cameras, .mics, .speakers], line: "Recording 4 tracks · 2 slots waiting", isRecording: true)
+            case "blocked":
+                model.deviceEvents.fixForDrawing(sharesInput: true, keepsInput: false)
+                model.record.fixForDrawing(on: [.screens], line: "Off", isRecording: false)
+            default:
+                break
+            }
+        }
+    }
+
+    /// The drawings' picture of the display, 60 × 38 pixels: a menu bar and two windows.
+    static let displayPicture: CGImage = {
+        let width = 60, height = 38
+        let context = CGContext(
+            data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        context.setFillColor(CGColor(red: 0.36, green: 0.45, blue: 0.62, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(CGColor(gray: 0.92, alpha: 1))
+        context.fill(CGRect(x: 0, y: height - 4, width: width, height: 4))
+        context.fill(CGRect(x: 5, y: 8, width: 30, height: 22))
+        context.setFillColor(CGColor(gray: 0.75, alpha: 1))
+        context.fill(CGRect(x: 38, y: 5, width: 18, height: 16))
+        return context.makeImage()!
+    }()
 
     /// The minds' faces: the first one's name and a drawn icon, the second one's name alone. No network.
     static func fixFaces() {
@@ -106,7 +179,7 @@ enum Rendering {
     /// the banners and the menu-bar marks.
     static func renderAll(to folder: URL) -> Bool {
         var drawn = true
-        for phase in ["connecting", "live", "reconnecting", "stopped", "not-allowed", "ringing"] {
+        for phase in Panel.renderPhases {
             for (dark, tone) in [(false, "light"), (true, "dark")] {
                 drawn = Panel.render(to: folder.appendingPathComponent("panel-\(phase)-\(tone).png"), phase: phase, dark: dark) && drawn
             }

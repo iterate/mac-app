@@ -76,6 +76,11 @@ final class DeviceRecord: ObservableObject {
 
     func isOn(_ source: RecordSource) -> Bool { on.contains(source) }
 
+    /// For a drawing (`Rendering`): switches and a state as given, with no recorder and nothing stored.
+    func fixForDrawing(on: Set<RecordSource>, line: String, isRecording: Bool) {
+        (self.on, self.line, self.isRecording) = (on, line, isRecording)
+    }
+
     /// For `record.state()` on the endpoint (`AppModel` adds the window text).
     func state() -> [String: Any] {
         var answer: [String: Any] = [
@@ -231,55 +236,81 @@ final class DeviceRecord: ObservableObject {
     }
 }
 
-/// The panel's group "Record": a switch for each source, the window text, and one line of state.
+/// The panel's "Record into the mind": five switches in one row (the four sources, and the window
+/// text), red while on, orange while on and held off by a permission macOS has not given; at the
+/// title's right whether it records; under the row the record's line and what is missing.
 struct RecordSection: View {
     @ObservedObject var record: DeviceRecord
     @ObservedObject var window: DeviceWindow
+    /// The permissions of macOS that are not given.
+    let missing: Set<Permission>
     let allow: (Permission) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("RECORD").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
-            ForEach(DeviceRecord.switches) { item in
-                row(item.title, id: "record.\(item.source.rawValue)", symbol: item.symbol, permission: item.permission, isOn: Binding(
-                    get: { record.isOn(item.source) }, set: { record.set(item.source, $0) }))
+        let held = DeviceRecord.switches.filter { record.isOn($0.source) && missing.contains($0.permission) }
+        let windowHeld = window.readsWindowText && missing.contains(.accessibility)
+        VStack(alignment: .leading, spacing: 7) {
+            SectionTitle(title: "Record into the mind") { state }
+            HStack(spacing: 6) {
+                ForEach(DeviceRecord.switches) { item in
+                    chip(item.title, symbol: item.symbol, id: "record.\(item.source.rawValue)", isOn: record.isOn(item.source),
+                         isHeld: held.contains { $0.source == item.source }) { record.set(item.source, $0) }
+                }
+                chip("Window text", symbol: "text.viewfinder", id: "record.windowText", isOn: window.readsWindowText, isHeld: windowHeld) {
+                    window.readsWindowText = $0
+                }
+                .help("On a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s. Never of a password manager.")
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Toggle("Window text: the text of the window in front", isOn: $window.readsWindowText)
-                    .toggleStyle(.checkbox)
-                    .accessibilityIdentifier("record.windowText")
-                    .help("On a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s. Never of a password manager.")
-                Text("The app in front and its window's title go to the mind always, while the Mac is lent.")
-                    .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            if let line { Text(line).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled).padding(.horizontal, 2) }
+            ForEach(held) { item in
+                MissingPermission(words: "\(item.title) is off: macOS has not allowed \(item.permission.title)") { allow(item.permission) }
             }
-            .font(.caption)
-            .padding(.leading, 30)
-            if window.readsWindowText, !Permission.accessibility.isGranted { missing(.accessibility) }
-            Text(record.line).font(.caption).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled)
+            if windowHeld {
+                MissingPermission(words: "Window text is off: macOS has not allowed Accessibility") { allow(.accessibility) }
+            }
         }
     }
 
-    private func row(_ title: String, id: String, symbol: String, permission: Permission, isOn: Binding<Bool>) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                Image(systemName: symbol).font(.system(size: 14)).frame(width: 20)
-                    .foregroundStyle(isOn.wrappedValue && permission.isGranted ? Color.accentColor : Color.secondary)
-                Text(title)
-                Spacer(minLength: 8)
-                Toggle("", isOn: isOn).toggleStyle(.switch).controlSize(.small).labelsHidden().accessibilityIdentifier(id)
+    /// "Off", or a red dot and "Recording", or a red ring and "Paused".
+    @ViewBuilder
+    private var state: some View {
+        if record.isRecording {
+            HStack(spacing: 5) {
+                if record.isPaused {
+                    Circle().strokeBorder(Color.red, lineWidth: 1.5).frame(width: 8, height: 8)
+                } else {
+                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                }
+                Text(record.isPaused ? "Paused" : "Recording")
             }
-            if isOn.wrappedValue, !permission.isGranted { missing(permission) }
+            .font(.system(size: 12))
+            .foregroundStyle(Palette.redText)
+        } else {
+            Text("Off").font(.system(size: 12)).foregroundStyle(.secondary)
         }
     }
 
-    /// A source with no permission says so in its row and stays off.
-    private func missing(_ permission: Permission) -> some View {
-        HStack(spacing: 8) {
-            Label("Off: macOS has not allowed \(permission.title)", systemImage: "exclamationmark.triangle.fill")
-                .font(.caption).foregroundStyle(.orange)
-            Spacer()
-            Button("Allow…") { allow(permission) }.controlSize(.small)
+    /// The record's line, when it says more than the title: "4 tracks · 2 slots waiting".
+    private var line: String? {
+        var line = record.line
+        if line == "Off" { return nil }
+        if line.hasPrefix("Recording ") { line = String(line.dropFirst("Recording ".count)) }
+        return line
+    }
+
+    private func chip(_ title: String, symbol: String, id: String, isOn: Bool, isHeld: Bool, set: @escaping (Bool) -> Void) -> some View {
+        Button {
+            set(!isOn)
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: symbol).font(.system(size: 13))
+                Text(title).font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.85)
+            }
         }
-        .padding(.leading, 30)
+        .buttonStyle(TileStyle(tint: isHeld ? .held : isOn ? .on : nil))
+        .accessibilityIdentifier(id)
+        .accessibilityLabel(title)
+        .accessibilityValue(isOn ? "on" : "off")
+        .accessibilityAddTraits(isOn ? .isSelected : [])
     }
 }
