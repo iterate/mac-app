@@ -269,8 +269,8 @@ struct DictationPill: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(width: Self.width, alignment: .leading)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
     }
 }
 
