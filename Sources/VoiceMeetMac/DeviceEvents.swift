@@ -13,8 +13,11 @@ import VoiceMeetCore
 ///   only while the person has "Keyboard and mouse" on in the panel. A key event holds the key
 ///   itself. They are ephemeral (to whoever listens now, in no log) unless the person ticks
 ///   "Keep these events".
+/// - `device/act-started` and `device/act-ended`: each act with this Mac for the mind
+///   (`ActivityLog`). Kept in the log.
 ///
-/// The events go through `bridge/device-events.mjs`, which connects to the mind as the person:
+/// The bridge also reads the context back: `heard` gets each act and presence event that the
+/// context holds, from the last 50 acts on, and each new one. The events go through `bridge/device-events.mjs`, which connects to the mind as the person:
 /// the Mac's own key lends and does nothing else.
 @MainActor
 final class DeviceEvents: ObservableObject {
@@ -41,6 +44,8 @@ final class DeviceEvents: ObservableObject {
     /// The session it publishes for; none while the Mac is lent to no mind.
     private(set) var session: MindSession?
     var readPresence: () -> Presence = { Presence(idleSeconds: 0, screenLocked: false, displayAsleep: false) }
+    /// An event of the context, read back by the bridge for the current session.
+    var heard: (ContextEvent) -> Void = { _ in }
 
     private let log = AppLog("device")
     private var publisher: Process?
@@ -166,11 +171,13 @@ final class DeviceEvents: ObservableObject {
     // MARK: - The publisher
 
     /// One event on the device's context. Other parts of the app that tell the mind about the
-    /// device publish through here, so that there is one connection and one path.
-    func publish(_ type: String, _ payload: [String: Any], ephemeral: Bool) {
+    /// device publish through here, so that there is one connection and one path. With no
+    /// session it goes nowhere; while the connection is down it waits in the bridge.
+    func publish(_ type: String, _ payload: [String: Any], ephemeral: Bool, idempotencyKey: String? = nil) {
         guard let input = input ?? startPublisher() else { return }
         var event: [String: Any] = ["type": type, "payload": payload]
         if ephemeral { event["ephemeral"] = true }
+        if let idempotencyKey { event["idempotencyKey"] = idempotencyKey }
         guard let line = try? JSONSerialization.data(withJSONObject: event) else { return }
         try? input.write(contentsOf: line + Data("\n".utf8))
     }
@@ -222,6 +229,7 @@ final class DeviceEvents: ObservableObject {
         pending = lines.removeLast()
         for line in lines {
             guard let said = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
+            if let event = (said["event"] as? [String: Any]).flatMap(ContextEvent.init(json:)) { heard(event) }
             if let count = said["sent"] as? Int {
                 sent = count
                 failure = nil

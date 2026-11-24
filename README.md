@@ -241,7 +241,20 @@ Each act of a mind with this Mac shows twice:
   display", "Listening to the microphone for 5 s". The 𝑖 in the menu bar is red for that time. The
   pill is in no picture or recording of the screen, so a mind's own screenshot does not show it.
 - **In the panel.** "Activity" opens a list of the last acts with their times, how long each took,
-  and the reason when one failed. The list is in memory alone and starts empty with the app.
+  and the reason when one failed. Its first line is the context it shows: `/devices/<name>` on the
+  mind, and the presence that context heard last.
+
+The list is a view of the device's context in the mind (below), not a store of the app. Each act
+is two kept events there, `device/act-started` and `device/act-ended`, by one act id; the list
+folds them by act into one row (`ActivityFold` in `VoiceMeetCore`). The device-events bridge reads
+the context back, those types alone: it subscribes to them, and when it connects it reads the log
+backwards, 500 offsets a page, until it has 50 acts, at most 10 pages (5,000 offsets). Every other
+event (most of the log is keys and moves) is dropped as its page comes, and the bridge keeps only
+the offsets of the last 200 events it told. An act of this Mac shows
+at once, and its echo from the context is the same row. While the connection is down the act
+waits in the bridge's queue with the other events, and its row has an orange cloud: not yet in the
+mind. A start with no end in the context is an act that the app's end cut short. Another mind is
+another context: the list starts empty and reads that one.
 
 The pill's × hides it until the next act begins, also while a long act runs on. "Show each act
 on the screen", in the open Activity list, turns the pill off; the list and the red 𝑖 stay.
@@ -270,6 +283,8 @@ again:
 | `record/slot-stored`      | While a switch under **Record** is on: once for each 30 seconds, after its files are in the mind                                                                        | `t`, `tracks` (below)                                         |
 | `device/live-watch-started` | A member's page began to watch this Mac live (below, "Live")                                                                                                          | `watcher`, `who`, `tracks`                                    |
 | `device/live-watch-ended` | The watch ended                                                                                                                                                         | `watcher`, `who`, `seconds`, `why`                            |
+| `device/act-started`      | A mind's act with this Mac starts (above, "What a mind does with the Mac"). Its idempotency key is `device/act-started/<act>`                                    | `act`, `thing`, `doing`, `detail`                             |
+| `device/act-ended`        | The act is over. Its idempotency key is `device/act-ended/<act>`                                                                                                        | `act`, `did`, `failure`                                       |
 | `device/input-submitted`  | You sent an input with ⌥⇧Space (below, "Input"). It goes to the mind you chose, which need not be the one this Mac is lent to                                             | `id`, `text`, `at`, `files`                                   |
 
 A key event holds the key itself, so what you type goes to the mind, a password too. Keyboard and
@@ -616,7 +631,7 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity, the banner, the record, the choices, the question that waits |
+| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) |
 | `ui.type {id, text}` | Types into it (`input.text`) |
@@ -626,7 +641,7 @@ connection, as the endpoint's; a mind never reaches it.
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
-`activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
+`activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
 `capture.discard`. The tree is read in the app's own process and needs no permission of macOS; to
 have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an
 assistive app does.
@@ -655,7 +670,9 @@ fails it, antialiasing does not; the pixel differences are reported, and a pictu
 **The scenarios.** `node harness/run.mjs <scenario|ci|all>` runs the app that `swift build` made
 (`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:
 `boot` (the panel opens, the tree has its controls, a segment is pressed), `input-send` (a text
-typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `approval` (a
+typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `activity` (a
+command run through the endpoint is `device/act-started` and `device/act-ended` in the fake mind,
+and `ui.state` shows its row once, echoed from the context), `approval` (a
 command on Ask is approved, then denied, through the socket), `mind-switch` (two fake minds: an
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
 device event reaches A after the switch), and `dictation-fixture` (a sentence

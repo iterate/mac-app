@@ -220,8 +220,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "dictation": dictation.controlState(),
             "activity": [
                 "pillVisible": model.acts.isPillVisible,
-                "entries": model.acts.entries.prefix(10).map { entry -> [String: Any] in
-                    ["did": entry.isRunning ? entry.doing : entry.did, "running": entry.isRunning, "failure": entry.failure ?? NSNull(), "detail": entry.detail ?? NSNull()]
+                "context": model.acts.path.map { $0 as Any } ?? NSNull(),
+                "entries": model.acts.rows.prefix(10).map { row -> [String: Any] in
+                    [
+                        "act": row.act, "did": row.did ?? row.doing, "running": row.isRunning, "inMind": row.isInMind,
+                        "failure": row.failure ?? NSNull(), "detail": row.detail ?? NSNull(),
+                    ]
                 },
             ],
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),

@@ -1,42 +1,34 @@
 import AppKit
 import SwiftUI
+import VoiceMeetCore
 
 /// WHAT A MIND DID WITH THIS MAC, as the person sees it: one line for each act of a caller of the
 /// local endpoint ("Ran a command", "Took a picture of the display"), with its time.
 ///
+/// The log is a view of the device's context `/devices/<name>` in the mind of the session: each
+/// act is a `device/act-started` and a `device/act-ended` there (`DeviceFact`), and the rows are
+/// those events folded by act (`ActivityFold`). An act of this app shows at once, before the
+/// context echoes it, and is marked as not yet in the mind until it does. Another session is
+/// another context: the log starts empty and reads that context.
+///
 /// Each act shows twice. While it runs and for a few seconds after, a pill at the top right of the
 /// screen names it, with the face of the mind the Mac is lent to. And the panel lists the last
-/// acts under "Activity". The list is in memory alone: it starts empty with the app.
+/// acts under "Activity".
 @MainActor
 final class ActivityLog: ObservableObject {
-    struct Entry: Identifiable, Equatable {
-        let id: Int
-        let at: Date
-        /// The thing of the Mac that was used: its symbol leads the line.
-        let symbol: String
-        /// What is done, while it runs: "Taking a picture of the display “Built-in”".
-        let doing: String
-        /// The same when it is over: "Took a picture of the display “Built-in”".
-        let did: String
-        /// More of it, on a second line: a command's words.
-        let detail: String?
-        /// The mind the Mac was lent to, by its address.
-        let mind: String?
-        /// When the act was over; nil while it runs.
-        var endedAt: Date?
-        /// Why it failed, when it did.
-        var failure: String?
+    typealias Row = ActivityFold.Row
 
-        var isRunning: Bool { endedAt == nil }
-    }
+    @Published fileprivate(set) var fold = ActivityFold()
+    /// The newest first, at most `ActivityFold.kept`.
+    var rows: [Row] { fold.rows }
+    /// The mind of the session, by its address, and the path of its device context.
+    fileprivate(set) var mind: String?
+    fileprivate(set) var path: String?
+    /// Appends an act's event to the device's context (`DeviceEvents.publish`).
+    var publish: (DeviceFact) -> Void = { _ in }
 
-    /// The newest first, at most `kept`.
-    @Published fileprivate(set) var entries: [Entry] = []
-    /// The mind the Mac is lent to now, by its address.
-    var mind: String?
-
-    private static let kept = 50
-    private var next = 1
+    /// The words of each act of this session that runs, for its end.
+    private var running: [String: String] = [:]
     private let pill = ActivityPillWindow()
     /// The person's choice in the panel: each act shows in a pill on the screen. Off: the panel's
     /// list and the red 𝑖 in the menu bar alone.
@@ -47,21 +39,39 @@ final class ActivityLog: ObservableObject {
         }
     }
 
+    /// Another session, or none: the log is of its context, empty until the context is read. An
+    /// act of the old session that runs on ends nowhere.
+    func use(_ session: MindSession?) {
+        mind = session?.mind
+        path = session?.path
+        fold = ActivityFold()
+        running = [:]
+        pill.forget()
+    }
+
     /// An act starts. The answer names it for `ended`.
-    func began(_ thing: Shareable, doing: String, did: String, detail: String? = nil) -> Int {
-        let entry = Entry(id: next, at: Date(), symbol: thing.symbol, doing: doing, did: did, detail: detail, mind: mind, endedAt: nil, failure: nil)
-        next += 1
-        entries = Array(([entry] + entries).prefix(Self.kept))
-        if showsPill { pill.show(entries, newAct: entry.id) }
-        return entry.id
+    func began(_ thing: Shareable, doing: String, did: String, detail: String? = nil) -> String {
+        let act = UUID().uuidString.lowercased()
+        running[act] = did
+        let fact = DeviceFact.actStarted(act: act, thing: thing.id, doing: doing, detail: detail)
+        fold.take(ContextEvent(fact, at: Date()))
+        publish(fact)
+        if showsPill, let row = rows.first(where: { $0.act == act }) { pill.show(rows, mind: mind, newAct: row.order) }
+        return act
     }
 
     /// The act is over, well or with a failure.
-    func ended(_ id: Int, failure: String? = nil) {
-        guard let index = entries.firstIndex(where: { $0.id == id }) else { return }
-        entries[index].endedAt = Date()
-        entries[index].failure = failure
-        if showsPill { pill.show(entries) }
+    func ended(_ act: String, failure: String? = nil) {
+        guard let did = running.removeValue(forKey: act) else { return }
+        let fact = DeviceFact.actEnded(act: act, did: did, failure: failure)
+        fold.take(ContextEvent(fact, at: Date()))
+        publish(fact)
+        if showsPill { pill.show(rows, mind: mind) }
+    }
+
+    /// An event of the context, read back.
+    func heard(_ event: ContextEvent) {
+        fold.take(event)
     }
 
     func stop() {
@@ -84,12 +94,14 @@ private final class ActivityPillWindow {
     /// The act that was showing when the person pressed ×: the pill stays away until a newer one.
     private var dismissedUpTo = 0
 
-    func show(_ entries: [ActivityLog.Entry], newAct: Int? = nil) {
+    /// `newAct` is the order of an act that starts now (`ActivityFold.Row.order`).
+    func show(_ rows: [ActivityLog.Row], mind: String?, newAct: Int? = nil) {
         if let newAct, newAct <= dismissedUpTo { return }
-        guard newAct != nil || (entries.first?.id ?? 0) > dismissedUpTo else { return }
-        let running = entries.filter(\.isRunning)
-        guard let lead = running.first ?? entries.first else { return close() }
+        guard newAct != nil || (rows.first?.order ?? 0) > dismissedUpTo else { return }
+        let running = rows.filter(\.isRunning)
+        guard let lead = running.first ?? rows.first else { return close() }
         shown.entry = lead
+        shown.mind = mind
         shown.others = max(running.count - 1, 0)
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
         let width: CGFloat = 340
@@ -115,8 +127,14 @@ private final class ActivityPillWindow {
 
     var isVisible: Bool { panel?.isVisible ?? false }
 
+    /// Another session: its acts count from one again, and none of them was dismissed.
+    func forget() {
+        dismissedUpTo = 0
+        close()
+    }
+
     private func dismiss() {
-        dismissedUpTo = shown.entry?.id ?? dismissedUpTo
+        dismissedUpTo = shown.entry?.order ?? dismissedUpTo
         close()
     }
 
@@ -140,7 +158,8 @@ private final class ActivityPillWindow {
 
 @MainActor
 private final class ShownActivity: ObservableObject {
-    @Published var entry: ActivityLog.Entry?
+    @Published var entry: ActivityLog.Row?
+    @Published var mind: String?
     /// How many more acts run beside the one shown.
     @Published var others = 0
 }
@@ -152,7 +171,7 @@ private struct ActivityPillView: View {
     var body: some View {
         HStack(spacing: 9) {
             if let entry = shown.entry {
-                if let mind = entry.mind { MindAvatar(mind: mind, size: 24) }
+                if let mind = shown.mind { MindAvatar(mind: mind, size: 24) }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(ActivityLine.title(of: entry) + (shown.others > 0 ? " · \(shown.others) more" : ""))
                         .font(.system(size: 13, weight: .medium))
@@ -180,17 +199,31 @@ private struct ActivityPillView: View {
 }
 
 /// One act as words.
+@MainActor
 enum ActivityLine {
-    static func title(of entry: ActivityLog.Entry) -> String {
-        if let failure = entry.failure { return "\(entry.did): \(failure)" }
-        return entry.isRunning ? entry.doing : entry.did
+    static func title(of row: ActivityLog.Row) -> String {
+        if let did = row.did { return row.failure.map { "\(did): \($0)" } ?? did }
+        // an act of the context with no end: the app that ran it ended first
+        return row.isRunning ? row.doing : "\(row.doing): no end in the log"
     }
 
     /// How long an act took, when that is worth a word: a second or more.
-    static func took(_ entry: ActivityLog.Entry) -> String? {
-        guard let endedAt = entry.endedAt else { return "now" }
-        let seconds = endedAt.timeIntervalSince(entry.at)
+    static func took(_ row: ActivityLog.Row) -> String? {
+        if row.isRunning { return "now" }
+        guard let endedAt = row.endedAt else { return nil }
+        let seconds = endedAt.timeIntervalSince(row.startedAt)
         return seconds < 1 ? nil : seconds < 60 ? "\(Int(seconds.rounded())) s" : "\(Int(seconds / 60)) min"
+    }
+
+    /// The symbol of the thing of the Mac (`Shareable.id`) that leads the line.
+    static func symbol(_ thing: String) -> String {
+        if thing.hasPrefix("screen.") { return "display" }
+        if thing.hasPrefix("camera.") { return "video" }
+        if thing.hasPrefix("record.") {
+            return DeviceRecord.switches.first { "record.\($0.source.rawValue)" == thing }?.symbol ?? "text.viewfinder"
+        }
+        let things: [Shareable] = [.microphone, .speaker, .accessibility, .commands, .live, .banners]
+        return things.first { $0.id == thing }?.symbol ?? "circle"
     }
 }
 
@@ -212,40 +245,50 @@ struct ActivityList: View {
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                         .foregroundStyle(.secondary)
                     Text("Activity").font(.subheadline.weight(.semibold))
-                    if let last = log.entries.first, !isOpen {
-                        Text("\(ActivityLine.title(of: last)), \(Self.clock(last.at))")
+                    if let last = log.rows.first, !isOpen {
+                        Text("\(ActivityLine.title(of: last)), \(Self.clock(last.startedAt))")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .lineLimit(1)
                             .truncationMode(.tail)
                     }
                     Spacer(minLength: 0)
-                    if !log.entries.isEmpty {
-                        Text("\(log.entries.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                    if !log.rows.isEmpty {
+                        Text("\(log.rows.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                     }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("What a mind did with this Mac since the app started")
+            .help("What a mind did with this Mac: the acts on this Mac's context in the mind")
             if isOpen {
+                Text(context).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("activity.context")
                 Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.caption)
                     .accessibilityIdentifier("activity.showsPill")
-                if log.entries.isEmpty {
-                    Text("No mind has used this Mac since the app started.").font(.caption).foregroundStyle(.secondary)
+                if log.rows.isEmpty {
+                    Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(log.entries.prefix(shown)) { entry in row(entry) }
-                if log.entries.count > shown {
-                    Text("and \(log.entries.count - shown) before these").font(.caption).foregroundStyle(.tertiary)
+                ForEach(log.rows.prefix(shown)) { entry in row(entry) }
+                if log.rows.count > shown {
+                    Text("and \(log.rows.count - shown) before these").font(.caption).foregroundStyle(.tertiary)
                 }
             }
         }
     }
 
-    private func row(_ entry: ActivityLog.Entry) -> some View {
+    /// The log's header: the context it shows, on which mind, and the presence it last heard.
+    private var context: String {
+        guard let path = log.path, let mind = log.mind else { return "Lent to no mind: these acts are on this Mac only" }
+        return "\(path) on \(mind)" + (log.fold.presence.map { " · \($0.state)" } ?? "")
+    }
+
+    private func row(_ entry: ActivityLog.Row) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(Self.clock(entry.at)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Image(systemName: entry.symbol).font(.caption).frame(width: 16).foregroundStyle(entry.isRunning ? Color.red : Color.secondary)
+            Text(Self.clock(entry.startedAt)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            Image(systemName: ActivityLine.symbol(entry.thing)).font(.caption).frame(width: 16).foregroundStyle(entry.isRunning ? Color.red : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(ActivityLine.title(of: entry)).font(.caption).lineLimit(2)
                 if let detail = entry.detail {
@@ -253,6 +296,9 @@ struct ActivityList: View {
                 }
             }
             Spacer(minLength: 0)
+            if !entry.isInMind {
+                Image(systemName: "icloud.slash").font(.caption2).foregroundStyle(.orange).help("Not yet in the mind: it goes when the connection is back")
+            }
             if let took = ActivityLine.took(entry) { Text(took).font(.caption.monospacedDigit()).foregroundStyle(.tertiary) }
         }
     }
@@ -270,14 +316,23 @@ extension ActivityLog {
         Rendering.fixFaces()
         let log = ActivityLog()
         let now = Rendering.now
-        log.entries = [
-            Entry(id: 4, at: now, symbol: Shareable.commands.symbol, doing: "Running a command", did: "Ran a command", detail: "/bin/zsh -lc git -C ~/src/app status --short", mind: "iterate.example.com", endedAt: nil, failure: nil),
-            Entry(id: 3, at: now.addingTimeInterval(-42), symbol: "display", doing: "", did: "Took a picture of the display “Built-in Retina Display”", detail: nil, mind: "iterate.example.com", endedAt: now.addingTimeInterval(-41.6), failure: nil),
-            Entry(id: 2, at: now.addingTimeInterval(-95), symbol: Shareable.microphone.symbol, doing: "", did: "Listened to the microphone for 5 s", detail: nil, mind: "iterate.example.com", endedAt: now.addingTimeInterval(-90), failure: nil),
-            Entry(id: 1, at: now.addingTimeInterval(-300), symbol: Shareable.commands.symbol, doing: "", did: "Ran a command", detail: "/usr/bin/false", mind: "iterate.example.com", endedAt: now.addingTimeInterval(-299), failure: "it ended with status 1"),
+        log.mind = "iterate.example.com"
+        log.path = "/devices/jane.mac"
+        // the context's events, and one act of this app that the context has not echoed yet
+        let events: [(DeviceFact, TimeInterval, Int?)] = [
+            (.actStarted(act: "1", thing: "commands", doing: "Running a command", detail: "/usr/bin/false"), -300, 1),
+            (.actEnded(act: "1", did: "Ran a command", failure: "it ended with status 1"), -299, 2),
+            (.actStarted(act: "2", thing: "microphone", doing: "Listening to the microphone for 5 s", detail: nil), -95, 3),
+            (.actEnded(act: "2", did: "Listened to the microphone for 5 s", failure: nil), -90, 4),
+            (.presenceChanged(state: "active"), -60, 5),
+            (.actStarted(act: "3", thing: "screen.1", doing: "Taking a picture of the display “Built-in Retina Display”", detail: nil), -42, 6),
+            (.actEnded(act: "3", did: "Took a picture of the display “Built-in Retina Display”", failure: nil), -41.6, 7),
+            (.actStarted(act: "4", thing: "commands", doing: "Running a command", detail: "/bin/zsh -lc git -C ~/src/app status --short"), 0, nil),
         ]
+        for (fact, seconds, offset) in events { log.fold.take(ContextEvent(fact, at: now.addingTimeInterval(seconds), offset: offset)) }
         let shown = ShownActivity()
-        shown.entry = log.entries.first
+        shown.entry = log.rows.first
+        shown.mind = log.mind
         var drawn = true
         for (dark, tone) in [(false, "light"), (true, "dark")] {
             let pill = ActivityPillView(shown: shown).frame(width: 340, height: 56).padding(12).background(Color(nsColor: .windowBackgroundColor))

@@ -32,8 +32,8 @@ final class DeviceLive: ObservableObject {
     var decide: (_ who: String) async -> (tracks: [String], reason: String) = { _ in ([], "nothing to show") }
     /// The sources the watchers need changed: the recorder runs them (`DeviceRecord.live`).
     var sourcesChanged: (Set<RecordSource>) -> Void = { _ in }
-    var began: (_ who: String, _ tracks: [String]) -> Int = { _, _ in 0 }
-    var finished: (_ act: Int, _ failure: String?) -> Void = { _, _ in }
+    var began: (_ who: String, _ tracks: [String]) -> String = { _, _ in "" }
+    var finished: (_ act: String, _ failure: String?) -> Void = { _, _ in }
 
     /// The capture's sink: made once, at the start.
     let peer = LivePeer()
@@ -42,7 +42,7 @@ final class DeviceLive: ObservableObject {
     private var bridgeEndedAt = Date.distantPast
     /// The bridge's word: its connection to the mind is up (`{ connected }`).
     private var isSignalling = false
-    private var acts: [String: Int] = [:]
+    private var acts: [String: String] = [:]
     private var timer: Timer?
 
     func start() {
