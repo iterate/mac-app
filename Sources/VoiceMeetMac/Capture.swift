@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import ScreenCaptureKit
 import SwiftUI
+import VoiceMeetCore
 
 /// What the pill at the top of the display says.
 @MainActor
@@ -31,15 +32,6 @@ final class CapturePill: ObservableObject {
 @available(macOS 15.0, *)
 @MainActor
 final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutputDelegate {
-    /// Where the capture goes: Node, the iterate CLI, the uploader, the mind and this Mac's name there.
-    struct Destination {
-        let node: String
-        let iterateBin: String
-        let uploader: String
-        let mind: String
-        let name: String
-    }
-
     /// The uploader beside one capture: lines to its stdin, JSON lines from its stdout.
     private final class Uploader: @unchecked Sendable {
         let process = Process()
@@ -120,7 +112,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// The last capture's outcome, for the panel.
     private(set) var lastLine: String?
     var onChange: () -> Void = {}
-    var destination: () -> Destination? = { nil }
+    /// The session of the mind this Mac is lent to now (`Lend.sessionChanged`).
+    var session: MindSession?
     /// The guide to a permission of macOS (the app's delegate has it).
     var allow: (Permission) -> Void = { _ in }
 
@@ -137,7 +130,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var lastPictureAt = Date.distantPast
     private var uploader: Uploader?
     private let voice = Voice()
-    private var sendingTo: String?
+    /// The session at this capture's start: its manifest, its pill and its upload go with it until
+    /// it ends, whatever the Mac is lent to then.
+    private var pinned: MindSession?
     /// The clipboard's change count after this capture's text went there: a later text of the same
     /// capture takes its place only while the person copied nothing else.
     private var copiedAt: Int?
@@ -197,6 +192,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         else { return }
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "")
         id = "\(stamp)-\(String(format: "%04x", UInt16.random(in: 0...UInt16.max)))"
+        pinned = session
         folder = Self.folder.appendingPathComponent(id)
         // A capture stays on this Mac for an agent here to read, for 7 days.
         for old in (try? FileManager.default.contentsOfDirectory(at: Self.folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
@@ -609,7 +605,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             "panels": panels.sorted { ($0["n"] as? Int ?? 0) < ($1["n"] as? Int ?? 0) },
             "by": [
                 "adapter": ["name": "mac-app", "version": Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""],
-                "device": destination()?.name ?? Host.current().localizedName ?? "",
+                "device": pinned?.name ?? Host.current().localizedName ?? "",
                 "method": "person",
             ],
             // points of the desktop; an ink point and a click count from this display's top left
@@ -625,13 +621,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// The uploader starts with the capture: it connects to the mind and gets its upload links
     /// while the person talks.
     private func startUploader() {
-        sendingTo = nil
         copiedAt = nil
-        guard let destination = destination() else { return uploader = nil }
+        guard let pinned else { return uploader = nil }
         let capture = id
-        sendingTo = destination.mind
         uploader = Uploader(
-            [destination.node, destination.uploader, folder.path, "--iterate", destination.iterateBin, "--mind", destination.mind],
+            [pinned.helpers.node, pinned.helpers.captureUpload, folder.path, "--iterate", pinned.helpers.iterateBin, "--mind", pinned.mind],
             said: { [weak self] line in if self?.id == capture { self?.uploaderSaid(line) } },
             ended: { [weak self] in
                 guard let self, self.id == capture, self.uploader != nil else { return }
@@ -649,7 +643,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
 
     /// `copy` is the text for the clipboard: with the mind's paths, or this Mac's with `failed`.
     private func uploaderSaid(_ line: [String: Any]) {
-        let mind = sendingTo ?? "the mind"
+        let mind = pinned?.mind ?? "the mind"
         if let progress = line["progress"] as? Double, pill.progress != nil { pill.progress = progress }
         // what was just heard, while the capture runs: the sign that the microphone hears the person
         if let words = line["words"] as? String, !words.isEmpty, isRunning { say("…" + words.suffix(44), startedAt: zero) }
@@ -711,7 +705,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// The pill at the top of the display: what the capture does now. With `seconds`, it goes away after them.
     private func say(_ text: String, startedAt: Date? = nil, progress: Double? = nil, for seconds: Double? = nil) {
         pill.text = text
-        pill.mind = destination()?.mind
+        pill.mind = pinned?.mind
         pill.startedAt = startedAt
         pill.progress = progress
         let screen = self.screen ?? NSScreen.main

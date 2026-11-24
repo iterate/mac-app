@@ -110,6 +110,15 @@ not live. Opening the panel does it too, for a lend that waits for its next star
 refused, or the CLI between its tries); one that is connecting or live is left alone. Every change
 of state is one line in the app's log.
 
+The mind this Mac is lent to is one session in the app: the selected mind, this Mac's name there,
+and the paths of Node, the iterate CLI and the bridge. The device's events, the record, live and the
+input work for that session, as you, with the iterate CLI's own sign-in. Only selecting another mind
+or removing it ends the session: its approvals end, and its events, record and live stop before any
+starts for the next mind. A reconnect keeps it, and the record's waiting slots with it. **Not
+allowed** ends only the lend's powers: every approval ends, a question that waits is refused, and a
+call of the lend is refused until the mind lets the key in again; the events, the record, live and
+the input go on.
+
 The 𝑖 in the menu bar shows the lend at a glance: plain while live, dimmed while it connects or
 reconnects, and dimmed with a slash through it while it is not lent (no mind, stopped, not allowed,
 incompatible). Green, red and orange (a banner, a use, the microphone or a camera on) show over it
@@ -607,13 +616,13 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | The lend, the minds, the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity, the banner, the record, the choices, the question that waits |
+| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity, the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) |
 | `ui.type {id, text}` | Types into it (`input.text`) |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | ⌥⇧D down and up |
-| `approval.answer {allow}` | Answers the Ask question that waits. While the socket is open, a question shows no alert and asks for no Touch ID |
+| `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for 30 minutes. While the socket is open, a question shows no alert and asks for no Touch ID |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
@@ -647,7 +656,9 @@ fails it, antialiasing does not; the pixel differences are reported, and a pictu
 (`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:
 `boot` (the panel opens, the tree has its controls, a segment is pressed), `input-send` (a text
 typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `approval` (a
-command on Ask is approved, then denied, through the socket), and `dictation-fixture` (a sentence
+command on Ask is approved, then denied, through the socket), `mind-switch` (two fake minds: an
+approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
+device event reaches A after the switch), and `dictation-fixture` (a sentence
 from `say -o` is written with the word list's Herdr, Beelink and Doppler; local only: it needs the
 speech model in `~/Library/Application Support/FluidAudio`). CI runs `ci`, every scenario but the
 local one. `--keep` keeps the homes and their logs.

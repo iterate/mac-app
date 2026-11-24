@@ -14,7 +14,7 @@
 // `--keep` keeps each home, with the app's log in <home>/logs/app.log. Every copy it started is
 // killed when it ends: after a scenario, after a failure, an exception, Ctrl-C or SIGTERM.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -68,8 +68,29 @@ function* nodes(tree) {
   }
 }
 
-/** A home with config.json, whose iterate CLI is the fake mind: what it is sent is in `mind.jsonl`. */
-function withMind(home) {
+/** The config of a home with these minds, the first active, as the CLI writes it: by a rename. */
+function writeConfig(home, iterate, minds, active = minds[0].mind) {
+  const file = join(home, "config.json");
+  writeFileSync(
+    `${file}.new`,
+    JSON.stringify({
+      spec: "@iterate-com/mac-app",
+      node: process.execPath,
+      iterateBin: join(iterate, "bin/iterate.js"),
+      bridge: join(root, "bridge/mac-endpoint.ts"),
+      version: "0.0.0-harness",
+      minds: minds.map(({ mind, name }) => ({ mind, name, keyFile: join(home, "keys", `${mind}.key`) })),
+      active,
+    }),
+  );
+  renameSync(`${file}.new`, file);
+}
+
+/**
+ * A home with config.json, whose iterate CLI is the fake mind: what it is sent is in `mind.jsonl`,
+ * each event with the mind (`mind`) and the path it reached. Every mind is the same fake mind.
+ */
+function withMind(home, minds = [{ mind: MIND, name: NAME }]) {
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
   mkdirSync(join(iterate, "dist"), { recursive: true });
@@ -81,13 +102,13 @@ function withMind(home) {
 import { fakeMind } from ${JSON.stringify(join(root, "bridge/fake-mind.test-helper.mjs"))};
 const mind = fakeMind();
 export const addressOf = (mind) => mind;
-export async function connectMind() {
+export async function connectMind({ address }) {
   const connection = await mind.connect();
   const cd = connection.itx.cd;
   connection.itx.cd = (path) => ({
     ...cd(path),
     async append(...events) {
-      for (const event of events) appendFileSync(${JSON.stringify(join(home, "mind.jsonl"))}, JSON.stringify({ path, ...event }) + "\\n");
+      for (const event of events) appendFileSync(${JSON.stringify(join(home, "mind.jsonl"))}, JSON.stringify({ mind: address, path, ...event }) + "\\n");
       return cd(path).append(...events);
     },
   });
@@ -95,18 +116,7 @@ export async function connectMind() {
 }
 `,
   );
-  writeFileSync(
-    join(home, "config.json"),
-    JSON.stringify({
-      spec: "@iterate-com/mac-app",
-      node: process.execPath,
-      iterateBin: join(iterate, "bin/iterate.js"),
-      bridge: join(root, "bridge/mac-endpoint.ts"),
-      version: "0.0.0-harness",
-      minds: [{ mind: MIND, name: NAME, keyFile: join(home, "keys", `${MIND}.key`) }],
-      active: MIND,
-    }),
-  );
+  writeConfig(home, iterate, minds);
   return () =>
     existsSync(join(home, "mind.jsonl"))
       ? readFileSync(join(home, "mind.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line))
@@ -248,6 +258,64 @@ const scenarios = {
       }
       const acts = (await run.state()).activity.entries;
       if (acts.length !== 1 || acts[0].did !== "Ran a command") throw new Error(`the activity is ${JSON.stringify(acts)}`);
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * Another mind ends the first one's authority: an approval for 30 minutes given while lent to A
+   * holds for A, and a request after the switch to B asks again; no device event reaches A after
+   * the switch, and B gets them.
+   */
+  async "mind-switch"({ app, home }) {
+    const [A, B] = [
+      { mind: "a.example.com", name: "harness.mac" },
+      { mind: "b.example.com", name: "harness-b.mac" },
+    ];
+    const sent = withMind(home, [A, B]);
+    execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "ask"]);
+    const run = await start(app, home);
+    const echo = () =>
+      run.endpoint("run", { argv: ["/bin/echo", "ran"] }).then(
+        (answer) => ({ answer }),
+        (error) => ({ error }),
+      );
+    try {
+      const first = await until("the session for A", 10, async () => (await run.state()).session);
+      if (first.mind !== A.mind) throw new Error(`the session is ${JSON.stringify(first)}`);
+      await until("A's presence", 30, () => sent().find((e) => e.mind === A.mind && e.type === "device/presence-changed"));
+
+      // A: approved for 30 minutes, then a second use runs with no question
+      const asked = echo();
+      await until("A's question", 10, async () => (await run.state()).approval);
+      await run.control("approval.answer", { allow: true, keep: true });
+      if ((await asked).error) throw (await asked).error;
+      const again = await Promise.race([echo(), new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5000))]);
+      if (again.timedOut || again.error) throw new Error(`A's second use did not run on the approval: ${again.error?.message ?? "it waits"}`);
+
+      // the CLI's `use b.example.com`: config.json, replaced
+      writeConfig(home, join(home, "fake-iterate"), [A, B], B.mind);
+      const second = await until("the session for B", 10, async () => {
+        const session = (await run.state()).session;
+        return session?.mind === B.mind && session;
+      });
+      if (second.generation <= first.generation) throw new Error(`B's generation is ${second.generation}, A's ${first.generation}`);
+      const toA = sent().filter((e) => e.mind === A.mind).length;
+
+      // B: the approval for A does not hold
+      const fromB = echo();
+      const state = await until("B's question", 10, async () => (await run.state()).approval);
+      if (!/run commands/.test(state.question)) throw new Error(`the question is ${state.question}`);
+      await run.control("approval.answer", { allow: false });
+      if (!/denied/.test((await fromB).error?.message ?? "")) throw new Error(`B's use answered ${JSON.stringify((await fromB).answer)}`);
+
+      const atB = await until("B's presence", 30, () => sent().find((e) => e.mind === B.mind && e.type === "device/presence-changed"));
+      if (atB.path !== `/devices/${B.name}`) throw new Error(`B's event went to ${atB.path}`);
+      // past the old 2 s check, when the old code still wrote to A's publisher
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const late = sent().filter((e) => e.mind === A.mind).slice(toA);
+      if (late.length) throw new Error(`A got ${late.length} events after the switch: ${late.map((e) => e.type).join(", ")}`);
     } finally {
       await run.quit();
     }

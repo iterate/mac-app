@@ -161,20 +161,15 @@ final class VoiceLevel: ObservableObject {
 /// files and the reason, and Return sends the same input again.
 @MainActor
 final class MindInput {
-    /// Node, the iterate CLI and the sender, the minds this Mac knows, and the one it is lent to.
-    struct Destination {
-        let node: String
-        let iterateBin: String
-        let sender: String
-        let minds: [LendView.Mind]
-        let active: String?
-    }
+    /// The helpers, the minds this Mac knows, and the one it is lent to.
+    typealias Choices = (helpers: MindSession.Helpers, minds: [LendView.Mind], active: String?)
 
     static let folder = AppEnvironment.current.folder.appendingPathComponent("inputs")
     /// The pictures that came with no file, until their input is sent.
     static let pasted = folder.appendingPathComponent("pasted")
 
-    var destination: () -> Destination? = { nil }
+    /// Read once at each opening of the bar: the input sent from it goes with that value.
+    var choices: () -> Choices? = { nil }
     /// The word list of a mind, for the speech model.
     var words: (String?) -> WordList = { _ in .empty }
     /// Opens the guide for a permission of macOS.
@@ -189,6 +184,8 @@ final class MindInput {
     private var host: NSHostingView<MindInputBar>?
     private var changes: AnyCancellable?
     private var sendingTo = ""
+    /// The choices at the bar's opening.
+    private var opened: Choices?
     private var listener: SpeechListener?
     /// Counts the listenings, so that a late word of an old one changes nothing.
     private var round = 0
@@ -312,10 +309,10 @@ final class MindInput {
     }
 
     private func show(takingKeys: Bool) {
-        let destination = destination()
-        model.minds = destination?.minds ?? []
+        opened = choices()
+        model.minds = opened?.minds ?? []
         // the mind chosen last, else the one this Mac is lent to, else the first
-        let wanted = [AppEnvironment.current.defaults.string(forKey: MindInputModel.mindKey), destination?.active].compactMap { $0 }
+        let wanted = [AppEnvironment.current.defaults.string(forKey: MindInputModel.mindKey), opened?.active].compactMap { $0 }
         model.mind = wanted.first { address in model.minds.contains { $0.mind == address } } ?? model.minds.first?.mind
         let panel = self.panel ?? makePanel()
         fit()
@@ -385,7 +382,7 @@ final class MindInput {
     }
 
     private func send() {
-        guard let destination = destination(), let mind = destination.minds.first(where: { $0.mind == model.mind }) else {
+        guard let opened, let mind = opened.minds.first(where: { $0.mind == model.mind }) else {
             return model.draft.refuse("No mind is set up: add one in the panel under the 𝑖.")
         }
         let files = model.draft.attachments.count
@@ -395,8 +392,8 @@ final class MindInput {
         let folder = Self.folder.appendingPathComponent(id)
         let process = Process()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: destination.node)
-        process.arguments = [destination.sender, folder.path, "--name", mind.name, "--iterate", destination.iterateBin, "--mind", mind.mind]
+        process.executableURL = URL(fileURLWithPath: opened.helpers.node)
+        process.arguments = [opened.helpers.inputSend, folder.path, "--name", mind.name, "--iterate", opened.helpers.iterateBin, "--mind", mind.mind]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

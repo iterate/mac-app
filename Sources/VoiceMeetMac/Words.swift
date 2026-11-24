@@ -7,15 +7,10 @@ import VoiceMeetCore
 /// is older than ten minutes, so a term that was added in the mind is heard soon after.
 @MainActor
 final class Words {
-    struct Source {
-        let node: String
-        let iterateBin: String
-        let fetcher: String
-    }
-
     static let folder = AppEnvironment.current.folder.appendingPathComponent("words")
 
-    var source: () -> Source? = { nil }
+    /// The helpers of the config now: a list is fetched for any mind this Mac knows.
+    var helpers: () -> MindSession.Helpers? = { nil }
 
     private let log = AppLog("words")
     private var askedAt: [String: Date] = [:]
@@ -35,12 +30,12 @@ final class Words {
     /// Fetches the list in the background, at most once in ten minutes for a mind.
     func refresh(_ mind: String) {
         if let asked = askedAt[mind], Date().timeIntervalSince(asked) < 600 { return }
-        guard let source = source() else { return }
+        guard let helpers = helpers() else { return }
         askedAt[mind] = Date()
         let process = Process()
         let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: source.node)
-        process.arguments = [source.fetcher, Self.file(of: mind).path, "--iterate", source.iterateBin, "--mind", mind]
+        process.executableURL = URL(fileURLWithPath: helpers.node)
+        process.arguments = [helpers.wordsFetch, Self.file(of: mind).path, "--iterate", helpers.iterateBin, "--mind", mind]
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice

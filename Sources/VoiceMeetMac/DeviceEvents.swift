@@ -3,7 +3,9 @@ import SwiftUI
 import VoiceMeetCore
 
 /// WHAT THIS MAC TELLS ITS MIND ABOUT ITSELF, as events on the context `/devices/<name>` of the
-/// mind it is lent to: the same name as the lend, `itx.<name>`.
+/// mind it is lent to: the same name as the lend, `itx.<name>`. It publishes for one mind session
+/// (`MindSession`): `use` ends the old session's publisher at once, and a late line of it changes
+/// nothing.
 ///
 /// - `device/presence-changed`, always while the Mac is lent: the Mac goes idle, becomes active,
 ///   is locked, or its displays sleep. Kept in the log.
@@ -16,14 +18,6 @@ import VoiceMeetCore
 /// the Mac's own key lends and does nothing else.
 @MainActor
 final class DeviceEvents: ObservableObject {
-    struct Destination: Equatable {
-        let node: String
-        let iterateBin: String
-        let publisher: String
-        let mind: String
-        let name: String
-    }
-
     /// A person is taken as away after this long with no key, click or move.
     static let idleAfterSeconds = 120
 
@@ -44,13 +38,13 @@ final class DeviceEvents: ObservableObject {
     /// "active", "idle", "locked" or "asleep": what the last presence event said.
     @Published private(set) var presence: String?
 
-    var destination: () -> Destination? = { nil }
+    /// The session it publishes for; none while the Mac is lent to no mind.
+    private(set) var session: MindSession?
     var readPresence: () -> Presence = { Presence(idleSeconds: 0, screenLocked: false, displayAsleep: false) }
 
     private let log = AppLog("device")
     private var publisher: Process?
     private var input: FileHandle?
-    private var publishesTo: Destination?
     private var pending = ""
     private var wasDown = false
     private var timer: Timer?
@@ -89,14 +83,19 @@ final class DeviceEvents: ObservableObject {
     }
 
     /// The path of the device's context in the mind, for the panel.
-    var path: String? { destination().map { "/devices/\($0.name)" } }
+    var path: String? { session?.path }
+
+    /// Another session, or none: the old one's publisher ends now. Nothing starts here: the next
+    /// `tick` or event starts the publisher for the new session.
+    func use(_ session: MindSession?) {
+        endPublisher()
+        self.session = session
+    }
 
     // MARK: - Presence
 
-    private func tick() {
-        // another mind, or none: the publisher follows the lend
-        if destination() != publishesTo { endPublisher() }
-        guard destination() != nil else { return presence = nil }
+    func tick() {
+        guard session != nil else { return presence = nil }
         let now = readPresence()
         let state = now.screenLocked ? "locked" : now.displayAsleep ? "asleep" : now.idleSeconds >= Self.idleAfterSeconds ? "idle" : "active"
         guard state != presence else { return }
@@ -177,18 +176,24 @@ final class DeviceEvents: ObservableObject {
     }
 
     private func startPublisher() -> FileHandle? {
-        guard let destination = destination() else { return nil }
+        guard let session else { return nil }
         let process = Process()
         let stdin = Pipe()
         let stdout = Pipe()
-        process.executableURL = URL(fileURLWithPath: destination.node)
-        process.arguments = [destination.publisher, destination.name, "--iterate", destination.iterateBin, "--mind", destination.mind]
+        process.executableURL = URL(fileURLWithPath: session.helpers.node)
+        process.arguments = [session.helpers.deviceEvents, session.name, "--iterate", session.helpers.iterateBin, "--mind", session.mind]
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let text = String(decoding: handle.availableData, as: UTF8.self)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.publisherSaid(text) } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // a line of an ended publisher, or of another session, changes nothing
+                    guard let self, self.publisher === process else { return }
+                    self.publisherSaid(text)
+                }
+            }
         }
         process.terminationHandler = { [weak self] ended in
             stdout.fileHandleForReading.readabilityHandler = nil
@@ -207,9 +212,8 @@ final class DeviceEvents: ObservableObject {
             return nil
         }
         publisher = process
-        publishesTo = destination
         input = stdin.fileHandleForWriting
-        log.info("publishes to \(destination.mind) at /devices/\(destination.name)")
+        log.info("session \(session.generation): publishes to \(session.mind) at \(session.path)")
         return input
     }
 
@@ -243,7 +247,7 @@ final class DeviceEvents: ObservableObject {
         try? input?.close()
         input = nil
         publisher = nil
-        publishesTo = nil
+        pending = ""
         presence = nil
         wasDown = false
     }

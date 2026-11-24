@@ -1,6 +1,7 @@
 import AppKit
 import Record
 import SwiftUI
+import VoiceMeetCore
 
 /// THE RECORD OF THIS MAC, streamed into the mind it is lent to (`Sources/Record`): its screens,
 /// cameras, microphones and speakers, each a switch of its own in the panel, all off until the
@@ -13,16 +14,11 @@ import SwiftUI
 /// (`~/Library/Application Support/iterate-mac-app/record/<mind>/`); `bridge/record-upload.mjs`
 /// puts them into the mind's files under `/devices/<name>/record/` and appends one
 /// `record/slot-stored` for each slot to `/devices/<name>`, as the person (the CLI's own sign-in).
+///
+/// It records for one mind session (`MindSession`): `use` stops the old session's recorder and
+/// uploader at once. A reconnect keeps the session, and a spool keeps its slots for its mind.
 @MainActor
 final class DeviceRecord: ObservableObject {
-    struct Destination: Equatable {
-        let node: String
-        let iterateBin: String
-        let uploader: String
-        let mind: String
-        let name: String
-    }
-
     /// One switch of the panel: its source, its permission, its words.
     struct Switch: Identifiable {
         let source: RecordSource
@@ -53,7 +49,8 @@ final class DeviceRecord: ObservableObject {
     /// The tracks the recorder writes now: "screen-1", "mic-1".
     private(set) var tracks: [String] = []
 
-    var destination: () -> Destination? = { nil }
+    /// The session it records for; none while the Mac is lent to no mind.
+    private(set) var session: MindSession?
     /// The sources live wants now (`DeviceLive`): the recorder runs them too, and writes nothing
     /// of those the record does not want.
     var live: Set<RecordSource> = []
@@ -67,7 +64,6 @@ final class DeviceRecord: ObservableObject {
     /// Recorders start and stop here, one after the other: a stop waits for the last files.
     private let lifecycle = DispatchQueue(label: "record.lifecycle")
     private var recorder: Recorder?
-    private var recordsTo: Destination?
     private var running: Set<RecordSource> = []
     private var watching: Set<RecordSource> = []
     private var paused = false
@@ -88,9 +84,9 @@ final class DeviceRecord: ObservableObject {
             "recording": isRecording, "paused": isPaused, "line": line, "tracks": tracks, "waitingSlots": waiting,
         ]
         if let uploadFailure, waiting > 0 { answer["uploadFailure"] = uploadFailure }
-        if let recordsTo {
-            answer["mind"] = recordsTo.mind
-            answer["device"] = recordsTo.name
+        if let session {
+            answer["mind"] = session.mind
+            answer["device"] = session.name
         }
         return answer
     }
@@ -122,25 +118,34 @@ final class DeviceRecord: ObservableObject {
         AppEnvironment.current.folder.appendingPathComponent("record").appendingPathComponent(mind)
     }
 
+    /// Another session, or none: the old one's recorder and uploader stop now (the recorder seals
+    /// its last files into the old mind's spool). Nothing starts here: the next `tick` does.
+    func use(_ session: MindSession?) {
+        stopRecorder()
+        endUploader()
+        uploadFailure = nil
+        self.session = session
+    }
+
+    private func stopRecorder() {
+        guard let old = recorder else { return }
+        lifecycle.async { old.stop() }
+        recorder = nil
+        (running, watching) = ([], [])
+    }
+
     /// Every 2 s, at each switch, and at once when the presence changes (`AppModel`).
     func tick() {
-        let destination = destination()
+        let session = session
         let permitted = { (sources: Set<RecordSource>) in
-            destination == nil ? [] : Set(sources.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
+            session == nil ? [] : Set(sources.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
         }
         // the record's switches, and live's watchers: the capture runs for both
         let wanted = permitted(on), watched = permitted(live)
-        // another mind, or none: the record follows the lend
-        if destination != recordsTo || wanted.union(watched).isEmpty, let old = recorder {
-            lifecycle.async { old.stop() }
-            recorder = nil
-            (running, watching) = ([], [])
-        }
-        if destination != recordsTo { endUploader() }
-        recordsTo = destination
-        if let destination, !wanted.union(watched).isEmpty {
+        if wanted.union(watched).isEmpty { stopRecorder() }
+        if let session, !wanted.union(watched).isEmpty {
             if recorder == nil {
-                let recorder = Recorder(options: RecordOptions(spool: Self.spool(for: destination.mind), device: destination.name))
+                let recorder = Recorder(options: RecordOptions(spool: Self.spool(for: session.mind), device: session.name))
                 if let sink { recorder.add(sink: sink) }
                 lifecycle.async { recorder.start() }
                 self.recorder = recorder
@@ -163,18 +168,18 @@ final class DeviceRecord: ObservableObject {
                 }
             }
         }
-        let waiting = destination.map { Self.waiting(in: Self.spool(for: $0.mind)) } ?? 0
-        if let destination, !running.isEmpty || waiting > 0 {
-            if uploader == nil, Date().timeIntervalSince(uploaderEndedAt) > 10 { startUploader(destination) }
+        let waiting = session.map { Self.waiting(in: Self.spool(for: $0.mind)) } ?? 0
+        if let session, !running.isEmpty || waiting > 0 {
+            if uploader == nil, Date().timeIntervalSince(uploaderEndedAt) > 10 { startUploader(session) }
         } else {
             endUploader()
         }
-        showState(waiting: waiting, destination: destination)
+        showState(waiting: waiting, isLent: session != nil)
     }
 
-    private func showState(waiting: Int, destination: Destination?) {
+    private func showState(waiting: Int, isLent: Bool) {
         var parts: [String] = []
-        if destination == nil {
+        if !isLent {
             parts.append(on.isEmpty ? "Off" : "Waits for the Mac to be lent to a mind")
         } else if let recorder, !running.isEmpty {
             let tracks = recorder.trackIDs.count
@@ -206,20 +211,26 @@ final class DeviceRecord: ObservableObject {
 
     // MARK: - The uploader
 
-    private func startUploader(_ destination: Destination) {
+    private func startUploader(_ session: MindSession) {
         let process = Process()
         let stdin = Pipe(), stdout = Pipe()
-        process.executableURL = URL(fileURLWithPath: destination.node)
+        process.executableURL = URL(fileURLWithPath: session.helpers.node)
         process.arguments = [
-            destination.uploader, Self.spool(for: destination.mind).path, "--name", destination.name, "--iterate", destination.iterateBin,
-            "--mind", destination.mind,
+            session.helpers.recordUpload, Self.spool(for: session.mind).path, "--name", session.name, "--iterate", session.helpers.iterateBin,
+            "--mind", session.mind,
         ]
         process.standardInput = stdin
         process.standardOutput = stdout
         process.standardError = FileHandle.nullDevice
         stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let text = String(decoding: handle.availableData, as: UTF8.self)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.uploaderSaid(text) } }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // a line of an ended uploader, or of another session, changes nothing
+                    guard let self, self.uploader === process else { return }
+                    self.uploaderSaid(text)
+                }
+            }
         }
         process.terminationHandler = { [weak self] ended in
             stdout.fileHandleForReading.readabilityHandler = nil
@@ -238,7 +249,7 @@ final class DeviceRecord: ObservableObject {
         }
         uploader = process
         uploaderInput = stdin.fileHandleForWriting
-        log.info("uploader: \(Self.spool(for: destination.mind).path) to \(destination.mind) at /devices/\(destination.name)")
+        log.info("session \(session.generation): uploader: \(Self.spool(for: session.mind).path) to \(session.mind) at \(session.path)")
     }
 
     /// Its stdin closes: it ends the slot it is on, then exits.
@@ -246,7 +257,7 @@ final class DeviceRecord: ObservableObject {
         guard uploader != nil else { return }
         try? uploaderInput?.close()
         // a new one waits: the old one may still be on its last slot
-        (uploaderInput, uploader, uploaderEndedAt) = (nil, nil, Date())
+        (uploaderInput, uploader, uploaderEndedAt, pending) = (nil, nil, Date(), "")
     }
 
     private func uploaderSaid(_ text: String) {

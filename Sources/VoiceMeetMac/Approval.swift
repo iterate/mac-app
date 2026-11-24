@@ -1,10 +1,13 @@
 import AppKit
 import LocalAuthentication
+import VoiceMeetCore
 
 /// The person's approval of one use, for a thing whose choice is "Ask". The app says
 /// what a mind wants to do; the person approves it once or for half an hour, with Touch ID (or the
 /// Mac's password where there is no Touch ID), or denies it. A caller that gets no answer in a
-/// minute is refused.
+/// minute is refused. An approval holds in its round only (`ApprovalGrants`): another mind, none,
+/// or a refusal of this Mac's key ends every approval, and the answer to a question of an older
+/// round approves nothing.
 ///
 /// In a test copy with a home of its own and its control socket (`ControlSocket`), a question shows
 /// no alert and asks for no Touch ID: it waits for `approval.answer` on that socket, with the same
@@ -17,20 +20,34 @@ final class Approval {
     /// True when the control socket answers the questions; never in the default home.
     var answersByControl = false
     /// The question that waits for `approval.answer` now.
-    private(set) var waiting: (question: String, answer: CheckedContinuation<Bool?, Never>)?
+    private(set) var waiting: (question: String, answer: CheckedContinuation<(allow: Bool, keep: Bool)?, Never>)?
 
     private let log = AppLog("approval")
-    private var approvedUntil: [String: Date] = [:]
+    private var grants = ApprovalGrants()
     private var isAsking = false
     private var questions = 0
 
-    /// Until when the person approved a thing without another question; nil when they did not.
+    /// Another mind session, or none: every approval ends, and a question that waits on the
+    /// control socket is answered with no answer.
+    func use(_ session: MindSession?) {
+        grants.use(generation: session?.generation)
+        _ = answer(allow: nil)
+    }
+
+    /// The mind refused this Mac's key: every approval ends, and so does a question that waits.
+    func refuse() {
+        grants.refuse()
+        _ = answer(allow: nil)
+        log.info("the mind refused this Mac's key: every approval ends")
+    }
+
+    /// Until when the person approved a thing in this session without another question; nil when they did not.
     func isApproved(_ thing: Shareable) -> Date? {
-        approvedUntil[thing.id].flatMap { $0 > Date() ? $0 : nil }
+        grants.isApproved(thing.id, now: Date())
     }
 
     func end(_ thing: Shareable) {
-        approvedUntil[thing.id] = nil
+        grants.end(thing.id)
         log.info("the person ended the approval to \(thing.does)")
     }
 
@@ -47,7 +64,19 @@ final class Approval {
         if things.allSatisfy({ isApproved($0) != nil }) { return }
         isAsking = true
         defer { isAsking = false }
-        if answersByControl, AppEnvironment.current.hasOwnHome { return try await askControl(does: does, what: what) }
+        let round = grants.round
+        if answersByControl, AppEnvironment.current.hasOwnHome {
+            let keeps: Bool
+            do {
+                keeps = try await askControl(does: does, what: what)
+            } catch {
+                try stillTheRound(round, does: does)
+                throw error
+            }
+            try stillTheRound(round, does: does)
+            if keeps { approve(things, round: round, does: does) }
+            return
+        }
 
         let alert = NSAlert()
         alert.messageText = "Your mind wants to \(does)"
@@ -81,22 +110,38 @@ final class Approval {
             log.info("to \(does): no confirmation: \(AppLog.describe(error))")
             throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(does).")
         }
+        try stillTheRound(round, does: does)
         if answer == .alertSecondButtonReturn {
-            for thing in things { approvedUntil[thing.id] = Date().addingTimeInterval(Self.window) }
+            approve(things, round: round, does: does)
+        } else {
+            log.info("to \(does): the person approved this one use")
         }
-        log.info("to \(does): the person approved \(answer == .alertSecondButtonReturn ? "for 30 minutes" : "this one use")")
     }
 
-    /// The answer of the control socket: true approves this one use, false denies it. False when
-    /// no question waits.
-    func answer(allow: Bool?) -> Bool {
+    /// The question was asked for another mind than the one this Mac is lent to now, or before the
+    /// mind refused this Mac's key: its answer is no answer now.
+    private func stillTheRound(_ round: ApprovalGrants.Round, does: String) throws {
+        guard round != grants.round else { return }
+        log.info("to \(does): the answer came after the mind changed or refused the key; the use is refused")
+        throw EndpointRefusal("The question to \(does) was asked before the mind changed or refused this Mac's key.")
+    }
+
+    private func approve(_ things: [Shareable], round: ApprovalGrants.Round, does: String) {
+        grants.approve(things.map(\.id), round: round, until: Date().addingTimeInterval(Self.window))
+        log.info("to \(does): the person approved for 30 minutes")
+    }
+
+    /// The answer of the control socket: true approves, for 30 minutes with `keep`, else this one
+    /// use; false denies it. False when no question waits.
+    func answer(allow: Bool?, keep: Bool = false) -> Bool {
         guard let waiting else { return false }
         self.waiting = nil
-        waiting.answer.resume(returning: allow)
+        waiting.answer.resume(returning: allow.map { (allow: $0, keep: keep) })
         return true
     }
 
-    private func askControl(does: String, what: String) async throws {
+    /// True when the answer approves for 30 minutes.
+    private func askControl(does: String, what: String) async throws -> Bool {
         questions += 1
         let question = questions
         log.info("to \(does): the question waits for approval.answer on the control socket")
@@ -106,11 +151,12 @@ final class Approval {
                 if self?.questions == question { _ = self?.answer(allow: nil) }
             }
         }
-        guard allowed == true else {
-            let words = allowed == false ? "denied it" : "gave no answer in \(Int(Self.patience)) seconds"
+        guard let allowed, allowed.allow else {
+            let words = allowed != nil ? "denied it" : "gave no answer in \(Int(Self.patience)) seconds"
             log.info("to \(does): the control socket \(words)")
             throw EndpointRefusal("The Mac's owner \(words) to \(does).")
         }
-        log.info("to \(does): the control socket approved this one use")
+        if !allowed.keep { log.info("to \(does): the control socket approved this one use") }
+        return allowed.keep
     }
 }

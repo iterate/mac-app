@@ -8,8 +8,9 @@ import AppKit
 ///
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
 /// - `dictation.start`, `dictation.stop`: ⌥⇧D down and up.
-/// - `approval.answer {allow}`: answers the Ask question that waits, in place of the alert and
-///   Touch ID (`Approval.answersByControl`).
+/// - `approval.answer {allow, keep?}`: answers the Ask question that waits, in place of the alert
+///   and Touch ID (`Approval.answersByControl`); `keep` approves for 30 minutes, as "Approve for 30
+///   Minutes" does.
 /// - `ui.state`: the lend, the open windows and what each shows, the last acts, the record, the last
 ///   dictation's text.
 /// - `ui.tree`: the accessibility tree of the app's own windows, read in this process (no
@@ -61,7 +62,7 @@ final class ControlSocket {
             dictationReleased()
         case "approval.answer":
             guard let allow = parameters["allow"] as? Bool else { throw EndpointRefusal("approval.answer needs allow: true or false.") }
-            guard approval.answer(allow: allow) else { throw EndpointRefusal("No question waits for an answer.") }
+            guard approval.answer(allow: allow, keep: parameters["keep"] as? Bool ?? false) else { throw EndpointRefusal("No question waits for an answer.") }
         case "ui.state":
             var answer = state()
             answer["windows"] = NSApp.windows.filter(\.isVisible).map { window -> [String: Any] in

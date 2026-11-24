@@ -79,23 +79,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.onChange = { [weak self] in self?.stateDidChange() }
         // the address as the CLI says it (`iterate.example.com`), not the config's short name
         model.banners.activeMind = { [weak self] in self?.lend.state.mindAddress }
-        model.acts.mind = { [weak self] in self?.lend.config?.activeMind?.mind }
-        model.deviceEvents.destination = { [weak self] in
-            guard let config = self?.lend.config, let mind = config.activeMind else { return nil }
-            let publisher = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("device-events.mjs").path
-            return DeviceEvents.Destination(node: config.node, iterateBin: config.iterateBin, publisher: publisher, mind: mind.mind, name: mind.name)
-        }
-        model.record.destination = { [weak self] in
-            guard let config = self?.lend.config, let mind = config.activeMind else { return nil }
-            let uploader = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("record-upload.mjs").path
-            return DeviceRecord.Destination(node: config.node, iterateBin: config.iterateBin, uploader: uploader, mind: mind.mind, name: mind.name)
-        }
         model.record.onChange = { [weak self] in self?.stateDidChange() }
-        model.live.destination = { [weak self] in
-            guard let config = self?.lend.config, let mind = config.activeMind else { return nil }
-            let script = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("device-live.mjs").path
-            return DeviceLive.Destination(node: config.node, iterateBin: config.iterateBin, script: script, mind: mind.mind, name: mind.name)
-        }
         model.banners.onChange = { [weak self] in self?.stateDidChange() }
         model.start()
         lend.isBusy = { [weak self] in
@@ -103,10 +87,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 || (self?.dictation.isRunning ?? false) || (self?.input.isListening ?? false)
         }
         lend.onChange = { [weak self] in self?.stateDidChange() }
-        lend.start()
         startControl()
-        openAtLogin()
         startCapture()
+        // the one place a mind session reaches the features
+        lend.sessionChanged = { [weak self] session, isAuthorized in
+            guard let self else { return }
+            self.model.use(session, isAuthorized: isAuthorized)
+            if #available(macOS 15.0, *) { (self.capture as? Capture)?.session = session }
+        }
+        lend.start()
+        openAtLogin()
         startInput()
         startDictation()
         stateDidChange()
@@ -168,11 +158,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let capture = Capture()
         capture.onChange = { [weak self] in self?.stateDidChange() }
         capture.allow = { [weak self] permission in self?.guide(permission) }
-        capture.destination = { [weak self] in
-            guard let config = self?.lend.config, let mind = config.activeMind else { return nil }
-            let uploader = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("capture-upload.mjs").path
-            return Capture.Destination(node: config.node, iterateBin: config.iterateBin, uploader: uploader, mind: mind.mind, name: mind.name)
-        }
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
         control?.markCapture = { capture.mark($0) }
@@ -181,12 +166,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// ⌥⇧Space opens the input: a text and files, to one of the minds this Mac knows (`MindInput`).
     private func startInput() {
-        input.destination = { [weak self] in
-            guard let config = self?.lend.config else { return nil }
-            let sender = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("input-send.mjs").path
-            return MindInput.Destination(
-                node: config.node, iterateBin: config.iterateBin, sender: sender,
-                minds: config.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) }, active: config.active)
+        input.choices = { [weak self] in
+            guard let config = self?.lend.config, let helpers = self?.lend.helpers else { return nil }
+            return (helpers, config.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) }, self?.lend.session?.mind)
         }
         input.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         input.allow = { [weak self] permission in self?.guide(permission) }
@@ -198,13 +180,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// ⌥⇧D dictates into the app in front, with the word list of the mind this Mac is lent to
     /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
     private func startDictation() {
-        words.source = { [weak self] in
-            guard let config = self?.lend.config else { return nil }
-            let fetcher = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("words-fetch.mjs").path
-            return Words.Source(node: config.node, iterateBin: config.iterateBin, fetcher: fetcher)
-        }
+        words.helpers = { [weak self] in self?.lend.helpers }
         for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
-        dictation.words = { [weak self] in self?.words.list(of: self?.lend.config?.active) ?? .empty }
+        dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
         dictation.onChange = { [weak self] in self?.stateDidChange() }
         control?.dictationPressed = { [weak self] in self?.dictation.pressed() }
@@ -236,6 +214,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "home": environment.folder.path,
             "lend": ["phase": lend.state.phase.name, "status": lend.state.statusLine(now: Date(), clock: Lend.clock), "active": active],
             "minds": lend.config?.minds.map(\.mind) ?? [],
+            "session": lend.session.map { ["generation": $0.generation, "mind": $0.mind, "name": $0.name, "authorized": lend.isAuthorized] } ?? NSNull(),
             "panel": ["visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen],
             "input": input.controlState(),
             "dictation": dictation.controlState(),

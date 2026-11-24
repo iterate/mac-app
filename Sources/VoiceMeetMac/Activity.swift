@@ -33,7 +33,7 @@ final class ActivityLog: ObservableObject {
     /// The newest first, at most `kept`.
     @Published fileprivate(set) var entries: [Entry] = []
     /// The mind the Mac is lent to now, by its address.
-    var mind: () -> String? = { nil }
+    var mind: String?
 
     private static let kept = 50
     private var next = 1
@@ -49,7 +49,7 @@ final class ActivityLog: ObservableObject {
 
     /// An act starts. The answer names it for `ended`.
     func began(_ thing: Shareable, doing: String, did: String, detail: String? = nil) -> Int {
-        let entry = Entry(id: next, at: Date(), symbol: thing.symbol, doing: doing, did: did, detail: detail, mind: mind(), endedAt: nil, failure: nil)
+        let entry = Entry(id: next, at: Date(), symbol: thing.symbol, doing: doing, did: did, detail: detail, mind: mind, endedAt: nil, failure: nil)
         next += 1
         entries = Array(([entry] + entries).prefix(Self.kept))
         if showsPill { pill.show(entries, newAct: entry.id) }

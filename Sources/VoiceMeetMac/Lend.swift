@@ -8,7 +8,10 @@ import VoiceMeetCore
 /// turns the CLI's states (stdout) and the process's end into a phase and says what to do: start the process now, end it, or
 /// start it after a wait. The app starts again at once when the Mac wakes and when the network
 /// comes back. It watches its folder: a change that `list`, `add`, `use` or `remove` of the CLI
-/// makes switches the lend. Once an hour it asks npm for a newer version and runs its `update`,
+/// makes switches the lend. It owns the mind session (`MindSession`) and the lend's authorization:
+/// the session changes when another mind is selected or the mind is removed; the authorization
+/// ends while the mind refuses this Mac's key. `sessionChanged` says both, before the lend process
+/// for a new mind starts. Once an hour it asks npm for a newer version and runs its `update`,
 /// unless it was built from an owner's copy (`UpdateSource`).
 @MainActor
 final class Lend {
@@ -70,11 +73,21 @@ final class Lend {
     private(set) var commandLine: String?
     private(set) var commandLink: String?
     private(set) var isCommandRunning = false
+    /// Node, the iterate CLI and the bridge's scripts of this config, resolved at each read of it.
+    private(set) var helpers: MindSession.Helpers?
+    /// The session of the mind this Mac is lent to, or none.
+    var session: MindSession? { sessions.current }
+    /// False while the mind refuses this Mac's key; the session stays.
+    var isAuthorized: Bool { sessions.isAuthorized }
+    /// The session changed (a new generation, or none), or the authorization did. Called once for
+    /// each change.
+    var sessionChanged: (_ session: MindSession?, _ isAuthorized: Bool) -> Void = { _, _ in }
     var onChange: (() -> Void)?
     /// True while a capture runs: an update waits for its end.
     var isBusy: () -> Bool = { false }
 
     private let log = AppLog("lend")
+    private var sessions = MindSessions()
     private var process: Process?
     /// Goes up with each process: the end or a line of an older one changes nothing.
     private var generation = 0
@@ -149,6 +162,16 @@ final class Lend {
         if state.phase != before {
             log.info("\(Self.describe(event)) -> \(state.phase.name): \(state.statusLine(now: Date(), clock: Self.clock))")
         }
+        // the old session's work ends before a process for another mind starts
+        let selected = config?.activeMind.flatMap { mind in helpers.map { MindSession.Selected(mind: mind.mind, name: mind.name, helpers: $0) } }
+        let changed = sessions.update(selected: selected, phase: state.phase)
+        if changed.session {
+            log.info(sessions.current.map { "session \($0.generation): \($0.mind) as itx.\($0.name)" } ?? "no session: no mind is selected")
+        }
+        if changed.authorization {
+            log.info(sessions.isAuthorized ? "the mind lets this Mac's key in again" : "the mind refuses this Mac's key: the lend's powers and approvals end; the session stays")
+        }
+        if changed.session || changed.authorization { sessionChanged(sessions.current, sessions.isAuthorized) }
         for effect in effects {
             switch effect {
             case .startProcess:
@@ -269,8 +292,10 @@ final class Lend {
             config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: file))
         } catch {
             config = nil
+            helpers = nil
             if isStart || old != nil { log.info("not set up: \(file.path) does not read (\(AppLog.describe(error))); run npx @iterate-com/mac-app") }
         }
+        helpers = config.map { MindSession.Helpers(node: $0.node, iterateBin: $0.iterateBin, bridge: $0.bridge) }
         let wanted = config.map { ($0.activeMind, $0.node, $0.iterateBin, $0.bridge) }
         let had = old.map { ($0.activeMind, $0.node, $0.iterateBin, $0.bridge) }
         if !isStart, wanted?.0 == had?.0, wanted?.1 == had?.1, wanted?.2 == had?.2, wanted?.3 == had?.3 {
