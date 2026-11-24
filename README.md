@@ -453,7 +453,8 @@ What happens with your words is the mind's own matter.
 - **Keys.** ⇧Return and ⌥Return make a new line. Escape closes the bar and keeps what you wrote;
   ⌥⇧Space opens it again.
 
-Return closes the bar at once. The input goes up as you, as a capture does: `bridge/input-send.mjs`
+Return closes the bar at once. One input goes at a time: while it goes, the bar shows it and takes
+no new one. The input goes up as you, as a capture does: `bridge/input-send.mjs`
 uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
 (no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
 reason, and Return sends the same input again. The panel's last line says how the last one ended.

@@ -174,7 +174,15 @@ final class MindInput {
         }
         guard takingKeys else { return panel.orderFrontRegardless() }
         panel.makeKeyAndOrderFront(nil)
-        if let field = model.field { panel.makeFirstResponder(field) }
+        focus()
+        // at the first opening the text view may not be made yet: once more after the layout
+        DispatchQueue.main.async { MainActor.assumeIsolated { self.focus() } }
+    }
+
+    /// The keyboard goes to the text.
+    private func focus() {
+        guard let panel, panel.isKeyWindow, let field = model.field, panel.firstResponder !== field else { return }
+        panel.makeFirstResponder(field)
     }
 
     private func makePanel() -> InputPanel {
@@ -510,6 +518,12 @@ private struct AttachmentChip: View {
 /// closes, and Delete in an empty text takes the last file away.
 private final class InputField: NSTextView {
     weak var model: MindInputModel?
+
+    /// The text is the one thing in the bar that takes keys.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window, window.isKeyWindow { window.makeFirstResponder(self) }
+    }
 
     /// A file dropped on the text is a file for the bar, not a path in the text.
     override var acceptableDragTypes: [NSPasteboard.PasteboardType] { [] }
