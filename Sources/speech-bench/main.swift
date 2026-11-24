@@ -10,9 +10,11 @@ import VoiceMeetCore
 //
 // Each file goes through the same recognizer as a capture's pushed buffers, with their times, at the pace of the
 // clock (`--fast`: at once). stdout is one JSON line for the load,
-// `{ model, loadSeconds, wasOnDisk }`, and one for each file:
-// `{ file, seconds, segments: [{ t, to, text }], finalAfterEnd }` (t and to in milliseconds), where `finalAfterEnd` is the
-// seconds from the end of the sound to the last segment. Nothing leaves this Mac.
+// `{ model, loadSeconds, warmSeconds, wasOnDisk }`, and one for each file:
+// `{ file, seconds, segments: [{ t, to, text }], partials: [{ t, text }], finalAfterEnd }` (t and to in milliseconds),
+// where `finalAfterEnd` is the seconds from the end of the sound to the last segment, and a partial's `t` is its time
+// from the first sample pushed. `loadSeconds` is the first load in this process (what each start of the app costs);
+// `warmSeconds` is a second engine for the held model (what each dictation costs). Nothing leaves this Mac.
 
 var arguments = Array(CommandLine.arguments.dropFirst())
 func option(_ name: String) -> String? {
@@ -47,7 +49,35 @@ do {
     say(["model": model.id, "failed": error.localizedDescription])
     exit(1)
 }
-say(["model": model.id, "loadSeconds": Date().timeIntervalSince(loadStarted), "wasOnDisk": wasOnDisk])
+let loadSeconds = Date().timeIntervalSince(loadStarted)
+// a second engine for the held model: what a dictation costs once the app has loaded it
+let warmStarted = Date()
+_ = try? await SpeechModels.shared.engine(model, words: words)
+say(["model": model.id, "loadSeconds": loadSeconds, "warmSeconds": Date().timeIntervalSince(warmStarted), "wasOnDisk": wasOnDisk])
+
+/// The partials of the file that is heard now, with their time from its first sample.
+final class Partials: @unchecked Sendable {
+    private let lock = NSLock()
+    private var started = Date()
+    private var list: [[String: Any]] = []
+    func reset() {
+        lock.lock()
+        defer { lock.unlock() }
+        started = Date()
+        list = []
+    }
+    func add(_ text: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        list.append(["t": Int(Date().timeIntervalSince(started) * 1000), "text": text])
+    }
+    var all: [[String: Any]] {
+        lock.lock()
+        defer { lock.unlock() }
+        return list
+    }
+}
+let partials = Partials()
 
 for path in arguments {
     let audio = SpeechAudio()
@@ -59,7 +89,10 @@ for path in arguments {
     }
     try file.read(into: buffer)
     let samples = audio.samples(of: buffer)
-    let recognizer = SpeechRecognizer(model: model, words: words, engine: { engine }) { _ in }
+    let recognizer = SpeechRecognizer(model: model, words: words, engine: { engine }) { event in
+        if case .partial(let text) = event, !text.isEmpty { partials.add(text) }
+    }
+    partials.reset()
     recognizer.start()
     // pieces of 0.1 s, at the clock's pace
     let piece = SpeechStretch.rate / 10
@@ -79,5 +112,6 @@ for path in arguments {
     say([
         "file": path, "seconds": Double(samples.count) / Double(SpeechStretch.rate), "finalAfterEnd": Date().timeIntervalSince(ended),
         "segments": segments.map { ["t": Int($0.start * 1000), "to": Int($0.end * 1000), "text": $0.text] as [String: Any] },
+        "partials": partials.all,
     ])
 }
