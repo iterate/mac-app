@@ -2,16 +2,18 @@
 // capture-upload.mjs: one capture's folder (Sources/VoiceMeetMac/Capture.swift) into a mind, as
 // files under /captures/<id>/, and the short text that a person pastes to an agent.
 //
-//   node capture-upload.mjs <folder> --iterate <iterate.js> --mind <address>
+//   node capture-upload.mjs <folder> --iterate <iterate.js> --mind <address> [--heard-by <model>]
 //
 // The app starts it when a capture starts, so that the slow parts are done before the capture
 // ends: it connects to the mind once, as the person (the iterate CLI's own sign-in: `iterate login`;
 // the Mac's key lends and does nothing else), and asks for a signed upload link for every file a
 // capture can have. Then it reads lines on stdin:
 //   put <file>   a file of the folder is whole: PUT it now (a picture, while the capture runs)
-//   audio <b64>  the next piece of the voice: 16 000 samples a second, one channel, 16 bits. At
-//                each pause the mind puts the piece so far into words (Whisper), so that at the
+//   segment <j>  words of the voice, final: `{ t, to, text, words }`, in milliseconds from the
+//                capture's start. The app hears the voice on this Mac (`--heard-by` names its
+//                speech model) and sends each segment at the pause that ends it, so that at the
 //                end only the last words are missing
+//   heard        every segment came: the words are whole, and transcript.json is written
 //   copy         the person ended the capture: capture.json has every mark and numbered picture.
 //                The text goes out AT ONCE ({ copy }), before the movie is whole. Then the last
 //                words come, a model says what is under each mark (seen.json), summary.md goes up,
@@ -19,9 +21,9 @@
 //   finish       the movie and the voice are whole: PUT the rest; `capture/received` is added
 //   discard      remove what went up
 // With `--finish` it reads no line and does `copy` and `finish` at once: a capture that stayed on
-// this Mac.
+// this Mac, with the words of its transcript.json.
 //
-// stdout is JSON lines: { words } (what was just heard); { progress } (0 to 1, of the bytes);
+// stdout is JSON lines: { progress } (0 to 1, of the bytes);
 // { copy }, the text for the clipboard, at `copy` and again when the last words are in it; then
 // { done: true } or { failed, copy } (the reason; `copy` then names this Mac's folder alone).
 //
@@ -50,7 +52,12 @@ import { parseArgs } from "node:util";
 
 const { positionals, values } = parseArgs({
   allowPositionals: true,
-  options: { iterate: { type: "string" }, mind: { type: "string" }, finish: { type: "boolean" } },
+  options: {
+    iterate: { type: "string" },
+    mind: { type: "string" },
+    "heard-by": { type: "string", default: "the Mac's speech model" },
+    finish: { type: "boolean" },
+  },
 });
 const folder = positionals[0];
 if (!folder) throw new Error("Which folder? node capture-upload.mjs <folder> --iterate … --mind …");
@@ -91,36 +98,7 @@ const mind = (async () => {
       }),
     ),
   );
-  // The mind's word list, when it has one: /dictation/words.txt is the terms to know, one on a
-  // line, and /dictation/replacements.csv is `wrong,right` on each line.
-  const text = (path) =>
-    itx.files
-      .get(path)
-      .bytes()
-      .then(
-        (bytes) => new TextDecoder().decode(bytes),
-        () => "",
-      );
-  const [words, replacements] = await Promise.all([
-    text("/dictation/words.txt"),
-    text("/dictation/replacements.csv"),
-  ]);
-  return {
-    itx,
-    links: Object.fromEntries(names.map((name, index) => [name, urls[index].url])),
-    // Whisper reads a prompt's last 224 tokens only: a long list helps for its end alone
-    prompt: words.split("\n").filter(Boolean).join(", "),
-    // the longest wrong form first, each as a whole word, whatever its case
-    replacements: replacements
-      .split("\n")
-      .map((line) => line.split(","))
-      .filter(([wrong, right]) => wrong && right)
-      .sort((a, b) => b[0].length - a[0].length)
-      .map(([wrong, right]) => [
-        new RegExp(`(?<![\\w-])${wrong.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w-])`, "gi"),
-        right,
-      ]),
-  };
+  return { itx, links: Object.fromEntries(names.map((name, index) => [name, urls[index].url])) };
 })();
 // a failure is told at `finish`
 mind.catch(() => {});
@@ -179,99 +157,25 @@ function put(file) {
   return upload;
 }
 
-// THE VOICE, WHILE THE PERSON TALKS. A piece ends at a pause (half a second of quiet after two
-// seconds or more) or after 12 seconds, and goes to the mind's Whisper at once.
-const model = "@cf/openai/whisper-large-v3-turbo";
-const rate = 16_000;
-let piece = [];
-let pieceStart = 0;
-let samplesSeen = 0;
-let quietSamples = 0;
-let pieceHasSound = false;
-/** One promise for each piece sent, and the segments that are back, in the order of time. */
-const pieces = [];
+// THE VOICE: the segments that the app heard on this Mac, in the order of time.
 const segmentsHeard = [];
-let hearingError;
+let heardBy = { kind: "model", id: values["heard-by"] };
+/** Settles when the words are whole: at `heard`, or at `finish` for a capture that sent none. */
+let voiceIsWhole;
+const voiceWhole = new Promise((resolve) => {
+  voiceIsWhole = resolve;
+});
 
-function hear(base64) {
-  const bytes = Buffer.from(base64, "base64");
-  const count = bytes.length >> 1;
-  let squares = 0;
-  for (let at = 0; at < count; at++) squares += bytes.readInt16LE(at * 2) ** 2;
-  // about -40 dB of full scale: a room with nobody talking is under it
-  const isQuiet = Math.sqrt(squares / Math.max(count, 1)) < 300;
-  quietSamples = isQuiet ? quietSamples + count : 0;
-  pieceHasSound ||= !isQuiet;
-  piece.push(bytes);
-  samplesSeen += count;
-  const length = samplesSeen - pieceStart;
-  if ((length > 2 * rate && quietSamples > rate / 2) || length > 12 * rate) endPiece();
-}
-
-function endPiece() {
-  const sound = Buffer.concat(piece);
-  const startMs = (pieceStart / rate) * 1000;
-  const hadSound = pieceHasSound;
-  piece = [];
-  pieceStart = samplesSeen;
-  pieceHasSound = false;
-  quietSamples = 0;
-  // Whisper makes words up for silence
-  if (!hadSound) return;
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + sound.length, 4);
-  header.write("WAVEfmt ", 8);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(rate, 24);
-  header.writeUInt32LE(rate * 2, 28);
-  header.writeUInt16LE(2, 32);
-  header.writeUInt16LE(16, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(sound.length, 40);
-  const ms = (seconds) => Math.round(startMs + seconds * 1000);
-  pieces.push(
-    mind
-      .then(async ({ itx, prompt, replacements }) => ({
-        replacements,
-        heard: await itx.ai.run(model, {
-          audio: Buffer.concat([header, sound]).toString("base64"),
-          vad_filter: true,
-          initial_prompt: prompt,
-        }),
-      }))
-      .then(
-        ({ heard, replacements }) => {
-          const segments = (heard.segments || []).map((segment) => ({
-            t: ms(segment.start),
-            to: ms(segment.end),
-            // `words` below stay as the model heard them
-            text: replacements.reduce(
-              (text, [wrong, right]) => text.replace(wrong, right),
-              segment.text.trim(),
-            ),
-            words: (segment.words || []).map((word) => ({
-              t: ms(word.start),
-              to: ms(word.end),
-              text: word.word,
-            })),
-          }));
-          segmentsHeard.push(...segments);
-          segmentsHeard.sort((a, b) => a.t - b.t);
-          say({ words: segments.map((segment) => segment.text).join(" ") });
-        },
-        (error) => {
-          hearingError = String(error?.message ?? error).slice(0, 300);
-        },
-      ),
-  );
+/** One `segment` line: its words go where the capture's text and context.json read them. */
+function hear(json) {
+  const segment = JSON.parse(json);
+  segmentsHeard.push(segment);
+  segmentsHeard.sort((a, b) => a.t - b.t);
 }
 
 /** The words so far: a model's claim about the voice, not an observation. */
 const transcriptSoFar = () => ({
-  by: { kind: "model", id: model },
+  by: heardBy,
   basis: ["voice.m4a"],
   segments: segmentsHeard,
 });
@@ -282,7 +186,7 @@ const clock = (ms) =>
 /** The text a person pastes to an agent. It is short on purpose: a line for each numbered picture
  *  with the words said at it, and the two ways to the pictures. `inTheMind` is false for a
  *  capture that stayed on this Mac. */
-function paste({ manifest, transcript, transcriptError, wordsPending, inTheMind = true }) {
+function paste({ manifest, transcript, wordsPending, inTheMind = true }) {
   const { panels, observations } = manifest;
   const windows = observations.filter((observation) => observation.kind === "window");
   const front = (window) =>
@@ -330,7 +234,6 @@ function paste({ manifest, transcript, transcriptError, wordsPending, inTheMind 
         ]
       : []),
     ...lines.map(([, text]) => text),
-    ...(transcriptError ? [`The voice was not put into words: ${transcriptError}`] : []),
     "",
   ].join("\n");
 }
@@ -395,43 +298,31 @@ function filesIn(relative = "") {
 }
 
 const manifestNow = () => JSON.parse(readFileSync(join(folder, "capture.json"), "utf8"));
-/** The words of a capture whose voice did not come as pieces: `finish` settles them. */
-let wordsFromTheFile;
-const wordsLater = new Promise((resolve) => {
-  wordsFromTheFile = resolve;
-});
 /** Everything `copy` started: the capture is ready when it settles. */
 let readying;
 
 function copy() {
   const manifest = manifestNow();
-  endPiece();
-  const isStreamed = pieces.length > 0;
   let isHeard = false;
-  const heard = isStreamed
-    ? Promise.all(pieces).then(() => {
-        isHeard = true;
-        writeFileSync(join(folder, "transcript.json"), JSON.stringify(transcriptSoFar()));
-        return put("transcript.json").then(() => ({
-          transcript: transcriptSoFar(),
-          transcriptError: hearingError,
-        }));
-      })
-    : wordsLater;
+  // the file is written before the mind is reached: a later `--finish` reads it
+  const heard = voiceWhole.then(() => {
+    isHeard = true;
+    writeFileSync(join(folder, "transcript.json"), JSON.stringify(transcriptSoFar()));
+    return put("transcript.json").then(() => ({ transcript: transcriptSoFar() }));
+  });
   // At once: everything this Mac knows now. The pictures went up while the person talked. One
-  // turn of the loop later, so that pieces that are back already count as heard.
+  // turn of the loop later, so that words that are whole already count as heard.
   setImmediate(() =>
     say({
-      copy: paste({
-        manifest,
-        transcript: transcriptSoFar(),
-        wordsPending: !isHeard && (isStreamed || manifest.microphone),
-      }),
+      copy: paste({ manifest, transcript: transcriptSoFar(), wordsPending: !isHeard && manifest.microphone }),
     }),
   );
   const early = Promise.all(
     ["capture.json", ...filesIn().filter((file) => file.endsWith(".jpg"))].map(put),
   );
+  // a failure of these is told at `finish`, which awaits `readying`
+  early.catch(() => {});
+  heard.catch(() => {});
   readying = (async () => {
     const { itx } = await mind;
     const [words, seen] = await Promise.all([heard, see(itx, manifest.panels)]);
@@ -482,6 +373,8 @@ function copy() {
 
 async function finish() {
   try {
+    // the words that came are all there are
+    voiceIsWhole();
     if (!readying) copy();
     const manifest = manifestNow();
     const files = filesIn();
@@ -495,39 +388,6 @@ async function finish() {
     );
     // a failure is told below, where `rest` is awaited
     rest.catch(() => {});
-    // No piece of the voice came while the person talked: the mind hears the whole file. A
-    // model's claim, not an observation.
-    wordsFromTheFile(
-      pieces.length || !files.includes("voice.m4a")
-        ? {}
-        : put("voice.m4a")
-            .then(() =>
-              itx.run(`async (itx) => {
-  const bytes = await itx.files.get(${JSON.stringify(`${directory}/voice.m4a`)}).bytes();
-  let binary = "";
-  for (let at = 0; at < bytes.length; at += 0x8000) binary += String.fromCharCode(...bytes.subarray(at, at + 0x8000));
-  const model = ${JSON.stringify(model)};
-  const heard = await itx.ai.run(model, { audio: btoa(binary), vad_filter: true });
-  const ms = (seconds) => Math.round(seconds * 1000);
-  const transcript = {
-    by: { kind: "model", id: model },
-    basis: ["voice.m4a"],
-    segments: (heard.segments || []).map((segment) => ({
-      t: ms(segment.start),
-      to: ms(segment.end),
-      text: segment.text.trim(),
-      words: (segment.words || []).map((word) => ({ t: ms(word.start), to: ms(word.end), text: word.word })),
-    })),
-  };
-  await itx.files.get(${JSON.stringify(`${directory}/transcript.json`)}).put({ contentType: "application/json", data: new TextEncoder().encode(JSON.stringify(transcript)) });
-  return transcript;
-}`),
-            )
-            .then(
-              (transcript) => ({ transcript }),
-              (error) => ({ transcriptError: String(error?.message ?? error).slice(0, 300) }),
-            ),
-    );
     await readying;
     await rest;
     const window = manifest.observations.find((observation) => observation.kind === "window");
@@ -560,10 +420,19 @@ async function finish() {
   }
 }
 
-if (values.finish) await finish();
-else
+if (values.finish) {
+  // a capture that stayed on this Mac: its words are the transcript.json it has
+  const kept = join(folder, "transcript.json");
+  if (existsSync(kept)) {
+    const transcript = JSON.parse(readFileSync(kept, "utf8"));
+    segmentsHeard.push(...(transcript.segments ?? []));
+    heardBy = transcript.by ?? heardBy;
+  }
+  await finish();
+} else
   for await (const line of createInterface({ input: process.stdin })) {
-    if (line.startsWith("audio ")) hear(line.slice(6));
+    if (line.startsWith("segment ")) hear(line.slice(8));
+    else if (line === "heard") voiceIsWhole();
     else if (line.startsWith("put ")) put(line.slice(4));
     else if (line === "copy") copy();
     else if (line === "finish") await finish();

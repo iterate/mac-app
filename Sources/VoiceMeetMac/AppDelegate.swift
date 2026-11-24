@@ -1,5 +1,6 @@
 import AppKit
 import ServiceManagement
+import SpeechText
 import SwiftUI
 import VoiceMeetCore
 
@@ -21,10 +22,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var camerasHeldByThePanel: Set<String> = []
     /// The person's own capture (⌥⇧S). It needs macOS 15: nil before.
     private var capture: AnyObject?
+    /// The speech model of dictation, the input and capture: the person's choice in the panel.
+    private let speechChoice = SpeechChoice()
+    /// The one foreground listening, of dictation and the input.
+    private let speech = SpeechSession()
     /// The person's input to a mind (⌥⇧Space).
-    private let input = MindInput()
-    /// The person's dictation into the app in front (⌥⇧D).
-    private let dictation = Dictation()
+    private lazy var input = MindInput(session: speech)
+    /// The person's dictation into the app in front (fn, ⌥⇧D).
+    private lazy var dictation = Dictation(session: speech)
     /// The minds' word lists, for the speech model.
     private let words = Words()
     /// The control socket, for a test with no hand: nil unless `AppEnvironment` asks for it.
@@ -48,6 +53,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let panel = Panel(
             state: panelState,
             model: model,
+            speech: speechChoice,
             changed: { [weak self] in self?.choiceChanged() },
             allow: { [weak self] permission in self?.guide(permission) },
             copyPrompt: { [weak self] in self?.copyPrompt() },
@@ -99,6 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         openAtLogin()
         startInput()
         startDictation()
+        preloadSpeech()
         stateDidChange()
         watchForGrants()
 
@@ -158,6 +165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let capture = Capture()
         capture.onChange = { [weak self] in self?.stateDidChange() }
         capture.allow = { [weak self] permission in self?.guide(permission) }
+        capture.speech = { [weak self] in self?.speechChoice.chosen ?? .default }
+        capture.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
         control?.markCapture = { capture.mark($0) }
@@ -177,9 +186,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         register(.input, "input", "opens it", pressed: { [weak self] in self?.input.toggle() })
     }
 
-    /// ⌥⇧D dictates into the app in front, with the word list of the mind this Mac is lent to
+    /// fn and ⌥⇧D dictate into the app in front, with the word list of the mind this Mac is lent to
     /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
     private func startDictation() {
+        speech.model = { [weak self] in self?.speechChoice.chosen ?? .default }
+        speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
+        let speechLog = AppLog("speech")
+        speech.log = { speechLog.info($0) }
+        speechChoice.onChange = { [weak self] in self?.stateDidChange() }
+        speechChoice.allowAccessibility = { [weak self] in self?.guide(.accessibility) }
         words.helpers = { [weak self] in self?.lend.helpers }
         for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
@@ -187,7 +202,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dictation.onChange = { [weak self] in self?.stateDidChange() }
         control?.dictationPressed = { [weak self] in self?.dictation.pressed() }
         control?.dictationReleased = { [weak self] in self?.dictation.released() }
+        control?.dictationFn = { [weak self] down in self?.dictation.fnChanged(down: down) }
+        dictation.watchFn()
         register(.dictation, "dictation", "held, dictates", pressed: { [weak self] in self?.dictation.pressed() }, released: { [weak self] in self?.dictation.released() })
+    }
+
+    /// The chosen speech model, loaded in the background a moment after the start when its files
+    /// are on this Mac: the first dictation is then at once, not after Core ML prepared the model
+    /// for the Neural Engine (24.8 s, seen on 24 Nov 2026). A home of its own loads it only for an
+    /// audio fixture; a drawing never gets here.
+    private func preloadSpeech() {
+        guard !environment.hasOwnHome || environmentFixture != nil else { return }
+        let model = speechChoice.chosen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log] in
+            guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
+            Task { @MainActor in
+                let seconds = await task.value
+                log.info(seconds.map { "speech: \(model.id) loaded in the background in \(String(format: "%.1f", $0)) s" } ?? "speech: \(model.id) did not load in the background")
+            }
+        }
     }
 
     /// A key that works in any app. A copy with a home of its own registers none: the keys are the
@@ -218,6 +251,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "panel": ["visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen],
             "input": input.controlState(),
             "dictation": dictation.controlState(),
+            "speech": speechChoice.controlState(),
             "activity": [
                 "pillVisible": model.acts.isPillVisible,
                 "context": model.acts.path.map { $0 as Any } ?? NSNull(),
@@ -324,6 +358,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if #available(macOS 15.0, *) { panelState.captureLine = (capture as? Capture)?.lastLine }
         if panelState.inputLine != input.lastLine { panelState.inputLine = input.lastLine }
         if panelState.dictationLine != dictation.lastLine { panelState.dictationLine = dictation.lastLine }
+        let fnLines = dictation.fnLines
+        if speechChoice.fnLines != fnLines { speechChoice.fnLines = fnLines }
         showLend()
     }
 

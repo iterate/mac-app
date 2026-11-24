@@ -132,7 +132,7 @@ struct MindSwitcher: View {
 
 /// A row of the switcher: the whole row takes the click, and is tinted under the pointer, while
 /// pressed and while `isSelected`.
-private struct SwitcherRowStyle: ButtonStyle {
+struct SwitcherRowStyle: ButtonStyle {
     var isSelected = false
 
     func makeBody(configuration: Configuration) -> some View {

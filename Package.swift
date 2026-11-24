@@ -21,6 +21,8 @@ targets.append(.executableTarget(name: "VoiceMeetMac", dependencies: ["VoiceMeet
 dependencies.append(.package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.18.4"))
 targets.append(.target(name: "SpeechText", dependencies: ["VoiceMeetCore", .product(name: "FluidAudio", package: "FluidAudio")]))
 targets.append(.testTarget(name: "SpeechTextTests", dependencies: ["SpeechText", "VoiceMeetCore"]))
+// `speech-bench` runs one model's recognizer on sound files, for `harness/speech-bench` (local only).
+targets.append(.executableTarget(name: "speech-bench", dependencies: ["SpeechText", "VoiceMeetCore"]))
 // The recorder: screens, cameras, microphones and speakers into 30-second files in a spool
 // (README.md, "The record"). `record-run` drives it from a terminal, for tests.
 targets.append(.target(name: "Record"))

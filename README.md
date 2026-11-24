@@ -410,11 +410,12 @@ If you cannot read that folder (you are an agent of the mind example.com, or you
 ```
 
 Each mark and each click gets a numbered picture: the part of the display around it, cut out
-while you talk. `sheet.jpg` is all of them on one. While you talk the pictures go up and the mind
-puts your voice into words at each pause (the pill shows the last words: the sign that the
-microphone hears you). So at the end only your last words can be missing: the first text says so,
-and the same text with all the words takes its place on the clipboard a moment later, unless you
-copied something else.
+while you talk. `sheet.jpg` is all of them on one. While you talk the pictures go up, and this Mac
+puts your voice into words at each pause, with the speech model of dictation ("Dictation" below)
+and the `words.md` list of the capture's mind; no sound leaves the Mac for it, and no cloud model
+hears it. The pill shows the last words: the sign that the microphone hears you. So at the end
+only your last words can be missing: the first text says so, and the same text with all the words
+takes its place on the clipboard a moment later, unless you copied something else.
 
 **Who reads the text, and what they get** (tested with real agents on 21 November 2026):
 
@@ -441,23 +442,21 @@ path, with two events: `capture/ready` (the words, the marks and the pictures ar
 | `1.jpg` …, `sheet.jpg` | The numbered pictures, at most 12, and all of them on one. A capture with no mark and no click has one: the display at the end                                                                                                                                                                                                |
 | `context.json`         | What the text's script answers: the words, the marks, and the pictures under `"itx/images"`                                                                                                                                                                                                                                   |
 | `seen.json`            | What a model read under each mark, for a reader that gets no picture: a model's claim                                                                                                                                                                                                                                         |
-| `transcript.json`      | The words with their times. The mind's Whisper hears the voice piece by piece: a model's claim, not an observation                                                                                                                                                                                                            |
+| `transcript.json`      | The words with their times (`segments`: `t`, `to`, `text`, `words`), as this Mac's speech model heard them (`by`): a model's claim, not an observation                                                                                                                                                                         |
 | `capture.json`         | The observations: `screen` and `voice` (the two files below), `window` (the app in front, its window's title, a browser's page URL, its accessibility tree: a new one at each change), `click` and `ink` (the points, and the accessibility element under them), `picture`; the numbered pictures (`panels`); and the display |
 | `pictures/01.jpg` …    | At most 12 sharp stills of the whole display: at each mark, at the start and the end, at a change of window, at a click                                                                                                                                                                                                       |
 | `screen.mp4`           | The display under the pointer, with the ink on it and your voice: small (1600 pixels wide, 10 pictures a second)                                                                                                                                                                                                              |
 | `voice.m4a`            | The voice alone                                                                                                                                                                                                                                                                                                               |
 | `accessibility/0.json` | The window in front as text, for the first six windows                                                                                                                                                                                                                                                                        |
 
-**A word list for the transcript.** When the mind has `/dictation/words.txt` (the terms to know,
-one on a line) and `/dictation/replacements.csv` (`wrong,right` on each line), the capture uses
-them: the terms go to Whisper as its prompt (Whisper reads the last 224 tokens of a prompt only),
-and each wrong form in the heard text is replaced, as a whole word, whatever its case.
+**The word list.** The capture uses the mind's `words.md`, the one list of dictation and the input
+("Dictation" below): its terms are listened for, and its wrong forms are written as the terms.
 
 The Mac's key only lends, so the capture goes up as you: `bridge/capture-upload.mjs` uses the
 iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). With no sign-in, or no
-network, the capture stays in `~/Library/Application Support/iterate-mac-app/captures/<id>/`, the
-text on the clipboard names the files there, and the panel says why; send it later with
-`node bridge/capture-upload.mjs <folder> --finish --iterate <iterate.js> --mind <mind>`.
+network, the capture stays in `~/Library/Application Support/iterate-mac-app/captures/<id>/` with
+its `transcript.json`, the text on the clipboard names the files there, and the panel says why;
+send it later with `node bridge/capture-upload.mjs <folder> --finish --iterate <iterate.js> --mind <mind>`.
 
 ## Input: say or type what you want to a mind
 
@@ -512,27 +511,54 @@ mind's choice, and it can change with no new build of this app.
 
 ## Dictation: talk, and it is written
 
-Hold **⌥⇧D** in any app and talk. Let go, and what you said is written where the cursor is. A short
-press keeps the dictation on with no key held: the next press ends it. A pill at the bottom of the
-screen shows the words while you talk. This is what the open source app
-[Hex](https://github.com/anomalyco/hex) does, inside this app; the input bar above uses the same
-listener.
+Hold **fn** (🌐) in any app and talk. Let go, and what you said is written where the cursor is.
+Tap fn twice to talk with no key held (hands-free), until the next tap of fn; Escape cancels. One
+short tap does nothing, and fn with another key is that key's combination. This is how Wispr
+Flow works. **⌥⇧D** works too, as the open source app [Hex](https://github.com/anomalyco/hex) does
+it: hold it and talk; a short press keeps the dictation on until the next press. A pill at the
+bottom of the screen shows the words while you talk, and how the dictation ends ("let go of fn to
+write", "hands-free · tap fn to stop").
 
-- **It runs on this Mac.** The speech model is NVIDIA's Parakeet (TDT 0.6B v3, 25 European
-  languages) as Core ML, through [FluidAudio](https://github.com/FluidInference/FluidAudio), the
-  library of the Swift Hex. No sound and no text leaves the Mac. The first use downloads the model
-  from Hugging Face (about 480 MB, and 100 MB for the second model below) into
-  `~/Library/Application Support/FluidAudio`. You can talk during the download: the microphone is
-  open and what you say is kept. It needs Apple silicon.
+- **fn needs Accessibility.** The app reads fn from the keyboard's modifier keys in every app,
+  which macOS gives only to an app with Accessibility (the permission that also writes the text
+  for you). Without it, the panel's speech section says so, with a button for the guide. macOS
+  can act on 🌐 too (the emoji picker, or its own dictation): when System Settings › Keyboard ›
+  "Press 🌐 key to" is not "Do Nothing", the panel says to set it. The app changes no setting.
+- **One listening at a time.** Dictation and the input bar share one microphone listening
+  (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
+  are written where they belonged.
+- **It runs on this Mac.** The speech model runs as Core ML through
+  [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. No
+  sound and no text leaves the Mac. The panel's speech section chooses the model for dictation,
+  the input and captures; each one shows its size and whether it is on this Mac:
+
+  | Model                       | Download | License   | Note                                                     |
+  | --------------------------- | -------- | --------- | -------------------------------------------------------- |
+  | Parakeet TDT 0.6B v3        | 480 MB   | CC BY 4.0 | The default: 25 European languages                       |
+  | Parakeet Ultra              | 632 MB   | CC BY 4.0 | A post-training of v3, which FluidAudio 0.18.4 recommends |
+
+  A model that is not on this Mac downloads when you choose it, with its progress in the panel,
+  into `~/Library/Application Support/FluidAudio`, and is the model once it loaded. The choice is
+  kept in the app's defaults (`speechModel`). It needs Apple silicon. v3 stays the default: on the
+  owner's own captures and a fixture of the list's hard terms, Ultra got more terms wrong
+  (`harness/speech-bench`, 24 November 2026).
+- **No wait on first use.** Core ML prepares a model for the Neural Engine at its first load after
+  each start of the app (about 25 s on a MacBook Pro). The app loads the chosen model in the
+  background a few seconds after it starts, when its files are on this Mac, so the first
+  dictation is at once. You can talk during a load: the microphone is open and what you say is
+  kept (the last 60 s). The pill says "Getting the speech model: N%" only while files download,
+  and "Loading the speech model" while they only load.
 - **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
   `words.md`, at the root of its config repo: one list item for each term, and after a colon the
   wrong forms that a transcript showed (`- Templestein: temple stein, temple steen`). The app reads
   that file as you (`bridge/words-fetch.mjs`, the iterate CLI's sign-in) and keeps a copy in
   `~/Library/Application Support/iterate-mac-app/words/<mind>.md`, fetched again when it is older
-  than ten minutes. The list does two things. A second, small model listens for the terms in what
-  you said and puts a term in where the sound fits it. Then each wrong form, and each term in
-  another case, is written as the term. ⌥⇧D uses the list of the mind this Mac is lent to; the
-  input bar uses the list of the mind the input goes to. A mind with no `words.md` gives no list.
+  than ten minutes. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
+  listens for the terms in what you said and puts a term in where the sound fits it; it works
+  with each model above, as all of them share v3's tokenizer. Then each wrong form, and each term
+  in another case, is written as the term. Dictation uses the list of the mind this Mac is lent
+  to; the input bar uses the list of the mind the input goes to; a capture uses its mind's. A mind
+  with no `words.md` gives no list.
 - **How the text goes in.** The text is put on the clipboard, ⌘V is pressed for you, and the
   clipboard gets back what it held. That needs the **Accessibility** permission. Without it the
   text stays on the clipboard, and the app opens the guide for the permission.
@@ -540,7 +566,8 @@ listener.
   dictation ended. `app.log` holds counts and times, never the words.
 
 While you talk, the text is written again twice a second from the stretch of speech that is going.
-A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final.
+A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final:
+one segment, with its times from the start.
 
 ## How it works
 
@@ -610,6 +637,17 @@ listening, with a text and files, while it sends, not sent) and the dictation pi
 listening, failed), light and dark, sixteen files. `--render-all <folder>` draws every view, light
 and dark.
 
+**The speech bench** (local only, never in CI: it reads the owner's own captures, and nothing of
+them leaves the Mac or goes into the repository). `swift build -c release --product speech-bench`,
+then `node harness/speech-bench/run.mjs [--text] [--oruk <folder>]` runs each model of the app's
+list on the same clips: up to five captures whose stored `transcript.json` has words, and a
+sentence of `words.md`'s hard terms from `say -o`. Per model it prints the errors on the list's
+terms, the word agreement with the stored text, the seconds from the end of speech to the final
+text, the first segment's start against the stored one, and the load. `--oruk` adds Oruk Fourier
+2B (MLX 8-bit, CC BY-NC 4.0) through Python mlx-audio in a venv of that folder (`oruk.py`); it is
+not a model of the app. `.build/release/speech-bench --model <id> [--words words.md] <file>…`
+prints one model's segments for any sound file.
+
 ### Testing with no hand
 
 An agent builds, runs, drives and checks the app with no person at the Mac, beside an installed
@@ -637,12 +675,13 @@ connection, as the endpoint's; a mind never reaches it.
 | `ui.type {id, text}` | Types into it (`input.text`) |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | ⌥⇧D down and up |
+| `dictation.fn {down}` | fn down (`true`) or up (`false`): a hold, or two taps for hands-free |
 | `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for 30 minutes. While the socket is open, a question shows no alert and asks for no Touch ID |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
 `activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
-`capture.discard`. The tree is read in the app's own process and needs no permission of macOS; to
+`capture.discard`, `speech.model` (the speech model's row) and `speech.model.<id>` (a model in its list). The tree is read in the app's own process and needs no permission of macOS; to
 have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an
 assistive app does.
 
@@ -654,7 +693,9 @@ printf '{"method":"ui.tree"}\n' | nc -U /tmp/mac-test/control.sock
 
 **The audio fixture.** With `ITERATE_MAC_AUDIO_FIXTURE=<file.wav|.aiff|.m4a>`, every listening
 (dictation, the input bar) hears that file in place of the microphone, at the pace of the clock,
-then silence; no audio device opens. A Swift test passes the file to `SpeechListener(fixture:)`.
+then silence; no audio device opens, and the copy loads the speech model in the background as the
+installed app does. A Swift test passes the file to `FixturePlayer`, or its own source and engine
+to `SpeechSession`.
 
 **The drawings** (`--render-*`) take nothing from this Mac: fixed minds and faces, a fixed clock
 (UTC), the things of a Mac with one display and one camera, the scroll bars, accent and locale held
@@ -675,7 +716,10 @@ command run through the endpoint is `device/act-started` and `device/act-ended` 
 and `ui.state` shows its row once, echoed from the context), `approval` (a
 command on Ask is approved, then denied, through the socket), `mind-switch` (two fake minds: an
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
-device event reaches A after the switch), and `dictation-fixture` (a sentence
-from `say -o` is written with the word list's Herdr, Beelink and Doppler; local only: it needs the
-speech model in `~/Library/Application Support/FluidAudio`). CI runs `ci`, every scenario but the
-local one. `--keep` keeps the homes and their logs.
+device event reaches A after the switch), and the local ones, which need the speech models in
+`~/Library/Application Support/FluidAudio`: `dictation-fixture` (a sentence from `say -o` is
+written with the word list's Herdr, Beelink and Doppler), `dictation-fn` (one tap of fn does
+nothing; a hold and a double tap each write the sentence), `capture-transcript-fixture` (the
+sentence after 2 s of silence, pushed as a capture's buffers with their times, gives segments with
+the terms that start after the silence) and `speech-model` (Ultra chosen through `ui.press` is
+the stored choice). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.

@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import ApplicationServices
 import ScreenCaptureKit
+import SpeechText
 import SwiftUI
 import VoiceMeetCore
 
@@ -25,6 +26,11 @@ final class CapturePill: ObservableObject {
 /// the window in front (the app, its title, a browser's page, its accessibility tree), each click
 /// and each ink mark with the accessibility element under it, and sharp pictures of the display at
 /// those moments. The ink is on the screen, so the movie and the pictures show it.
+///
+/// The voice is put into words on this Mac while the person talks: the microphone's sound goes
+/// into a recognizer (`SpeechRecognizer`, the app's speech model, with the word list of the
+/// capture's mind), and each final segment, with its times from the capture's start, goes to the
+/// uploader. No sound leaves the Mac for it.
 ///
 /// `bridge/capture-upload.mjs` runs beside the capture from its start: it puts each picture into
 /// the mind as soon as it exists, and the rest at the end, as files under `/captures/<id>/`, and
@@ -75,38 +81,32 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         }
     }
 
-    /// The voice for the uploader, while the capture runs: the microphone's sound as 16 000
-    /// samples a second, one channel, 16 bits. Used on the voice's queue alone.
+    /// The voice, while the capture runs: the microphone's sound into the recognizer, with its time
+    /// from the capture's start. Used on the voice's queue alone.
     private final class Voice: @unchecked Sendable {
         let queue = DispatchQueue(label: "com.iterate.capture.voice")
-        var uploader: Uploader?
-        private var converter: AVAudioConverter?
-        private let speech = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: true)!
+        var recognizer: SpeechRecognizer?
+        /// The capture's start on the host clock, which the stream's buffers are stamped with.
+        var zero = CMTime.zero
+        private let audio = SpeechAudio()
 
         func take(_ sampleBuffer: CMSampleBuffer) {
-            guard let uploader, let description = sampleBuffer.formatDescription else { return }
+            guard let recognizer, let description = sampleBuffer.formatDescription else { return }
             let format = AVAudioFormat(cmAudioFormatDescription: description)
-            if converter?.inputFormat != format { converter = AVAudioConverter(from: format, to: speech) }
-            guard let converter else { return }
+            let seconds = (sampleBuffer.presentationTimeStamp - zero).seconds
             try? sampleBuffer.withAudioBufferList { list, _ in
-                guard let sound = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list.unsafePointer),
-                    let converted = AVAudioPCMBuffer(pcmFormat: speech, frameCapacity: AVAudioFrameCount(Double(sound.frameLength) * 16_000 / format.sampleRate) + 64)
-                else { return }
-                var isGiven = false
-                converter.convert(to: converted, error: nil) { _, status in
-                    status.pointee = isGiven ? .noDataNow : .haveData
-                    isGiven = true
-                    return sound
-                }
-                guard converted.frameLength > 0, let samples = converted.int16ChannelData?[0] else { return }
-                uploader.send("audio " + Data(bytes: samples, count: Int(converted.frameLength) * 2).base64EncodedString())
+                guard let sound = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list.unsafePointer) else { return }
+                let samples = audio.samples(of: sound)
+                guard !samples.isEmpty else { return }
+                // a stamp that is not of the capture's clock gives no time: the samples follow on
+                recognizer.push(samples, at: seconds.isFinite && seconds >= 0 && seconds < Capture.maximumSeconds + 60 ? seconds : nil)
             }
         }
     }
 
     static let folder = AppEnvironment.current.folder.appendingPathComponent("captures")
     /// A capture ends by itself after this long.
-    static let maximumSeconds = 600.0
+    nonisolated static let maximumSeconds = 600.0
 
     private(set) var isRunning = false
     /// The last capture's outcome, for the panel.
@@ -116,6 +116,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     var session: MindSession?
     /// The guide to a permission of macOS (the app's delegate has it).
     var allow: (Permission) -> Void = { _ in }
+    /// The speech model now, and the word list of a mind.
+    var speech: () -> SpeechModel = { .default }
+    var words: (String?) -> WordList = { _ in .empty }
 
     private let log = AppLog("capture")
     private let pill = CapturePill()
@@ -130,6 +133,10 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var lastPictureAt = Date.distantPast
     private var uploader: Uploader?
     private let voice = Voice()
+    /// The recognizer of this capture's voice, and how many of its segments the uploader has.
+    private var recognizer: SpeechRecognizer?
+    private var segmentsSent = 0
+    private var isVoiceDone = false
     /// The session at this capture's start: its manifest, its pill and its upload go with it until
     /// it ends, whatever the Mac is lent to then.
     private var pinned: MindSession?
@@ -228,6 +235,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         self.screen = screen
         self.displayID = displayID
         zero = Date()
+        startVoice(isOn: Permission.microphone.isGranted)
         observations = []
         pictures = 0
         lastPictureAt = .distantPast
@@ -490,6 +498,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         guard isRunning, !isEnding else { return }
         isEnding = true
         defer { isEnding = false }
+        endVoice(send: send)
         endStroke()
         // every mark and click has its picture before the ink goes
         for task in pictureTasks { await task.value }
@@ -600,7 +609,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             "startedAt": iso.string(from: zero),
             "endedAt": iso.string(from: zero.addingTimeInterval(Double(durationMs) / 1000)),
             "durationMs": durationMs,
-            // the voice comes to the uploader while the person talks
+            // the voice is heard on this Mac while the person talks
             "microphone": Permission.microphone.isGranted,
             "panels": panels.sorted { ($0["n"] as? Int ?? 0) < ($1["n"] as? Int ?? 0) },
             "by": [
@@ -625,18 +634,76 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         guard let pinned else { return uploader = nil }
         let capture = id
         uploader = Uploader(
-            [pinned.helpers.node, pinned.helpers.captureUpload, folder.path, "--iterate", pinned.helpers.iterateBin, "--mind", pinned.mind],
+            [
+                pinned.helpers.node, pinned.helpers.captureUpload, folder.path, "--iterate", pinned.helpers.iterateBin, "--mind", pinned.mind,
+                "--heard-by", speech().id,
+            ],
             said: { [weak self] line in if self?.id == capture { self?.uploaderSaid(line) } },
             ended: { [weak self] in
                 guard let self, self.id == capture, self.uploader != nil else { return }
                 self.uploader = nil
                 self.fail("Not sent: the uploader ended. The capture is in \(self.folder.path)", keep: true)
             })
-        let uploader = self.uploader
-        voice.queue.async { [voice] in voice.uploader = uploader }
     }
 
-    /// The microphone's sound, on the voice's queue: to the uploader, which has the mind put it into words.
+    /// The recognizer of the capture's voice, from its start: the chosen model, with the word list
+    /// of the capture's mind. Each final segment goes to the uploader at once.
+    private func startVoice(isOn: Bool) {
+        segmentsSent = 0
+        isVoiceDone = false
+        recognizer = nil
+        let host = CMClockGetTime(CMClockGetHostTimeClock())
+        guard isOn else { return voice.queue.async { [voice] in voice.recognizer = nil } }
+        let capture = id
+        let model = speech()
+        let recognizer = SpeechRecognizer(model: model, words: words(pinned?.mind)) { [weak self] event in
+            DispatchQueue.main.async { MainActor.assumeIsolated { if self?.id == capture { self?.heard(event) } } }
+        }
+        self.recognizer = recognizer
+        recognizer.start()
+        voice.queue.async { [voice] in
+            voice.zero = host
+            voice.recognizer = recognizer
+        }
+        log.info("capture \(id): the voice is heard on this Mac by \(model.id)")
+    }
+
+    private func heard(_ event: SpeechRecognizer.Event) {
+        switch event {
+        case .segment(let segment):
+            guard !isVoiceDone else { return }
+            uploader?.send(segment.uploaderLine)
+            segmentsSent += 1
+        case .partial(let said):
+            // what was just heard, while the capture runs: the sign that the microphone hears the person
+            if isRunning, !said.isEmpty { say("…" + said.suffix(44), startedAt: zero) }
+        case .note(let note):
+            log.info("capture \(id): voice: \(note)")
+        case .failed(let reason):
+            log.error("capture \(id): voice: \(reason)")
+        case .loading, .ready:
+            break
+        }
+    }
+
+    /// The voice ends with the capture: the last segments go to the uploader, then `heard`, and the
+    /// text on the clipboard gets the last words.
+    private func endVoice(send: Bool) {
+        voice.queue.async { [voice] in voice.recognizer = nil }
+        guard let recognizer else { return }
+        self.recognizer = nil
+        guard send else { return recognizer.cancel() }
+        let capture = id
+        Task { @MainActor in
+            let segments = await recognizer.finish()
+            guard self.id == capture else { return }
+            self.isVoiceDone = true
+            for segment in segments.dropFirst(self.segmentsSent) { self.uploader?.send(segment.uploaderLine) }
+            self.uploader?.send("heard")
+        }
+    }
+
+    /// The microphone's sound, on the voice's queue: to the recognizer.
     nonisolated func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         if type == .microphone { voice.take(sampleBuffer) }
     }
@@ -645,8 +712,6 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private func uploaderSaid(_ line: [String: Any]) {
         let mind = pinned?.mind ?? "the mind"
         if let progress = line["progress"] as? Double, pill.progress != nil { pill.progress = progress }
-        // what was just heard, while the capture runs: the sign that the microphone hears the person
-        if let words = line["words"] as? String, !words.isEmpty, isRunning { say("…" + words.suffix(44), startedAt: zero) }
         if let text = line["copy"] as? String, copiedAt == nil || copiedAt == NSPasteboard.general.changeCount {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)

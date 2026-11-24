@@ -64,6 +64,8 @@ struct LendActions {
 struct Panel: View {
     @ObservedObject var state: PanelState
     let model: AppModel
+    /// The speech model and what keeps fn dictation from working.
+    var speech = SpeechChoice()
     /// The person changed a choice.
     let changed: () -> Void
     /// The person wants to give a permission of macOS: the guide starts.
@@ -107,6 +109,7 @@ struct Panel: View {
                 section("Displays", of: .screen)
                 section("Cameras", of: .camera)
                 section("This Mac", of: .microphone, .speaker, .banners, .accessibility, .commands)
+                SpeechSection(choice: speech)
                 DeviceEventsSection(events: model.deviceEvents)
                 LiveWatching(live: model.live)
                 RecordSection(record: model.record, window: model.deviceWindow, allow: allow)
@@ -124,7 +127,7 @@ struct Panel: View {
                 }
                 .padding(.top, 4)
                 if let line = state.inputLine { Text("Last input: \(line)").textSelection(.enabled) }
-                Text("Hold ⌥⇧D and talk: what you say is written where the cursor is, on this Mac, with the mind's word list. A short press keeps it on until the next press.")
+                Text("Hold fn (🌐) or ⌥⇧D and talk: what you say is written where the cursor is, on this Mac, with the mind's word list. Tap fn twice to talk hands-free until the next tap; a short press of ⌥⇧D keeps it on until the next press.")
                     .padding(.top, 4)
                 if let line = state.dictationLine { Text("Last dictation: \(line)").textSelection(.enabled) }
             }
