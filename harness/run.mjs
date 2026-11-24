@@ -17,7 +17,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
 const root = join(import.meta.dirname, "..");
@@ -177,8 +177,14 @@ const scenarios = {
       // the mark says it is a test copy: the owner never quits the installed app for it
       const mark = [...nodes(tree)].find((node) => node.id === "statusItem");
       if (!mark?.label?.startsWith("iterate test copy:")) throw new Error(`the mark's label is ${JSON.stringify(mark?.label)}`);
-      for (const id of ["statusItem", "panel.quit", "panel.copyPrompt", "sharing.commands", "record.screens"])
+      for (const id of ["statusItem", "panel.quit", "panel.copyPrompt", "sharing.commands", "record.screens", "speech.model"])
         if (!ids.has(id)) throw new Error(`ui.tree has no ${id}`);
+      // the speech model's list opens under its row, with every model of the app
+      await run.control("ui.press", { id: "speech.model" });
+      await until("the list of speech models", 5, async () => {
+        const open = new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id));
+        return open.has("speech.model.parakeet-v3") && open.has("speech.model.parakeet-ultra");
+      });
       // a segment of a sharing control, pressed by its label
       await run.control("ui.press", { id: "sharing.speaker", label: "Shared" });
       await until("the speakers shared", 5, async () => (await run.state()).sharing.speaker === "shared");
@@ -227,6 +233,99 @@ const scenarios = {
         await run.control("dictation.stop");
         const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
+      } finally {
+        await run.quit();
+      }
+    },
+  },
+
+  /**
+   * The fn key's two ways, with the fixture in place of the microphone: held (push to talk), and
+   * tapped twice (hands-free until the next tap).
+   */
+  "dictation-fn": {
+    local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
+    async run({ app, home }) {
+      withMind(home);
+      const fixture = join(home, "fixture.aiff");
+      execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler"]);
+      mkdirSync(join(home, "words"), { recursive: true });
+      writeFileSync(join(home, "words", `${MIND}.md`), "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
+      const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
+      const fn = (down) => run.control("dictation.fn", { down });
+      const dictation = async () => (await run.state()).dictation;
+      try {
+        // a tap alone does nothing
+        await fn(true);
+        await fn(false);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        if ((await dictation()).running) throw new Error("a single tap of fn started a dictation");
+        // held: it listens while fn is down
+        await fn(true);
+        await until("the hold", 5, async () => (await dictation()).mode === "holding");
+        await until("the words in the pill", 240, async () => /doppler/i.test((await dictation()).text));
+        await fn(false);
+        const held = await until("the held dictation's text", 60, async () => !(await dictation()).running && (await dictation()).lastText);
+        for (const term of ["Herdr", "Beelink", "Doppler"]) if (!held.includes(term)) throw new Error(`held: "${held}" has no ${term}`);
+        // tapped twice: it listens with fn up, until the next tap
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        for (const down of [true, false, true, false]) await fn(down);
+        await until("hands-free", 5, async () => (await dictation()).mode === "hands-free");
+        await until("the words in the pill", 60, async () => /doppler/i.test((await dictation()).text));
+        if (!(await dictation()).running) throw new Error("hands-free ended with fn up");
+        await fn(true);
+        await fn(false);
+        const free = await until("the hands-free text", 60, async () => !(await dictation()).running && (await dictation()).lastText);
+        if (!/Doppler/.test(free)) throw new Error(`hands-free: "${free}" has no Doppler`);
+      } finally {
+        await run.quit();
+      }
+    },
+  },
+
+  /**
+   * A capture's voice, as pushed buffers with their times: the fixture, with 2 s of silence first,
+   * through the recognizer that a capture uses (speech-bench), gives timed segments with the terms.
+   */
+  "capture-transcript-fixture": {
+    local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
+    async run({ app, home }) {
+      const bench = join(dirname(app), "speech-bench");
+      if (!existsSync(bench)) throw new Error(`no ${bench}: run swift build`);
+      const fixture = join(home, "fixture.aiff");
+      execFileSync("say", ["-o", fixture, "[[slnc 2000]] Herdr runs on the Beelink with Doppler"]);
+      const words = join(home, "words.md");
+      writeFileSync(words, "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
+      const lines = execFileSync(bench, ["--model", "parakeet-v3", "--words", words, fixture], { encoding: "utf8", timeout: 300_000, stdio: ["ignore", "pipe", "ignore"] })
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      const segments = lines.at(-1).segments ?? [];
+      const text = segments.map((segment) => segment.text).join(" ");
+      for (const term of ["Herdr", "Beelink", "Doppler"]) if (!text.includes(term)) throw new Error(`"${text}" has no ${term}`);
+      // the words start after the silence, on the capture's clock
+      if (!(segments[0].t >= 1500 && segments[0].t < 3500 && segments.at(-1).to > segments[0].t))
+        throw new Error(`the segments' times are ${JSON.stringify(segments.map(({ t, to }) => [t, to]))}`);
+    },
+  },
+
+  /** The panel's model picker, through ui.press: the choice is stored in the home's defaults. */
+  "speech-model": {
+    local: "needs Parakeet v3 and Ultra in ~/Library/Application Support/FluidAudio (else a choice downloads)",
+    async run({ app, home }) {
+      const run = await start(app, home);
+      try {
+        const speech = async () => (await run.state()).speech;
+        if ((await speech()).model !== "parakeet-v3") throw new Error(`the default model is ${(await speech()).model}`);
+        if (!(await speech()).models.every((model) => model.onDisk)) throw new Error("a model is not on this Mac");
+        await run.control("ui.press", { id: "statusItem" });
+        await until("the panel", 10, async () => (await run.state()).panel.visible);
+        await run.control("ui.press", { id: "speech.model" });
+        await until("the list", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "speech.model.parakeet-ultra"));
+        await run.control("ui.press", { id: "speech.model.parakeet-ultra" });
+        await until("Ultra chosen", 10, async () => (await speech()).model === "parakeet-ultra");
+        const stored = execFileSync("defaults", ["read", join(home, "defaults"), "speechModel"], { encoding: "utf8" }).trim();
+        if (stored !== "parakeet-ultra") throw new Error(`the stored choice is ${stored}`);
       } finally {
         await run.quit();
       }

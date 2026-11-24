@@ -1,6 +1,5 @@
 import AppKit
 import Combine
-import AVFoundation
 import SpeechText
 import SwiftUI
 import UniformTypeIdentifiers
@@ -33,8 +32,9 @@ final class MindInputModel: ObservableObject {
 
     enum Voice: Equatable {
         case off
-        /// The speech model loads or downloads, 0 to 1. The microphone is open: what is said is kept.
-        case loading(Double)
+        /// The speech model comes: the part of its download, or nil while it only loads. The
+        /// microphone is open: what is said is kept.
+        case loading(Double?)
         case listening
         /// The last words are written after the microphone closed.
         case finishing
@@ -151,8 +151,10 @@ final class VoiceLevel: ObservableObject {
 /// THE INPUT: ⌥⇧Space in any app opens one bar. It listens at once: the person talks, types, or
 /// both, pastes or drops files, chooses the mind, and presses Return (README, "Input").
 ///
-/// What is said is written on this Mac (`SpeechListener`, with the chosen mind's word list). The
-/// microphone is open only while the bar is open and has the keyboard, and its button turns it off.
+/// What is said is written on this Mac (the app's one foreground listening, `SpeechSession`, with
+/// the chosen mind's word list). The microphone is open only while the bar is open and has the
+/// keyboard, and its button turns it off. A dictation that starts meanwhile ends the bar's
+/// listening: its last words are written into the bar.
 ///
 /// The bar closes at once. `bridge/input-send.mjs` puts the files into that mind's files and
 /// appends one event, `device/input-submitted`, to `/devices/<name>`, as the person (the iterate
@@ -160,7 +162,7 @@ final class VoiceLevel: ObservableObject {
 /// mind's config. An input that did not go comes back: the bar opens again with the text, the
 /// files and the reason, and Return sends the same input again.
 @MainActor
-final class MindInput {
+final class MindInput: SpeechClient {
     /// The helpers, the minds this Mac knows, and the one it is lent to.
     typealias Choices = (helpers: MindSession.Helpers, minds: [LendView.Mind], active: String?)
 
@@ -186,14 +188,15 @@ final class MindInput {
     private var sendingTo = ""
     /// The choices at the bar's opening.
     private var opened: Choices?
-    private var listener: SpeechListener?
-    /// Counts the listenings, so that a late word of an old one changes nothing.
-    private var round = 0
-    var isListening: Bool { listener != nil }
+    private let session: SpeechSession
+    /// What waits for the listening's last words (Return sends after them).
+    private var afterLastWords: [() -> Void] = []
+    var isListening: Bool { session.isListening(for: self) }
     /// What the sender printed after its last whole line.
     private var pending = ""
 
-    init() {
+    init(session: SpeechSession) {
+        self.session = session
         model.send = { [weak self] in self?.submit() }
         model.close = { [weak self] in self?.close() }
         model.toggleMicrophone = { [weak self] in self?.toggleMicrophone() }
@@ -225,87 +228,68 @@ final class MindInput {
     /// Opens the microphone. `asking` is true for the person's own click: then a permission that
     /// macOS refused opens its guide; the bar's own start only says so.
     private func listen(asking: Bool) {
-        guard listener == nil, !model.draft.isSending, panel?.isVisible == true else { return }
-        // a home of its own opens no microphone: only an audio fixture is heard (`Dictation` too)
-        let hearsFixture = SpeechListener.environmentFixture != nil
-        if AppEnvironment.current.hasOwnHome, !hearsFixture { return }
-        switch hearsFixture ? .authorized : AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            break
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] isGranted in
-                DispatchQueue.main.async { MainActor.assumeIsolated { if isGranted { self?.listen(asking: false) } } }
-            }
-            return
-        default:
+        guard !isListening, model.voice != .finishing, !model.draft.isSending, panel?.isVisible == true else { return }
+        model.spoken = SpokenText(base: model.draft.text)
+        model.level.level = 0
+        switch session.start(self, words: words(model.mind), allowed: { [weak self] in self?.listen(asking: false) }) {
+        case nil:
+            log.info("listening: on")
+            onChange()
+        case .ownHome, .asking:
+            model.spoken = nil
+        case .notAllowed:
+            model.spoken = nil
             model.voice = .failed("iterate may not use the microphone")
             if asking { allow(.microphone) }
-            return
         }
-        round += 1
-        let round = round
-        let listener = SpeechListener()
-        self.listener = listener
-        model.spoken = SpokenText(base: model.draft.text)
-        model.voice = SpeechModels.isOnDisk ? .listening : .loading(0)
-        model.level.level = 0
-        log.info("listening: on")
-        listener.start(words: words(model.mind)) { [weak self] event in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.heard(event, round: round) } }
-        }
-        onChange()
     }
 
-    private func heard(_ event: SpeechListener.Event, round: Int) {
-        if case .note(let note) = event { return log.info("listening: \(note)") }
-        guard round == self.round, listener != nil else { return }
+    func speech(_ event: SpeechSession.Event) {
         switch event {
-        case .loading(let progress):
-            if progress < 1 { model.voice = .loading(progress) }
-        case .listening:
-            if case .loading = model.voice { model.voice = .listening }
+        case .phase(let phase):
+            guard model.voice != .finishing else { return }
+            if case .loading(let part) = phase { model.voice = .loading(part) } else { model.voice = .listening }
         case .text(let said):
             model.heard(said)
         case .level(let level):
             model.level.level = level
         case .failed(let reason):
-            listener = nil
             model.spoken = nil
             model.voice = .failed(reason)
             log.error("listening: \(reason)")
             onChange()
-        case .note:
-            break
+        case .ended(let said):
+            // after the bar's own stop, or when a dictation started
+            model.heard(said)
+            model.spoken = nil
+            if model.voice == .finishing || model.voice.isOpen { model.voice = .off }
+            onChange()
+            let waiting = afterLastWords
+            afterLastWords = []
+            waiting.forEach { $0() }
         }
     }
 
     /// Closes the microphone. With `keepingLastWords` the words that were said last are still
     /// written, and `then` runs after them.
     private func stopListening(keepingLastWords: Bool, then: @escaping () -> Void = {}) {
-        guard let listener else {
+        if model.voice == .finishing { return afterLastWords.append(then) }
+        guard isListening else {
             if model.voice.isOpen { model.voice = .off }
             return then()
         }
-        self.listener = nil
-        round += 1
         model.level.level = 0
         log.info("listening: off")
         guard keepingLastWords else {
-            listener.cancel()
+            session.cancel(self)
             model.spoken = nil
             model.voice = .off
             onChange()
             return then()
         }
         model.voice = .finishing
-        Task { @MainActor in
-            let said = await listener.finish()
-            self.model.heard(said)
-            self.model.spoken = nil
-            if self.model.voice == .finishing { self.model.voice = .off }
-            self.onChange()
-            then()
-        }
+        afterLastWords.append(then)
+        session.finish(self)
     }
 
     private func show(takingKeys: Bool) {
@@ -645,8 +629,8 @@ struct MindInputBar: View {
                 Text("Sending to \(title)…")
             }
             .foregroundStyle(.secondary)
-        } else if case .loading(let progress) = model.voice {
-            Text(progress > 0 ? "Getting the speech model: \(Int(progress * 100))%. Talk now, it is kept." : "Loading the speech model. Talk now, it is kept.")
+        } else if case .loading(let part) = model.voice {
+            Text(SpeechSession.loadingLine(part))
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
         } else if case .failed(let reason) = model.voice {

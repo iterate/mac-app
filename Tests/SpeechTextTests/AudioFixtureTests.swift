@@ -37,12 +37,14 @@ final class AudioFixtureTests: XCTestCase {
         XCTAssertTrue(UnsafeBufferPointer(start: silence.floatChannelData![0], count: Int(silence.frameLength)).allSatisfy { $0 == 0 })
     }
 
-    func testAListenerWithAFixtureThatDoesNotReadFailsAtOnce() {
-        let listener = SpeechListener(fixture: URL(fileURLWithPath: "/nonexistent/fixture.wav"))
-        let failed = expectation(description: "failed")
-        listener.start(words: .empty) { event in
-            if case .failed(let reason) = event, reason.contains("fixture.wav") { failed.fulfill() }
+    func testAFixtureThatDoesNotReadFailsAtOnce() {
+        XCTAssertThrowsError(try FixturePlayer(URL(fileURLWithPath: "/nonexistent/fixture.wav")).start { _ in }) { error in
+            XCTAssertTrue(error.localizedDescription.contains("fixture.wav"))
         }
-        wait(for: [failed], timeout: 1)
+    }
+
+    func testTheFixtureIsTheSourceWhenOneIsSet() throws {
+        XCTAssertTrue(speechSource(fixture: try tone()) is FixturePlayer)
+        XCTAssertTrue(speechSource(fixture: nil) is Microphone)
     }
 }
