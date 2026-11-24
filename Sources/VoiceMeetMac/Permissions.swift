@@ -161,8 +161,8 @@ struct Shareable: Identifiable, Hashable {
     let symbol: String
 
     var sharing: Sharing {
-        get { Sharing(rawValue: UserDefaults.standard.string(forKey: "sharing.\(id)") ?? "") ?? .off }
-        nonmutating set { UserDefaults.standard.set(newValue.rawValue, forKey: "sharing.\(id)") }
+        get { Sharing(rawValue: AppEnvironment.current.defaults.string(forKey: "sharing.\(id)") ?? "") ?? .off }
+        nonmutating set { AppEnvironment.current.defaults.set(newValue.rawValue, forKey: "sharing.\(id)") }
     }
 
     var isPermitted: Bool { power.permission?.isGranted ?? true }

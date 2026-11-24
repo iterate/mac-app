@@ -6,20 +6,25 @@ import Network
 ///
 /// A small file lent to a mind with `iterate provide` (`bridge/mac-endpoint.ts`) asks it one
 /// question for each connection, as one line of JSON, and gets one line of JSON back. What it
-/// may ask is in `AppModel.answer`: the person can forbid each power in the menu.
+/// may ask is in `AppModel.answer`: the person can forbid each power in the menu. The control
+/// socket (`ControlSocket`) is a second one of these, for a test on this Mac.
 @MainActor
 final class LocalEndpoint {
-    static let socketURL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/voice-meet-mac/endpoint.sock")
+    let socketURL: URL
 
     /// Answers one request. An `EndpointRefusal` carries the words the caller reads.
     var onRequest: (_ method: String, _ parameters: [String: Any]) async throws -> [String: Any] = { _, _ in [:] }
 
-    private let log = AppLog("endpoint")
+    private let log: AppLog
     private var listener: NWListener?
 
+    init(socketURL: URL = AppEnvironment.current.endpointSocket, log: String = "endpoint") {
+        self.socketURL = socketURL
+        self.log = AppLog(log)
+    }
+
     func start() {
-        let url = Self.socketURL
+        let url = socketURL
         do {
             // Only the person's own processes can reach the socket: the folder is theirs alone.
             try FileManager.default.createDirectory(
@@ -48,7 +53,7 @@ final class LocalEndpoint {
     func stop() {
         listener?.cancel()
         listener = nil
-        try? FileManager.default.removeItem(at: Self.socketURL)
+        try? FileManager.default.removeItem(at: socketURL)
     }
 
     /// Reads up to the first line end, answers, and closes: one request for each connection.

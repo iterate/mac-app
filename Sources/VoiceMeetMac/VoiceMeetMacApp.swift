@@ -8,6 +8,15 @@ enum VoiceMeetMacApp {
         if CommandLine.arguments.contains(Permission.checkScreenRecordingArgument) {
             exit(CGPreflightScreenCaptureAccess() ? 0 : 1)
         }
+        if AppEnvironment.current.isRendering {
+            Rendering.fixSystemSettings()
+            // the drawing's own home in the temporary folder goes with it, at every exit
+            atexit { try? FileManager.default.removeItem(at: AppEnvironment.current.folder) }
+        }
+        // Every view, light and dark, for the snapshot check: `--render-all <folder>` (Rendering.swift).
+        if let flag = CommandLine.arguments.firstIndex(of: "--render-all"), CommandLine.arguments.indices.contains(flag + 1) {
+            exit(Rendering.renderAll(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
+        }
         // A copy started only to draw the panel to a PNG file, for a look at it with no click.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-panel"), CommandLine.arguments.indices.contains(flag + 1) {
             // an optional third word draws the lend in that phase: live, reconnecting, stopped, not-allowed

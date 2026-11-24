@@ -112,7 +112,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         }
     }
 
-    static let folder = Lend.folder.appendingPathComponent("captures")
+    static let folder = AppEnvironment.current.folder.appendingPathComponent("captures")
     /// A capture ends by itself after this long.
     static let maximumSeconds = 600.0
 
@@ -171,6 +171,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var clickMonitor: Any?
     private var finished: CheckedContinuation<Void, Never>?
     private var isEnding = false
+
+    /// For `ui.state` on the control socket.
+    func controlState() -> [String: Any] {
+        ["running": isRunning, "pillVisible": pillPanel?.isVisible ?? false, "pill": pill.text, "lastLine": lastLine ?? NSNull()]
+    }
 
     /// ⌥⇧S: start, or end and send.
     func toggle() {
@@ -750,8 +755,8 @@ private struct CapturePillView: View {
             Text(pill.text).lineLimit(1).truncationMode(.middle)
             if let progress = pill.progress { ProgressView(value: min(max(progress, 0), 1)).frame(width: 90) }
             if pill.startedAt != nil {
-                Button("Send", action: send)
-                Button("Discard", action: discard)
+                Button("Send", action: send).accessibilityIdentifier("capture.send")
+                Button("Discard", action: discard).accessibilityIdentifier("capture.discard")
             }
         }
         .font(.system(size: 13, weight: .medium))

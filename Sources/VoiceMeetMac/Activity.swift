@@ -40,9 +40,9 @@ final class ActivityLog: ObservableObject {
     private let pill = ActivityPillWindow()
     /// The person's choice in the panel: each act shows in a pill on the screen. Off: the panel's
     /// list and the red 𝑖 in the menu bar alone.
-    @Published var showsPill = UserDefaults.standard.object(forKey: "activity.pill") as? Bool ?? true {
+    @Published var showsPill = AppEnvironment.current.defaults.object(forKey: "activity.pill") as? Bool ?? true {
         didSet {
-            UserDefaults.standard.set(showsPill, forKey: "activity.pill")
+            AppEnvironment.current.defaults.set(showsPill, forKey: "activity.pill")
             if !showsPill { pill.close() }
         }
     }
@@ -67,6 +67,8 @@ final class ActivityLog: ObservableObject {
     func stop() {
         pill.close()
     }
+
+    var isPillVisible: Bool { pill.isVisible }
 }
 
 /// The pill at the top right of the screen with the pointer: the acts that run, or the last one
@@ -110,6 +112,8 @@ private final class ActivityPillWindow {
         hide?.cancel()
         panel?.orderOut(nil)
     }
+
+    var isVisible: Bool { panel?.isVisible ?? false }
 
     private func dismiss() {
         dismissedUpTo = shown.entry?.id ?? dismissedUpTo
@@ -226,6 +230,7 @@ struct ActivityList: View {
             .help("What a mind did with this Mac since the app started")
             if isOpen {
                 Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.caption)
+                    .accessibilityIdentifier("activity.showsPill")
                 if log.entries.isEmpty {
                     Text("No mind has used this Mac since the app started.").font(.caption).foregroundStyle(.secondary)
                 }
@@ -253,7 +258,7 @@ struct ActivityList: View {
     }
 
     private static func clock(_ date: Date) -> String {
-        date.formatted(date: .omitted, time: .standard)
+        Lend.clock(date)
     }
 }
 
@@ -262,35 +267,23 @@ extension ActivityLog {
     /// light and dark: a look with no Mac bar (`--render-activity <folder>`).
     static func render(to folder: URL) -> Bool {
         _ = NSApplication.shared
+        Rendering.fixFaces()
         let log = ActivityLog()
-        let now = Date()
+        let now = Rendering.now
         log.entries = [
-            Entry(id: 4, at: now, symbol: Shareable.commands.symbol, doing: "Running a command", did: "Ran a command", detail: "/bin/zsh -lc git -C ~/src/app status --short", mind: "iterate.com", endedAt: nil, failure: nil),
-            Entry(id: 3, at: now.addingTimeInterval(-42), symbol: "display", doing: "", did: "Took a picture of the display “Built-in Retina Display”", detail: nil, mind: "iterate.com", endedAt: now.addingTimeInterval(-41.6), failure: nil),
-            Entry(id: 2, at: now.addingTimeInterval(-95), symbol: Shareable.microphone.symbol, doing: "", did: "Listened to the microphone for 5 s", detail: nil, mind: "iterate.com", endedAt: now.addingTimeInterval(-90), failure: nil),
-            Entry(id: 1, at: now.addingTimeInterval(-300), symbol: Shareable.commands.symbol, doing: "", did: "Ran a command", detail: "/usr/bin/false", mind: "iterate.com", endedAt: now.addingTimeInterval(-299), failure: "it ended with status 1"),
+            Entry(id: 4, at: now, symbol: Shareable.commands.symbol, doing: "Running a command", did: "Ran a command", detail: "/bin/zsh -lc git -C ~/src/app status --short", mind: "iterate.example.com", endedAt: nil, failure: nil),
+            Entry(id: 3, at: now.addingTimeInterval(-42), symbol: "display", doing: "", did: "Took a picture of the display “Built-in Retina Display”", detail: nil, mind: "iterate.example.com", endedAt: now.addingTimeInterval(-41.6), failure: nil),
+            Entry(id: 2, at: now.addingTimeInterval(-95), symbol: Shareable.microphone.symbol, doing: "", did: "Listened to the microphone for 5 s", detail: nil, mind: "iterate.example.com", endedAt: now.addingTimeInterval(-90), failure: nil),
+            Entry(id: 1, at: now.addingTimeInterval(-300), symbol: Shareable.commands.symbol, doing: "", did: "Ran a command", detail: "/usr/bin/false", mind: "iterate.example.com", endedAt: now.addingTimeInterval(-299), failure: "it ended with status 1"),
         ]
         let shown = ShownActivity()
         shown.entry = log.entries.first
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var drawn = true
         for (dark, tone) in [(false, "light"), (true, "dark")] {
-            let views: [(String, NSView)] = [
-                ("pill", NSHostingView(rootView: ActivityPillView(shown: shown).frame(width: 340, height: 56).padding(12).background(Color(nsColor: .windowBackgroundColor)))),
-                ("list", NSHostingView(rootView: ActivityList(log: log, isOpen: .constant(true)).frame(width: 398).padding(16).background(Color(nsColor: .windowBackgroundColor)))),
-            ]
-            for (name, view) in views {
-                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                view.appearance = appearance
-                let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-                window.appearance = appearance
-                window.contentView = view
-                view.layoutSubtreeIfNeeded()
-                guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-                view.cacheDisplay(in: view.bounds, to: picture)
-                let file = folder.appendingPathComponent("activity-\(name)-\(tone).png")
-                drawn = drawn && (picture.representation(using: .png, properties: [:]).map { (try? $0.write(to: file)) != nil } ?? false)
-            }
+            let pill = ActivityPillView(shown: shown).frame(width: 340, height: 56).padding(12).background(Color(nsColor: .windowBackgroundColor))
+            drawn = Rendering.png(of: pill, dark: dark, to: folder.appendingPathComponent("activity-pill-\(tone).png")) && drawn
+            let list = ActivityList(log: log, isOpen: .constant(true)).frame(width: 398).padding(16).background(Color(nsColor: .windowBackgroundColor))
+            drawn = Rendering.png(of: list, dark: dark, to: folder.appendingPathComponent("activity-list-\(tone).png")) && drawn
         }
         return drawn
     }

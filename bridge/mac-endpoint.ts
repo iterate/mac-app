@@ -23,7 +23,10 @@ import { join } from "node:path";
 export const description =
   "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, and banners on the screen with buttons (banner.show; call.ring looks like a call). Compute: commands. A record into the mind: record.state, record.set. Live: live.state, live.end. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
 
-const socketPath = join(homedir(), "Library/Application Support/voice-meet-mac/endpoint.sock");
+/** The app's socket: in its own home when the app has one (`ITERATE_MAC_HOME`, AppEnvironment.swift). */
+const socketPath = process.env.ITERATE_MAC_HOME
+  ? join(process.env.ITERATE_MAC_HOME, "endpoint.sock")
+  : join(homedir(), "Library/Application Support/voice-meet-mac/endpoint.sock");
 
 type Answer = Record<string, unknown>;
 

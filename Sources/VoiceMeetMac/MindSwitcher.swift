@@ -162,40 +162,21 @@ private struct SwitcherRowStyle: ButtonStyle {
 }
 
 extension MindSwitcher {
-    /// Draws the switcher of the minds in config.json, closed and open, in the light and the dark
-    /// appearance: four PNG files in `folder`, for a look with no Mac bar. A last mind,
-    /// `example.com`, has no profile: its face is its letter. It reads each mind's profile first
-    /// (`MindFaces.read`), and waits at most ten seconds for them.
+    /// Draws the switcher of the drawings' minds (`Rendering`), closed and open, in the light and
+    /// the dark appearance: four PNG files in `folder`, for a look with no Mac bar. The first mind
+    /// has a name and an icon, the second a name alone, the last neither: its face is its letter.
     @MainActor
     static func render(to folder: URL) -> Bool {
-        _ = NSApplication.shared
-        var lend = Panel.sampleLend("live")
-        lend.isSetUp = true
-        if !lend.minds.contains(where: { $0.mind == "example.com" }) { lend.minds.append(.init(mind: "example.com", name: "jane.mac")) }
-        var read = 0
-        for mind in lend.minds { Task { await MindFaces.shared.read(mind.mind); read += 1 } }
-        let until = Date().addingTimeInterval(10)
-        while read < lend.minds.count, Date() < until { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
-        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        Rendering.fixFaces()
+        let lend = Panel.sampleLend("live")
         var drawn = true
         for (isOpen, open) in [(false, "closed"), (true, "open")] {
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                let view = NSHostingView(
-                    rootView: MindSwitcher(lend: lend, isOpen: .constant(isOpen), actions: LendActions(), dot: .green)
-                        .frame(width: 398)
-                        .padding(16)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                )
-                view.appearance = appearance
-                let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-                window.appearance = appearance
-                window.contentView = view
-                view.layoutSubtreeIfNeeded()
-                guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-                view.cacheDisplay(in: view.bounds, to: picture)
-                let file = folder.appendingPathComponent("switcher-\(open)-\(tone).png")
-                drawn = drawn && (picture.representation(using: .png, properties: [:]).map { (try? $0.write(to: file)) != nil } ?? false)
+                let view = MindSwitcher(lend: lend, isOpen: .constant(isOpen), actions: LendActions(), dot: .green)
+                    .frame(width: 398)
+                    .padding(16)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("switcher-\(open)-\(tone).png")) && drawn
             }
         }
         return drawn

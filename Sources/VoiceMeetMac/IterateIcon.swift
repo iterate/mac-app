@@ -44,6 +44,28 @@ enum IterateIcon {
         return marks
     }()
 
+    /// The mark of a test copy (a home of its own, `AppEnvironment`): the mark in grey and an orange
+    /// "test" after it, never taken for the installed app's. The mark sits at the image's left, as
+    /// tall as the plain one, so the record's dot is where it is on the plain mark.
+    static func testImage(_ mark: MenuBarMark) -> NSImage {
+        let base = image(mark)
+        let words = NSAttributedString(string: "test", attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .heavy), .foregroundColor: NSColor.systemOrange])
+        let size = NSSize(width: base.size.width + 2 + ceil(words.size().width), height: base.size.height)
+        return NSImage(size: size, flipped: false) { _ in
+            let grey = NSImage(size: base.size, flipped: false) { rect in
+                base.draw(in: rect)
+                if base.isTemplate {
+                    NSColor.systemGray.setFill()
+                    rect.fill(using: .sourceAtop)
+                }
+                return true
+            }
+            grey.draw(in: NSRect(origin: .zero, size: base.size))
+            words.draw(at: NSPoint(x: base.size.width + 2, y: (size.height - words.size().height) / 2))
+            return true
+        }
+    }
+
     /// The mark's image for `mark`: its ink, with a gap cut where the dot sits when it has one.
     /// The dot itself is drawn by `RecordDotView` over the image, so that a template image stays
     /// one: the system draws it light or dark with the bar, and the dot stays red.
@@ -128,6 +150,7 @@ enum IterateIcon {
     static func render(to folder: URL) -> Bool {
         let zoom: CGFloat = 8
         let cell = NSSize(width: 40 * zoom, height: 24 * zoom)
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         let inks: [MenuBarMark.Ink] = [.live, .connecting, .down, .red, .orange, .green]
         for (look, background, ink) in [("light", NSColor(white: 0.93, alpha: 1), NSColor.black), ("dark", NSColor(white: 0.16, alpha: 1), NSColor.white)] {
             for glance in LendGlance.allCases {
@@ -151,6 +174,17 @@ enum IterateIcon {
                             draw(MenuBarMark(ink: markInk, dot: dot), in: place, zoom: zoom, ink: ink)
                         }
                     }
+                })
+            else { return false }
+            // a test copy's mark, as the bar shows it (`testImage`)
+            let test = testImage(MenuBarMark(ink: .live, dot: .none))
+            let testCell = NSSize(width: (test.size.width + 16) * zoom, height: cell.height)
+            guard
+                write(size: testCell, to: folder.appendingPathComponent("mark-test-\(look).png"), draw: {
+                    background.setFill()
+                    NSRect(origin: .zero, size: testCell).fill()
+                    let size = NSSize(width: test.size.width * zoom, height: test.size.height * zoom)
+                    test.draw(in: NSRect(x: (testCell.width - size.width) / 2, y: (testCell.height - size.height) / 2, width: size.width, height: size.height))
                 })
             else { return false }
         }

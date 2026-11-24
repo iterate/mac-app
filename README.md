@@ -548,7 +548,9 @@ Notes from the first runs (macOS 15.7.4, a MacBook Pro):
 This repository is the app's home: `git clone https://github.com/iterate/mac-app`, then build and
 install from the checkout with `node cli.mjs update` (or `./run-on-mac.sh`). A pull request is
 checked by `.github/workflows/ci.yml` on a macOS runner: `swift build`, `swift test`, every
-script of the bridge parses, and the bridges' tests pass (`node --test 'bridge/*.test.mjs'`). Every push to `main` publishes a version to npm
+script of the bridge parses, the bridges' tests pass (`node --test 'bridge/*.test.mjs'`), every
+view draws as its baseline (`node harness/snapshots.mjs`), and the app runs its scenarios
+(`node harness/run.mjs ci`; see "Testing with no hand"). Every push to `main` publishes a version to npm
 (`.github/workflows/release.yml`), and a Mac that installed from npm updates itself within the hour.
 
 ```sh
@@ -560,13 +562,6 @@ node --test 'bridge/*.test.mjs'  # the bridges' tests: a fake mind that ends ses
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
 ```
-
-`printf '{"method":"capture.toggle"}\n' | nc -U ~/Library/Application\ Support/voice-meet-mac/endpoint.sock`
-does what ⌥⇧S does, from a script on this Mac; the bridge lends no such call to a mind.
-`{"method":"input.toggle"}` does what ⌥⇧Space does.
-
-A script can also draw a mark in the capture that runs, for a test with no hand:
-`{"method":"capture.mark","points":[[x,y],…]}` (points of the display from its top left).
 
 `swift build --product record-run`, then `.build/debug/record-run --spool /tmp/spool --device test.mac
 --synthetic --seconds 70` records a test picture and a beep each second into a spool, with no
@@ -582,10 +577,77 @@ test picture and beep (no switch is asked); `--record <spool>` records them too;
 --no-stun` keeps the media on this Mac for a watcher here. stderr has a line of statistics a second.
 
 `.build/release/VoiceMeetMac --render-panel panel.png` draws the panel to a file without opening
-anything. A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or
+anything, with fixed minds, things and clock (see "Testing with no hand"). A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or
 `not-allowed`; `ringing` draws a call's banner at the top. `--render-banner banner.png ring`
 draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearance);
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
 listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
-listening, failed), light and dark, sixteen files.
+listening, failed), light and dark, sixteen files. `--render-all <folder>` draws every view, light
+and dark.
+
+### Testing with no hand
+
+An agent builds, runs, drives and checks the app with no person at the Mac, beside an installed
+copy, which it does not touch.
+
+**A home of its own.** `--home <folder>` (or the environment's `ITERATE_MAC_HOME`) puts everything
+the app keeps in that folder: config.json, the endpoint's socket, the log (`logs/app.log`), the
+captures, inputs, word lists and faces, and the choices (`defaults.plist`). Such a copy registers no
+global key, touches no login item, never updates itself, and lends only with `--lend`. It opens no
+microphone, and dictation writes its text nowhere (no clipboard, no ⌘V), unless an audio fixture is
+set. Its panel closes by its mark alone. Its mark in the menu bar is grey with an orange "test"
+beside it, and its tooltip says `iterate test copy: <home>`, so it is never taken for the installed
+app. `Sources/VoiceMeetMac/AppEnvironment.swift` resolves all of
+it at launch.
+
+**The control socket**, `<home>/control.sock`, is open in a copy with a home of its own, and only
+there: the installed app has none, and always asks with its alert and Touch ID. One line of JSON a
+connection, as the endpoint's; a mind never reaches it.
+
+| Method | What it does |
+| --- | --- |
+| `ui.state` | The lend, the minds, the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity, the banner, the record, the choices, the question that waits |
+| `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
+| `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) |
+| `ui.type {id, text}` | Types into it (`input.text`) |
+| `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
+| `dictation.start`, `dictation.stop` | ⌥⇧D down and up |
+| `approval.answer {allow}` | Answers the Ask question that waits. While the socket is open, a question shows no alert and asks for no Touch ID |
+
+The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
+`sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
+`activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
+`capture.discard`. The tree is read in the app's own process and needs no permission of macOS; to
+have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an
+assistive app does.
+
+```sh
+.build/debug/VoiceMeetMac --home /tmp/mac-test &
+printf '{"method":"ui.press","id":"statusItem"}\n' | nc -U /tmp/mac-test/control.sock
+printf '{"method":"ui.tree"}\n' | nc -U /tmp/mac-test/control.sock
+```
+
+**The audio fixture.** With `ITERATE_MAC_AUDIO_FIXTURE=<file.wav|.aiff|.m4a>`, every listening
+(dictation, the input bar) hears that file in place of the microphone, at the pace of the clock,
+then silence; no audio device opens. A Swift test passes the file to `SpeechListener(fixture:)`.
+
+**The drawings** (`--render-*`) take nothing from this Mac: fixed minds and faces, a fixed clock
+(UTC), the things of a Mac with one display and one camera, the scroll bars, accent and locale held
+in the process, 2 pixels to a point. `node harness/snapshots.mjs` draws every view and compares it
+with `harness/baselines/`; `--update` writes new baselines after a change you meant. Fonts and
+controls can draw a pixel otherwise on another macOS build, so the check is strict (equal sizes, at
+most 0.5% of the pixels more than 24 off in a channel) only on the build in
+`harness/baselines/made-on.json`. On another build, as on CI's runner, it checks the layout: sizes
+within 2%, at most 1% of the 16 × 16 blocks more than 24 off in their mean. A missing or moved row
+fails it, antialiasing does not; the pixel differences are reported, and a picture of each is in
+`<out>/diff/` (CI uploads it as the artifact `snapshots`).
+
+**The scenarios.** `node harness/run.mjs <scenario|ci|all>` runs the app that `swift build` made
+(`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:
+`boot` (the panel opens, the tree has its controls, a segment is pressed), `input-send` (a text
+typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `approval` (a
+command on Ask is approved, then denied, through the socket), and `dictation-fixture` (a sentence
+from `say -o` is written with the word list's Herdr, Beelink and Doppler; local only: it needs the
+speech model in `~/Library/Application Support/FluidAudio`). CI runs `ci`, every scenario but the
+local one. `--keep` keeps the homes and their logs.
