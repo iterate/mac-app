@@ -19,6 +19,8 @@ final class AppModel {
     /// A mark in the capture that runs, from a script on this Mac (`capture.mark`): points of the
     /// display from its top left. The same as ink by hand, for a test with no hand.
     var markCapture: (([[Double]]) -> Void)?
+    /// ⌥⇧Space, from a script on this Mac (`input.toggle` on the socket): the bridge lends no such call.
+    var toggleInput: (() -> Void)?
 
     private let log = AppLog("state")
     private let audioOwner = AudioOwner()
@@ -226,6 +228,9 @@ final class AppModel {
         case "capture.toggle":
             guard let toggleCapture else { throw EndpointRefusal("A capture needs macOS 15.") }
             toggleCapture()
+            return [:]
+        case "input.toggle":
+            toggleInput?()
             return [:]
         case "capture.mark":
             guard let markCapture, let points = parameters["points"] as? [[Double]] else { throw EndpointRefusal("capture.mark needs points: [[x, y], …].") }

@@ -15,5 +15,11 @@ jobs:
           node-version: 24
       - run: swift build
       - run: swift test
+      # The input bar, drawn to PNG files: the view is built and laid out, and the files can be looked at.
+      - run: .build/debug/VoiceMeetMac --render-input "$RUNNER_TEMP/input"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: input-bar
+          path: ${{ runner.temp }}/input
       - run: for file in bridge/*.mjs bridge/*.ts cli.mjs; do node --check "$file"; done
       - run: node --test 'bridge/*.test.mjs'
