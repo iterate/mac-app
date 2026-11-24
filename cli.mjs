@@ -67,7 +67,7 @@ const PARTS = [
   "Support",
   "bridge",
   "run-on-mac.sh",
-  // the app runs this file's commands (list, add, use, remove) from its installed copy
+  // the app runs this file's `add` from its installed copy
   "cli.mjs",
   "package.json",
 ];

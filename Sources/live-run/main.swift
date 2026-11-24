@@ -8,10 +8,11 @@ import VoiceMeetCore
 // live-run: live from a terminal, for tests: the app's own Record and Live libraries and its
 // bridge, with no switch and no question (every watcher gets every track asked for here).
 //
-//   live-run --device <name> --node <node> --bridge <bridge/device-live.mjs> --iterate <iterate.js> --mind <address>
+//   live-run --device <name> --node <node> --bridge <bridge/mind.mjs> --iterate <iterate.js> --mind <address>
 //            [--synthetic] [--screens] [--cameras] [--mics] [--record <spool>]
 //            [--loopback-only] [--no-stun] [--seconds N]
 //
+// The bridge is the app's own process for a mind, with its job `live` alone.
 // --record also records the same sources into a spool, as the app does with a watcher and the
 // record on together. Real sources need the app's permissions: run it through the app's `run`
 // method. stderr: one JSON line of statistics a second, and the libraries' log lines.
@@ -21,7 +22,7 @@ func value(_ flag: String) -> String? {
     return arguments[i + 1]
 }
 guard let device = value("--device"), let node = value("--node"), let bridgeScript = value("--bridge"), let iterate = value("--iterate"), let mind = value("--mind") else {
-    FileHandle.standardError.write(Data("live-run --device <name> --node <node> --bridge <device-live.mjs> --iterate <iterate.js> --mind <address> [--synthetic] [--screens] [--cameras] [--mics] [--record <spool>] [--loopback-only] [--no-stun] [--seconds N]\n".utf8))
+    FileHandle.standardError.write(Data("live-run --device <name> --node <node> --bridge <mind.mjs> --iterate <iterate.js> --mind <address> [--synthetic] [--screens] [--cameras] [--mics] [--record <spool>] [--loopback-only] [--no-stun] [--seconds N]\n".utf8))
     exit(2)
 }
 let started = Date()
@@ -56,21 +57,35 @@ func tracks() -> [String] {
 peer.decide = { _, _, answer in answer(tracks(), "nothing to show") }
 peer.changed = { watchers in recorder.watch(Set(watchers.tracks.compactMap(RecordSource.of(track:)))) }
 
-let bridge = LiveBridge(node: node, script: bridgeScript, arguments: [device, "--iterate", iterate, "--mind", mind], peer: peer)
 peer.started = { watcher, who, tracks in
     say(["event": "live-watch-started", "watcher": watcher, "who": who, "tracks": tracks])
 }
 peer.ended = { watcher, who, seconds, why in
     say(["event": "live-watch-ended", "watcher": watcher, "who": who, "seconds": seconds, "why": why])
 }
-bridge.said = { say(["bridge": $0]) }
 let bridgeEnded = DispatchSemaphore(value: 0)
-bridge.exited = { status in
-    say(["event": "bridge exited", "status": Int(status)])
-    bridgeEnded.signal()
+// the bridge lives on the main actor: the main queue runs it, in `RunLoop.main.run()` below
+let bridge = try MainActor.assumeIsolated { () throws -> JSONLineProcess in
+    let bridge = JSONLineProcess(executable: node, arguments: [bridgeScript, mind, "--name", device, "--iterate", iterate])
+    bridge.said = { line in if !peer.take(line) { say(["bridge": line]) } }
+    bridge.logged = { say(["log": $0]) }
+    bridge.exited = { status in
+        say(["event": "bridge exited", "status": Int(status)])
+        bridgeEnded.signal()
+    }
+    try bridge.start()
+    bridge.send(["job": "live", "start": true])
+    say(["event": "ready", "device": device, "bridge": Int(bridge.pid), "sources": sources.map(\.rawValue).sorted(), "record": value("--record") ?? "no"])
+    return bridge
 }
-try bridge.start()
-say(["event": "ready", "device": device, "bridge": Int(bridge.pid), "sources": sources.map(\.rawValue).sorted(), "record": value("--record") ?? "no"])
+// the peer says these on its own queues: they go to the bridge in order, from the main queue
+peer.send = { signal in
+    let line = signal.json
+    DispatchQueue.main.async { MainActor.assumeIsolated { bridge.send(["job": "live", "signal": line]) } }
+}
+peer.kept = { facts in
+    DispatchQueue.main.async { MainActor.assumeIsolated { bridge.send(facts.merging(["job": "live"]) { $1 }) } }
+}
 
 // MARK: statistics, one line a second: CPU of this process, and per watcher and track what is sent
 
@@ -127,7 +142,8 @@ func finish(_ why: String) {
     DispatchQueue.global().async {
         timer.cancel()
         peer.endAll(why: "the device stopped")
-        bridge.stop()
+        // the byes go out, then the bridge's stdin closes and it ends
+        DispatchQueue.main.async { MainActor.assumeIsolated { bridge.closeInput() } }
         _ = bridgeEnded.wait(timeout: .now() + 10)
         recorder.stop()
         say(["event": "stopped", "why": why, "seconds": Int(Date().timeIntervalSince(started))])

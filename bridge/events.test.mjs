@@ -1,18 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deviceEvents } from "./device-events.mjs";
+import { deviceEvents } from "./events.mjs";
 import { SIGN_IN_ENDED, fakeMind, until } from "./fake-mind.test-helper.mjs";
+import { mindLink } from "./mind.mjs";
 
+/** The job on a connection of its own; its end ends the connection too. */
 const start = (mind, more = {}) => {
   const said = [];
-  const events = deviceEvents({
-    name: "test",
-    connect: mind.connect,
-    sleep: mind.sleep,
-    say: (line) => said.push(line),
-    everyMs: 3_600_000,
-    ...more,
-  });
+  const say = (line) => said.push(line);
+  const link = mindLink({ name: "test", connect: mind.connect, sleep: mind.sleep, say });
+  const events = deviceEvents({ link, say, everyMs: 3_600_000, ...more });
+  const end = events.end;
+  events.end = async (ms) => {
+    await end(ms);
+    link.stop();
+  };
   return { events, said };
 };
 const presence = (n) => ({ type: "device/presence-changed", payload: { n } });

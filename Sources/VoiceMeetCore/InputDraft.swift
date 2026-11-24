@@ -3,8 +3,8 @@ import Foundation
 /// THE PERSON'S INPUT TO A MIND, while they write it and while it goes: a text and files
 /// (README, "Input"). Pure: the app's bar (`MindInput`) shows it and does what it says.
 ///
-/// An input is sent whole, by `bridge/input-send.mjs`: the files into the mind's files, then one
-/// event. While it goes the draft is `sending`; `done` gives a new, empty draft; a failure keeps
+/// An input is sent whole, by the job `input` of `bridge/mind.mjs`: the files into the mind's
+/// files, then one event. While it goes the draft is `sending`; `done` gives a new, empty draft; a failure keeps
 /// the text and the files with the reason, and the next send has the same id, so an input whose
 /// answer was lost is in the mind once.
 public struct InputDraft: Equatable, Sendable {

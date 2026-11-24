@@ -74,3 +74,28 @@ test("which failures are a connection's", () => {
   assert.ok(isConnectionError(new Error("RPC session was shut down by disposing the main stub")));
   assert.ok(!isConnectionError(Object.assign(new Error("payload is not valid"), { code: "INVALID_INPUT" })));
 });
+
+test("each() runs a hook on the connection that is up and on each new one, until its removal", async () => {
+  const mind = fakeMind();
+  const { link } = start(mind);
+  const first = await link.now();
+  const seen = [];
+  const remove = link.each(async (connection) => seen.push(connection));
+  await until(() => seen.length === 1);
+  first.end();
+  await until(() => seen.length === 2);
+  assert.deepEqual(seen, mind.connections);
+  remove();
+  mind.connections[1].end();
+  await until(() => mind.connections.length === 3 && link.current());
+  assert.equal(seen.length, 2);
+  link.stop();
+});
+
+test("now(ms) gives up after ms with the reason the last connection did not come", async () => {
+  const mind = fakeMind();
+  mind.refuseConnects = 1_000;
+  const { link } = start(mind, { sleep: () => new Promise((resolve) => setTimeout(resolve, 5)) });
+  await assert.rejects(link.now(50), /no connection to the mind in 0.05 s: connect ECONNREFUSED/);
+  link.stop();
+});

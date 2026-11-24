@@ -1,0 +1,127 @@
+// node --test bridge/capture.test.mjs — the words of a capture come from the app as segments, and
+// go to the numbered pictures and to transcript.json; the text for the clipboard comes before any
+// upload. Against the fake mind.
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, join } from "node:path";
+import { test } from "node:test";
+import { captureUpload } from "./capture.mjs";
+import { fakeMind } from "./fake-mind.test-helper.mjs";
+import { mindLink } from "./mind.mjs";
+
+/** A capture's folder with capture.json: two numbered pictures, at 3 s and at 8 s. */
+function captureFolder() {
+  const folder = mkdtempSync(join(tmpdir(), "capture-"));
+  writeFileSync(
+    join(folder, "capture.json"),
+    JSON.stringify({
+      durationMs: 9000,
+      microphone: true,
+      by: { device: "test.mac" },
+      observations: [],
+      panels: [
+        { n: 1, t: 3000, did: "drew", file: "1.jpg" },
+        { n: 2, t: 8000, did: "clicked", file: "2.jpg" },
+      ],
+    }),
+  );
+  return folder;
+}
+
+/**
+ * The capture with `lines`, each a step, and every line it said once `until(said)` is true. The
+ * fake mind answers unless `refuse`.
+ */
+async function capture(folder, lines, { kept = false, refuse = false, heardBy, until = (said) => said.some((line) => line.copy) } = {}) {
+  const mind = fakeMind();
+  if (refuse) mind.refuseConnects = 1_000_000;
+  const said = [];
+  const link = mindLink({ name: "test.mac", connect: mind.connect, sleep: () => new Promise((resolve) => setTimeout(resolve, 5)), say: () => {} });
+  const job = captureUpload({ link, mind: "example.com", capture: basename(folder), folder, heardBy, kept, say: (line) => said.push(line), withinMs: 100 });
+  for (const line of lines) await job.take(line);
+  for (const deadline = Date.now() + 5000; !until(said) && Date.now() < deadline; ) await new Promise((resolve) => setTimeout(resolve, 10));
+  link.stop();
+  return { said, mind };
+}
+
+const segment = (t, to, text) => ({ segment: { t, to, text, words: [{ t, to: t + 400, text: text.split(" ")[0] }] } });
+
+test("segments go to the picture that ends after they start, and to transcript.json at `heard`", async () => {
+  const folder = captureFolder();
+  try {
+    const { said } = await capture(folder, [segment(5200, 6900, "and this is slow"), segment(1000, 2500, "what is this here?"), { heard: true }, { copy: true }], {
+      heardBy: "parakeet-v3",
+    });
+    const { copy } = said.find((line) => line.copy);
+    assert.match(copy, /- #1 \(0:03\) drew “what is this here\?”/);
+    assert.match(copy, /- #2 \(0:08\) clicked “and this is slow”/);
+    assert.doesNotMatch(copy, /last words are not in this text/);
+    const transcript = JSON.parse(readFileSync(join(folder, "transcript.json"), "utf8"));
+    assert.deepEqual(transcript.by, { kind: "model", id: "parakeet-v3" });
+    assert.deepEqual(transcript.basis, ["voice.m4a"]);
+    assert.deepEqual(
+      transcript.segments.map(({ t, to, text }) => [t, to, text]),
+      [
+        [1000, 2500, "what is this here?"],
+        [5200, 6900, "and this is slow"],
+      ],
+    );
+    assert.deepEqual(transcript.segments[0].words, [{ t: 1000, to: 1400, text: "what" }]);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("before `heard`, the text says that the last words are still to come", async () => {
+  const folder = captureFolder();
+  try {
+    const { said } = await capture(folder, [segment(1000, 2500, "what is this here?"), { copy: true }]);
+    const { copy } = said.find((line) => line.copy);
+    assert.match(copy, /#1 \(0:03\) drew “what is this here\?”/);
+    assert.match(copy, /The last words are not in this text yet/);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+/** A capture that stayed on this Mac, with the words of its transcript.json. */
+function keptFolder() {
+  const folder = captureFolder();
+  writeFileSync(
+    join(folder, "transcript.json"),
+    JSON.stringify({ by: { kind: "model", id: "parakeet-ultra" }, basis: ["voice.m4a"], segments: [{ t: 7000, to: 7600, text: "this one", words: [] }] }),
+  );
+  return folder;
+}
+
+test("a capture first heard of at its `finish` reads the words of the transcript.json that stayed on this Mac", async () => {
+  const folder = keptFolder();
+  try {
+    const { said } = await capture(folder, [{ finish: true }], { kept: true, refuse: true, until: (said) => said.some((line) => line.failed) });
+    // no mind here: the capture stays, and its text names this Mac's folder with the words
+    const failed = said.find((line) => line.failed);
+    assert.match(failed.copy, /#2 \(0:08\) clicked “this one”/);
+    assert.equal(JSON.parse(readFileSync(join(folder, "transcript.json"), "utf8")).by.id, "parakeet-ultra");
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("`finish` puts every file under /captures/<id>/, then adds capture/ready and capture/received", async () => {
+  const folder = keptFolder();
+  writeFileSync(join(folder, "1.jpg"), "a picture");
+  writeFileSync(join(folder, "2.jpg"), "another picture");
+  const id = basename(folder);
+  try {
+    const { said, mind } = await capture(folder, [{ finish: true }], { kept: true, until: (said) => said.some((line) => line.done || line.failed) });
+    assert.deepEqual(said.at(-1), { done: true });
+    for (const file of ["capture.json", "1.jpg", "2.jpg", "transcript.json", "context.json", "summary.md"])
+      assert.ok(mind.files.has(`captures/${id}/${file}`), `${file} is in the mind`);
+    assert.match(mind.files.get(`captures/${id}/summary.md`).bytes.toString(), /#2 \(0:08\) clicked “this one”/);
+    const events = mind.appended.filter((event) => event.path === `/captures/${id}`).map((event) => event.type);
+    assert.deepEqual(events, ["capture/ready", "events.iterate.com/itx/described", "capture/received"]);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});

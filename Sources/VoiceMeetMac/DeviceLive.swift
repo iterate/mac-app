@@ -5,15 +5,16 @@ import VoiceMeetCore
 
 /// LIVE: a member's page (record.<domain>) watches this Mac now: its screens, its camera, its
 /// microphone, peer to peer over WebRTC (`Sources/Live`). The mind carries only the signalling, on
-/// `/devices/<name>`, through `bridge/device-live.mjs`, which runs while the Mac is lent.
+/// `/devices/<name>`, through the job `live` of the session's `MindBridge` (`bridge/live.mjs`),
+/// which runs while the Mac is lent.
 ///
 /// A watch is a use of the screen, the camera and the microphone under their switches, through
 /// the same gate as every other use (`AppModel.liveTracks`): Off, the track is not offered; Ask,
 /// the person is asked once for the watch; Shared, it is sent. While a watcher is connected,
 /// Activity shows it as a running act, and the panel lists it with a button that ends it.
 ///
-/// The bridge listens for one mind session (`MindSession`): `use` ends the old session's bridge and
-/// its watches at once.
+/// The job listens for one mind session (`MindSession`): `use` ends the old session's job and its
+/// watches at once.
 @MainActor
 final class DeviceLive: ObservableObject {
     /// A connected watcher, for the panel and `live.state()`.
@@ -38,15 +39,20 @@ final class DeviceLive: ObservableObject {
     /// The capture's sink: made once, at the start.
     let peer = LivePeer()
     private let log = AppLog("live")
-    private var bridge: LiveBridge?
-    private var bridgeEndedAt = Date.distantPast
-    /// The bridge's word: its connection to the mind is up (`{ connected }`).
-    private var isSignalling = false
+    /// The session's bridge, whose job `live` signals.
+    private var bridge: MindBridge?
     private var acts: [String: String] = [:]
-    private var timer: Timer?
 
     func start() {
         peer.log = { line in AppLog("live").info(line) }
+        // the peer says these on its own queues: they go to the job in order, from the main queue
+        peer.send = { [weak self] signal in
+            let line = signal.json
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.bridge?.send("live", ["signal": line]) } }
+        }
+        peer.kept = { [weak self] facts in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.bridge?.send("live", facts) } }
+        }
         peer.decide = { [weak self] _, who, answer in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
@@ -75,16 +81,10 @@ final class DeviceLive: ObservableObject {
                 }
             }
         }
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
-        tick()
     }
 
     func stop() {
-        timer?.invalidate()
         peer.endAll(why: "the Mac stopped")
-        bridge?.stop()
     }
 
     /// The panel's button, or `live.end` on the endpoint.
@@ -97,48 +97,36 @@ final class DeviceLive: ObservableObject {
     func state() -> [String: Any] {
         [
             "watchers": watchers.map { ["watcher": $0.id, "who": $0.who, "tracks": $0.tracks, "since": Int($0.since.timeIntervalSince1970 * 1000)] },
-            "signalling": bridge != nil && isSignalling,
+            "signalling": bridge?.isConnected ?? false,
         ]
     }
 
-    /// Another session, or none: the old one's bridge and watches end now. Nothing starts here:
-    /// the next `tick` starts the bridge for the new session.
-    func use(_ session: MindSession?) {
+    /// Another session and its bridge, or none: the old one's job and watches end now, and the new
+    /// one's job starts.
+    func use(_ session: MindSession?, bridge: MindBridge?) {
+        if let old = self.bridge {
+            peer.endAll(why: "the Mac is no longer lent to this mind")
+            old.send("live", ["stop": true])
+        }
         self.session = session
-        guard let old = bridge else { return }
-        peer.endAll(why: "the Mac is no longer lent to this mind")
-        old.stop()
-        (bridge, bridgeEndedAt, isSignalling) = (nil, Date(), false)
+        self.bridge = bridge
+        guard let bridge else { return }
+        bridge.on("live") { [weak self, weak bridge] line in
+            guard let self, let bridge, self.bridge === bridge else { return }
+            self.said(line)
+        }
+        bridge.send("live", ["start": true])
+        log.info("session \(session?.generation ?? 0): the bridge listens on \(bridge.mind) at \(session?.path ?? "")")
     }
 
-    /// Every 2 s: a bridge for the session. A bridge that ended starts again after 10 s.
-    func tick() {
-        guard let session, bridge == nil, Date().timeIntervalSince(bridgeEndedAt) > 10 else { return }
-        let made = LiveBridge(
-            node: session.helpers.node, script: session.helpers.deviceLive,
-            arguments: [session.name, "--iterate", session.helpers.iterateBin, "--mind", session.mind], peer: peer)
-        made.said = { [weak self] line in
-            AppLog("live").info("bridge: \(line)")
-            guard let up = line["connected"] as? Bool else { return }
-            DispatchQueue.main.async { MainActor.assumeIsolated { if self?.bridge === made { self?.isSignalling = up } } }
-        }
-        made.exited = { [weak self] status in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.bridge === made else { return }
-                    self.log.info("the bridge ended (status \(status))")
-                    self.peer.endAll(why: "the signalling stopped")
-                    (self.bridge, self.bridgeEndedAt, self.isSignalling) = (nil, Date(), false)
-                }
-            }
-        }
-        do {
-            try made.start()
-            bridge = made
-            log.info("session \(session.generation): the bridge listens on \(session.mind) at \(session.path)")
-        } catch {
-            log.error("the bridge did not start: \(AppLog.describe(error))")
-            bridgeEndedAt = Date()
+    private func said(_ line: [String: Any]) {
+        if peer.take(line) { return }
+        if line["exited"] != nil {
+            peer.endAll(why: "the signalling stopped")
+        } else if line["started"] != nil {
+            bridge?.send("live", ["start": true])
+        } else if line["job"] != nil || line["connected"] != nil {
+            log.info("bridge: \(line)")
         }
     }
 

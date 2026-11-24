@@ -6,29 +6,18 @@ import Foundation
 /// new session: the old one's work ends, its approvals end, and a late answer of the old one
 /// changes nothing.
 public struct MindSession: Equatable, Sendable {
-    /// Node, the iterate CLI, and the bridge's scripts beside `mac-endpoint.ts`, resolved once.
-    public struct Helpers: Equatable, Sendable {
+    /// Node, the iterate CLI, and `mind.mjs` beside `mac-endpoint.ts`, resolved once.
+    public struct Helpers: Hashable, Sendable {
         public let node: String
         public let iterateBin: String
-        public let deviceEvents: String
-        public let deviceLive: String
-        public let recordUpload: String
-        public let captureUpload: String
-        public let inputSend: String
-        public let wordsFetch: String
+        /// `bridge/mind.mjs`: the one process for a mind (`MindBridge`).
+        public let mindBridge: String
 
-        /// `bridge` is the path of `mac-endpoint.ts`: the other scripts are in its folder.
+        /// `bridge` is the path of `mac-endpoint.ts`: `mind.mjs` is in its folder.
         public init(node: String, iterateBin: String, bridge: String) {
-            let folder = (bridge as NSString).deletingLastPathComponent
-            let script = { (name: String) in (folder as NSString).appendingPathComponent(name) }
             self.node = node
             self.iterateBin = iterateBin
-            deviceEvents = script("device-events.mjs")
-            deviceLive = script("device-live.mjs")
-            recordUpload = script("record-upload.mjs")
-            captureUpload = script("capture-upload.mjs")
-            inputSend = script("input-send.mjs")
-            wordsFetch = script("words-fetch.mjs")
+            mindBridge = ((bridge as NSString).deletingLastPathComponent as NSString).appendingPathComponent("mind.mjs")
         }
     }
 

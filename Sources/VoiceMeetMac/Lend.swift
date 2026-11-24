@@ -7,8 +7,8 @@ import VoiceMeetCore
 /// with the active mind's key and `--json`, as `npx @iterate-com/mac-app` set it up. `LendState`
 /// turns the CLI's states (stdout) and the process's end into a phase and says what to do: start the process now, end it, or
 /// start it after a wait. The app starts again at once when the Mac wakes and when the network
-/// comes back. It watches its folder: a change that `list`, `add`, `use` or `remove` of the CLI
-/// makes switches the lend. It owns the mind session (`MindSession`) and the lend's authorization:
+/// comes back. It watches its folder: a change of config.json (the panel's `use` and `remove`,
+/// which the app writes itself, or the CLI's `add`) switches the lend. It owns the mind session (`MindSession`) and the lend's authorization:
 /// the session changes when another mind is selected or the mind is removed; the authorization
 /// ends while the mind refuses this Mac's key. `sessionChanged` says both, before the lend process
 /// for a new mind starts. Once an hour it asks npm for a newer version and runs its `update`,
@@ -69,7 +69,7 @@ final class Lend {
 
     private(set) var state = LendState()
     private(set) var config: Config?
-    /// The last words of a CLI command the panel ran (`add`, `use`, `remove`), and a link it printed.
+    /// The last words of what the panel did (`use`, `remove`, the CLI's `add`), and a link `add` printed.
     private(set) var commandLine: String?
     private(set) var commandLink: String?
     private(set) var isCommandRunning = false
@@ -335,13 +335,38 @@ final class Lend {
         folderWatch = source
     }
 
-    /// `use <mind>`: the CLI writes the config; the folder's watch switches the lend.
+    private static var configFile: URL { AppEnvironment.current.folder.appendingPathComponent("config.json") }
+
+    /// `use <mind>`: config.json names it active; the folder's watch switches the lend.
     func use(_ mind: String) {
-        command(["use", mind])
+        edit("use \(mind)") {
+            try ConfigFile.write(ConfigFile.using(mind, in: ConfigFile.read(Self.configFile)), to: Self.configFile)
+            return "The app lends this Mac to \(mind.lowercased()) now."
+        }
     }
 
+    /// `remove <mind>`: it leaves config.json, and its key file is deleted.
     func remove(_ mind: String) {
-        command(["remove", mind])
+        edit("remove \(mind)") {
+            let (state, keyFile) = try ConfigFile.removing(mind, from: ConfigFile.read(Self.configFile))
+            if let keyFile { try? FileManager.default.removeItem(atPath: keyFile) }
+            try ConfigFile.write(state, to: Self.configFile)
+            return "Removed \(mind.lowercased()) and deleted its key. The key stays listed on the mind's /keys page until you remove it there; it can do nothing now."
+        }
+    }
+
+    /// One change of config.json, said in the panel and the log.
+    private func edit(_ what: String, _ change: () throws -> String) {
+        do {
+            let line = try change()
+            log.info("\(what): \(line)")
+            commandLink = nil
+            say(line)
+        } catch {
+            log.error("\(what): \(error)")
+            say("\(error)")
+        }
+        reload()
     }
 
     /// `add`: the CLI makes the key, prints the link where a member allows it (and opens it), and
@@ -350,17 +375,14 @@ final class Lend {
         command(["add", "--mind", mind, "--name", name])
     }
 
-    /// The minds of the iterate CLI's profiles (`list --json`), for "Add a mind…".
+    /// The minds of the iterate CLI's profiles, for "Add a mind…".
     func profiles(_ done: @escaping ([String]) -> Void) {
-        command(["list", "--json"], quiet: true) { output in
-            let json = (try? JSONSerialization.jsonObject(with: Data(output.utf8))) as? [String: Any]
-            done(json?["profiles"] as? [String] ?? [])
-        }
+        done(ConfigFile.profileMinds())
     }
 
     /// Runs the installed cli.mjs with the app's node. Its lines go to the log, and the last one
-    /// to the panel; stdout goes to `done`.
-    private func command(_ arguments: [String], quiet: Bool = false, done: ((String) -> Void)? = nil) {
+    /// to the panel.
+    private func command(_ arguments: [String]) {
         guard let config else { return say("Not set up: run npx @iterate-com/mac-app in a terminal") }
         guard FileManager.default.fileExists(atPath: config.cli) else {
             return say("This version has no \(config.cli): run npx @iterate-com/mac-app update")
@@ -369,16 +391,9 @@ final class Lend {
         child.executableURL = URL(fileURLWithPath: config.node)
         child.arguments = [config.cli] + arguments
         child.standardInput = FileHandle.nullDevice
-        let output = Pipe()
         let errors = Pipe()
-        child.standardOutput = output
+        child.standardOutput = FileHandle.nullDevice
         child.standardError = errors
-        var stdout = Data()
-        output.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil }
-            DispatchQueue.main.async { stdout.append(data) }
-        }
         errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return handle.readabilityHandler = nil }
@@ -390,7 +405,7 @@ final class Lend {
                     if let link = line.range(of: #"https://\S+/keys/enrol\S*"#, options: .regularExpression) {
                         self.commandLink = String(line[link])
                     }
-                    if !quiet { self.say(String(line)) }
+                    self.say(String(line))
                 }
             }
         }
@@ -403,20 +418,16 @@ final class Lend {
                     self.log.info("cli \(arguments[0]) ended (exit \(status))")
                     if status == 0 { self.commandLink = nil }
                     self.reload()
-                    done?(String(decoding: stdout, as: UTF8.self))
                 }
             }
         }
         log.info("runs cli.mjs \(arguments.joined(separator: " "))")
         do {
             try child.run()
-            if !quiet {
-                isCommandRunning = true
-                commandLink = nil
-            }
+            isCommandRunning = true
+            commandLink = nil
         } catch {
             say("cli.mjs did not start: \(AppLog.describe(error))")
-            done?("")
         }
         onChange?()
     }

@@ -88,19 +88,30 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
 
 /**
  * A home with config.json, whose iterate CLI is the fake mind: what it is sent is in `mind.jsonl`,
- * each event with the mind (`mind`) and the path it reached. Every mind is the same fake mind.
+ * each event with the mind (`mind`) and the path it reached, and each file it stored as
+ * `{ file, bytes, via }`. Every mind is the same fake mind; `words` is its word list (words.md).
  */
-function withMind(home, minds = [{ mind: MIND, name: NAME }]) {
+function withMind(home, minds = [{ mind: MIND, name: NAME }], { words } = {}) {
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
   mkdirSync(join(iterate, "dist"), { recursive: true });
   writeFileSync(join(iterate, "bin/iterate.js"), "// the bridges import ../dist/node.mjs beside this file\n");
+  if (words) {
+    // the mind's list, and the copy the app keeps of it: dictation has it from the start
+    writeFileSync(join(iterate, "words.md"), words);
+    mkdirSync(join(home, "words"), { recursive: true });
+    for (const { mind } of minds) writeFileSync(join(home, "words", `${mind}.md`), words);
+  }
   // the bridges' own fake mind; each append is kept in a file the scenario reads
   writeFileSync(
     join(iterate, "dist/node.mjs"),
-    `import { appendFileSync } from "node:fs";
+    `import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { fakeMind } from ${JSON.stringify(join(root, "bridge/fake-mind.test-helper.mjs"))};
-const mind = fakeMind();
+const mind = fakeMind({
+  stored: (key, file) => appendFileSync(${JSON.stringify(join(home, "mind.jsonl"))}, JSON.stringify({ file: key, bytes: file.bytes.length, via: file.via }) + "\\n"),
+});
+const words = ${JSON.stringify(join(iterate, "words.md"))};
+if (existsSync(words)) mind.repo.files["words.md"] = readFileSync(words, "utf8");
 export const addressOf = (mind) => mind;
 export async function connectMind({ address }) {
   const connection = await mind.connect();
@@ -217,13 +228,11 @@ const scenarios = {
   "dictation-fixture": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio (about 480 MB) and `say`",
     async run({ app, home }) {
-      withMind(home);
+      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
       const sentence = "Herdr runs on the Beelink with Doppler";
       const fixture = join(home, "fixture.aiff");
       // `say -o` writes a file and plays nothing
       execFileSync("say", ["-o", fixture, sentence]);
-      mkdirSync(join(home, "words"), { recursive: true });
-      writeFileSync(join(home, "words", `${MIND}.md`), "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
       try {
         await run.control("dictation.start");
@@ -246,11 +255,9 @@ const scenarios = {
   "dictation-fn": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
     async run({ app, home }) {
-      withMind(home);
+      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
       const fixture = join(home, "fixture.aiff");
       execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler"]);
-      mkdirSync(join(home, "words"), { recursive: true });
-      writeFileSync(join(home, "words", `${MIND}.md`), "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
       const fn = (down) => run.control("dictation.fn", { down });
       const dictation = async () => (await run.state()).dictation;
@@ -359,6 +366,36 @@ const scenarios = {
       if (rows.length !== 1 || activity.entries.length !== 1 || rows[0].did !== "Ran a command" || rows[0].running)
         throw new Error(`the activity is ${JSON.stringify(activity.entries)}`);
       if (activity.context !== `/devices/${NAME}`) throw new Error(`the log's context is ${activity.context}`);
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * A slot that waits in the spool (as the recorder seals it) goes into the mind: its file first,
+   * then `record/slot-stored`, and it leaves the spool.
+   */
+  async "record-upload"({ app, home }) {
+    const sent = withMind(home);
+    const spool = join(home, "record", MIND);
+    const t = 1764000000;
+    const file = `/devices/${NAME}/record/mic-0/2025-11-24/16/00-00.mp4`;
+    mkdirSync(dirname(join(spool, file)), { recursive: true });
+    writeFileSync(join(spool, file), Buffer.alloc(4321, 1));
+    mkdirSync(join(spool, "slots"), { recursive: true });
+    const payload = { t, tracks: { "mic-0": { kind: "audio", file, bytes: 4321 } } };
+    writeFileSync(join(spool, "slots", `${t}.json`), JSON.stringify(payload));
+    const run = await start(app, home);
+    try {
+      const event = await until("record/slot-stored in the fake mind", 30, () => sent().find((e) => e.type === "record/slot-stored"));
+      if (event.path !== `/devices/${NAME}` || event.idempotencyKey !== `record/slot-stored/${t}` || JSON.stringify(event.payload) !== JSON.stringify(payload))
+        throw new Error(`the mind got ${JSON.stringify(event)}`);
+      const lines = sent();
+      const stored = lines.findIndex((line) => line.file === file.slice(1));
+      if (stored === -1 || lines[stored].bytes !== 4321) throw new Error(`the mind has no ${file} of 4321 bytes: ${JSON.stringify(lines[stored])}`);
+      if (stored > lines.findIndex((line) => line.type === "record/slot-stored")) throw new Error("the event came before its file");
+      await until("the slot gone from the spool", 10, () => !existsSync(join(spool, "slots", `${t}.json`)) && !existsSync(join(spool, file)));
+      await until("no slot waiting", 10, async () => (await run.endpoint("record.state")).waitingSlots === 0);
     } finally {
       await run.quit();
     }

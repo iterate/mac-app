@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deviceLive } from "./device-live.mjs";
 import { fakeMind, until } from "./fake-mind.test-helper.mjs";
+import { deviceLive } from "./live.mjs";
+import { mindLink } from "./mind.mjs";
 
+/** The job on a connection of its own; its end ends the connection too. */
 const start = (mind) => {
   const said = [];
-  const live = deviceLive({
-    name: "test",
-    connect: mind.connect,
-    sleep: mind.sleep,
-    say: (line) => said.push(line),
-    pingEveryMs: 3_600_000,
-  });
+  const say = (line) => said.push(line);
+  const link = mindLink({ name: "test", connect: mind.connect, sleep: mind.sleep, say });
+  const live = deviceLive({ link, say, pingEveryMs: 3_600_000 });
+  const end = live.end;
+  live.end = async (ms) => {
+    await end(ms);
+    link.stop();
+  };
   return { live, said };
 };
 const want = (from) => ({
@@ -72,4 +75,16 @@ test("what the device says goes out in order, and waits for the connection that 
   assert.equal(sent[0].payload.description.type, "offer");
   assert.equal(sent[2].idempotencyKey, "device/live-watch-started/w");
   await live.end();
+});
+
+test("its end ends its subscription, and the connection stays for the other jobs", async () => {
+  const mind = fakeMind();
+  const said = [];
+  const link = mindLink({ name: "test", connect: mind.connect, sleep: mind.sleep, say: (line) => said.push(line) });
+  const live = deviceLive({ link, say: (line) => said.push(line), pingEveryMs: 3_600_000 });
+  await until(() => alive(mind).length === 1);
+  await live.end();
+  assert.equal(alive(mind).length, 0);
+  assert.equal(link.current(), mind.connections[0]);
+  link.stop();
 });

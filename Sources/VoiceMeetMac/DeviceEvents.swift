@@ -4,7 +4,7 @@ import VoiceMeetCore
 
 /// WHAT THIS MAC TELLS ITS MIND ABOUT ITSELF, as events on the context `/devices/<name>` of the
 /// mind it is lent to: the same name as the lend, `itx.<name>`. It publishes for one mind session
-/// (`MindSession`): `use` ends the old session's publisher at once, and a late line of it changes
+/// (`MindSession`): `use` ends the old session's job at once, and a late line of it changes
 /// nothing.
 ///
 /// - `device/presence-changed`, always while the Mac is lent: the Mac goes idle, becomes active,
@@ -17,7 +17,8 @@ import VoiceMeetCore
 ///   (`ActivityLog`). Kept in the log.
 ///
 /// The bridge also reads the context back: `heard` gets each act and presence event that the
-/// context holds, from the last 50 acts on, and each new one. The events go through `bridge/device-events.mjs`, which connects to the mind as the person:
+/// context holds, from the last 50 acts on, and each new one. The events go through the job
+/// `events` of the session's `MindBridge` (`bridge/events.mjs`), on its connection as the person:
 /// the Mac's own key lends and does nothing else.
 @MainActor
 final class DeviceEvents: ObservableObject {
@@ -48,9 +49,8 @@ final class DeviceEvents: ObservableObject {
     var heard: (ContextEvent) -> Void = { _ in }
 
     private let log = AppLog("device")
-    private var publisher: Process?
-    private var input: FileHandle?
-    private var pending = ""
+    /// The session's bridge, whose job `events` publishes.
+    private var bridge: MindBridge?
     private var wasDown = false
     private var timer: Timer?
     private var monitors: [Any] = []
@@ -84,17 +84,26 @@ final class DeviceEvents: ObservableObject {
         for (center, observer) in observers { center.removeObserver(observer) }
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
-        endPublisher()
+        endJob()
     }
 
     /// The path of the device's context in the mind, for the panel.
     var path: String? { session?.path }
 
-    /// Another session, or none: the old one's publisher ends now. Nothing starts here: the next
-    /// `tick` or event starts the publisher for the new session.
-    func use(_ session: MindSession?) {
-        endPublisher()
+    /// Another session and its bridge, or none: the old one's job ends now, and the new one's
+    /// starts. The next `tick` says the presence to the new session.
+    func use(_ session: MindSession?, bridge: MindBridge?) {
+        endJob()
         self.session = session
+        self.bridge = bridge
+        guard let bridge else { return }
+        bridge.on("events") { [weak self, weak bridge] line in
+            // a line of an ended job, or of another session, changes nothing
+            guard let self, let bridge, self.bridge === bridge else { return }
+            self.said(line)
+        }
+        bridge.send("events", ["start": true])
+        log.info("session \(session?.generation ?? 0): publishes to \(bridge.mind) at \(session?.path ?? "")")
     }
 
     // MARK: - Presence
@@ -168,94 +177,51 @@ final class DeviceEvents: ObservableObject {
         }
     }
 
-    // MARK: - The publisher
+    // MARK: - The events job
 
     /// One event on the device's context. Other parts of the app that tell the mind about the
     /// device publish through here, so that there is one connection and one path. With no
     /// session it goes nowhere; while the connection is down it waits in the bridge.
     func publish(_ type: String, _ payload: [String: Any], ephemeral: Bool, idempotencyKey: String? = nil) {
-        guard let input = input ?? startPublisher() else { return }
+        guard let bridge else { return }
         var event: [String: Any] = ["type": type, "payload": payload]
         if ephemeral { event["ephemeral"] = true }
         if let idempotencyKey { event["idempotencyKey"] = idempotencyKey }
-        guard let line = try? JSONSerialization.data(withJSONObject: event) else { return }
-        try? input.write(contentsOf: line + Data("\n".utf8))
+        bridge.send("events", ["event": event])
     }
 
-    private func startPublisher() -> FileHandle? {
-        guard let session else { return nil }
-        let process = Process()
-        let stdin = Pipe()
-        let stdout = Pipe()
-        process.executableURL = URL(fileURLWithPath: session.helpers.node)
-        process.arguments = [session.helpers.deviceEvents, session.name, "--iterate", session.helpers.iterateBin, "--mind", session.mind]
-        process.standardInput = stdin
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    // a line of an ended publisher, or of another session, changes nothing
-                    guard let self, self.publisher === process else { return }
-                    self.publisherSaid(text)
-                }
-            }
+    private func said(_ said: [String: Any]) {
+        if let event = (said["event"] as? [String: Any]).flatMap(ContextEvent.init(json:)) { heard(event) }
+        if let count = said["sent"] as? Int {
+            sent = count
+            failure = nil
         }
-        process.terminationHandler = { [weak self] ended in
-            stdout.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.publisher === ended else { return }
-                    self.publisher = nil
-                    self.input = nil
-                    // the next presence event starts it again
-                    self.presence = nil
-                }
-            }
+        if let why = said["failed"] as? String, said["job"] != nil {
+            if failure != why { log.error("not published: \(why)") }
+            failure = why
         }
-        guard (try? process.run()) != nil else {
-            failure = "The publisher did not start."
-            return nil
-        }
-        publisher = process
-        input = stdin.fileHandleForWriting
-        log.info("session \(session.generation): publishes to \(session.mind) at \(session.path)")
-        return input
-    }
-
-    private func publisherSaid(_ text: String) {
-        var lines = (pending + text).components(separatedBy: "\n")
-        pending = lines.removeLast()
-        for line in lines {
-            guard let said = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
-            if let event = (said["event"] as? [String: Any]).flatMap(ContextEvent.init(json:)) { heard(event) }
-            if let count = said["sent"] as? Int {
-                sent = count
+        // the bridge connected again: the mind hears the presence of now, not of before
+        if let up = said["connected"] as? Bool {
+            if up, wasDown {
+                log.info("connected again")
                 failure = nil
+                presence = nil
+                tick()
             }
-            if let why = said["failed"] as? String {
-                if failure != why { log.error("not published: \(why)") }
-                failure = why
-            }
-            // the bridge connected again: the mind hears the presence of now, not of before
-            if let up = said["connected"] as? Bool {
-                if up, wasDown {
-                    log.info("connected again")
-                    failure = nil
-                    presence = nil
-                    tick()
-                }
-                wasDown = !up
-            }
+            wasDown = !up
+        }
+        // the process ended, or a new one started: the job starts again, and the presence with it
+        if said["exited"] != nil { presence = nil }
+        if said["started"] != nil {
+            bridge?.send("events", ["start": true])
+            presence = nil
+            tick()
         }
     }
 
-    private func endPublisher() {
-        try? input?.close()
-        input = nil
-        publisher = nil
-        pending = ""
+    private func endJob() {
+        bridge?.send("events", ["stop": true])
+        bridge = nil
         presence = nil
         wasDown = false
     }

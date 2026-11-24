@@ -92,8 +92,8 @@ final class FnKeyTests: XCTestCase {
 final class SpeechSegmentTests: XCTestCase {
     func testASegmentIsAnEntryOfACapturesTranscript() throws {
         let segment = SpeechSegment(start: 1.2345, end: 2.5, text: "the Beelink", words: [.init(start: 1.2345, end: 1.6, text: "the"), .init(start: 1.7, end: 2.5, text: "bee link")])
-        XCTAssertTrue(segment.uploaderLine.hasPrefix("segment {"))
-        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(segment.uploaderLine.dropFirst("segment ".count).utf8)) as? [String: Any])
+        let line = try JSONSerialization.data(withJSONObject: segment.transcriptEntry)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: line) as? [String: Any])
         XCTAssertEqual(json["t"] as? Int, 1235)
         XCTAssertEqual(json["to"] as? Int, 2500)
         XCTAssertEqual(json["text"] as? String, "the Beelink")
@@ -101,6 +101,5 @@ final class SpeechSegmentTests: XCTestCase {
         XCTAssertEqual(words.count, 2)
         XCTAssertEqual(words[1]["t"] as? Int, 1700)
         XCTAssertEqual(words[1]["text"] as? String, "bee link")
-        XCTAssertFalse(segment.uploaderLine.contains("\n"), "one line")
     }
 }

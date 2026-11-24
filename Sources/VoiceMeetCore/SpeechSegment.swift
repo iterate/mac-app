@@ -28,19 +28,13 @@ public struct SpeechSegment: Equatable, Sendable {
         self.words = words
     }
 
-    /// The segment as the transcript of a capture holds it (`bridge/capture-upload.mjs`):
-    /// milliseconds, `{ t, to, text, words: [{ t, to, text }] }`.
+    /// The segment as the transcript of a capture holds it, and as the app sends it to the job
+    /// `capture` (`bridge/capture.mjs`): milliseconds, `{ t, to, text, words: [{ t, to, text }] }`.
     public var transcriptEntry: [String: Any] {
         let ms = { (seconds: Double) in Int((seconds * 1000).rounded()) }
         return [
             "t": ms(start), "to": ms(end), "text": text,
             "words": words.map { ["t": ms($0.start), "to": ms($0.end), "text": $0.text] as [String: Any] },
         ]
-    }
-
-    /// One line for the capture's uploader: `segment <JSON>`.
-    public var uploaderLine: String {
-        let data = (try? JSONSerialization.data(withJSONObject: transcriptEntry, options: [.sortedKeys])) ?? Data("{}".utf8)
-        return "segment " + String(decoding: data, as: UTF8.self)
     }
 }

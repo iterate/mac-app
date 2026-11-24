@@ -10,12 +10,7 @@ final class MindSessionTests: XCTestCase {
     }
 
     func testTheHelpersAreBesideTheBridge() {
-        XCTAssertEqual(helpers.deviceEvents, "/app/bridge/device-events.mjs")
-        XCTAssertEqual(helpers.deviceLive, "/app/bridge/device-live.mjs")
-        XCTAssertEqual(helpers.recordUpload, "/app/bridge/record-upload.mjs")
-        XCTAssertEqual(helpers.captureUpload, "/app/bridge/capture-upload.mjs")
-        XCTAssertEqual(helpers.inputSend, "/app/bridge/input-send.mjs")
-        XCTAssertEqual(helpers.wordsFetch, "/app/bridge/words-fetch.mjs")
+        XCTAssertEqual(helpers.mindBridge, "/app/bridge/mind.mjs")
     }
 
     func testASelectedMindHasASessionAndItsPath() {
