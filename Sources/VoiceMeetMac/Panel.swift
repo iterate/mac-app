@@ -80,6 +80,8 @@ struct Panel: View {
     /// The middle's room: the screen's height under the menu bar, less the banner, the lend
     /// section, the footer and the popover's own margins (about 330 points together).
     static var middleMaxHeight: CGFloat {
+        // a drawing is the same on every screen
+        if AppEnvironment.current.isRendering { return 900 }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
         return max(240, (screen?.visibleFrame.height ?? 900) - 330)
     }
@@ -118,7 +120,7 @@ struct Panel: View {
                 if let line = state.captureLine { Text("Last capture: \(line)").textSelection(.enabled) }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
                     Text("⌥⇧Space opens the input: talk or type what you want, paste or drop files, choose the mind, Return sends.")
-                    Button("Open", action: openInput).buttonStyle(.link)
+                    Button("Open", action: openInput).buttonStyle(.link).accessibilityIdentifier("panel.openInput")
                 }
                 .padding(.top, 4)
                 if let line = state.inputLine { Text("Last input: \(line)").textSelection(.enabled) }
@@ -146,6 +148,7 @@ struct Panel: View {
             HStack(spacing: 12) {
                 Button(state.didCopy ? "Copied" : "Copy Prompt", action: copyPrompt)
                     .controlSize(.large)
+                    .accessibilityIdentifier("panel.copyPrompt")
                     .help("Copies how an agent uses this Mac, to paste into a chat with it")
                 VStack(alignment: .leading, spacing: 2) {
                     if let source = state.lend.source {
@@ -162,6 +165,7 @@ struct Panel: View {
                     .tint(.red)
                     .controlSize(.large)
                     .keyboardShortcut("q")
+                    .accessibilityIdentifier("panel.quit")
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -191,6 +195,7 @@ struct Panel: View {
                     .controlSize(.small)
                     .disabled(active == nil)
                     .help("Ends the wait or the attempt, and starts the lend at once")
+                    .accessibilityIdentifier("panel.reconnect")
             }
             if let link = lend.link {
                 Button("Open the Link to Allow This Mac") { lendActions.open(link) }.controlSize(.small)
@@ -279,6 +284,7 @@ struct Panel: View {
                 .controlSize(.small)
                 .labelsHidden()
                 .frame(width: 168)
+                .accessibilityIdentifier("sharing.\(thing.id)")
             }
             if sharing != .off {
                 if let permission = thing.power.permission, !thing.isPermitted {
@@ -362,46 +368,31 @@ private struct MiddleHeight: PreferenceKey {
 }
 
 extension Panel {
-    /// Draws the panel, with the choices as they are stored, to a PNG file. It opens nothing on
-    /// screen and starts no capture: a way to look at the interface from a script.
+    /// Draws the panel to a PNG file, with the drawings' things and minds (`Rendering`): it opens
+    /// nothing on screen and starts no capture. `phase` is the lend's: live, reconnecting, stopped,
+    /// not-allowed, incompatible or connecting (the default); `ringing` also shows a ring.
     @MainActor
-    static func render(to file: URL, phase: String? = nil) -> Bool {
+    static func render(to file: URL, phase: String? = nil, dark: Bool = false) -> Bool {
         _ = NSApplication.shared
+        Rendering.fixFaces()
         let state = PanelState()
-        state.things = Shareable.all
+        state.things = Rendering.things
         state.lend = sampleLend(phase)
         if phase == "ringing" { state.banner = BannerWindow.sample("ring") }
         let panel = Panel(state: state, model: AppModel(), changed: {}, allow: { _ in }, copyPrompt: {})
         // The panel has no background of its own (a popover gives it one); the file needs one.
-        let view = NSHostingView(rootView: panel.background(Color(nsColor: .windowBackgroundColor)))
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.contentView = view
-        view.layoutSubtreeIfNeeded()
-        // The scrolling middle learns its height in the first layout: size the window again to it.
-        for _ in 0..<3 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            window.setContentSize(view.fittingSize)
-            view.layoutSubtreeIfNeeded()
-        }
-        guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-        view.cacheDisplay(in: view.bounds, to: picture)
-        guard let png = picture.representation(using: .png, properties: [:]) else { return false }
-        return (try? png.write(to: file)) != nil
+        return Rendering.png(of: panel.background(Color(nsColor: .windowBackgroundColor)), dark: dark, to: file)
     }
-}
 
-extension Panel {
-    /// The minds as config.json lists them, with a phase of the lend made from the CLI's own states:
-    /// a copy that only draws the panel starts no lend. `phase` is live, reconnecting, stopped,
-    /// not-allowed, incompatible or connecting (the default); `ringing` also shows a ring.
+    /// The drawings' lend (`Rendering.minds`), in a phase made from the CLI's own states: a copy
+    /// that only draws starts no lend.
     @MainActor
     static func sampleLend(_ phase: String?) -> LendView {
-        let file = Lend.folder.appendingPathComponent("config.json")
-        let config = try? JSONDecoder().decode(Lend.Config.self, from: Data(contentsOf: file))
-        let name = config?.activeMind?.name ?? "jane.mac"
-        let mind = config?.activeMind?.mind ?? "example.com"
+        let name = Rendering.minds[0].name
+        let mind = Rendering.minds[0].mind
+        let now = Rendering.now
         var lend = LendState()
-        let start = Date().addingTimeInterval(-40)
+        let start = now.addingTimeInterval(-40)
         _ = lend.handle(.started, now: start)
         let live = #"{"state":"live","mind":"\#(mind)","name":"itx.\#(name)","again":false}"#
         let lines: [String] =
@@ -414,15 +405,15 @@ extension Panel {
             default: []
             }
         for line in lines { _ = lend.handle(.stateLine(line), now: start.addingTimeInterval(10)) }
-        if phase == "stopped" { _ = lend.handle(.processEnded(status: 1, ranFor: 3), now: Date().addingTimeInterval(-1)) }
+        if phase == "stopped" { _ = lend.handle(.processEnded(status: 1, ranFor: 3), now: now.addingTimeInterval(-1)) }
         var view = LendView()
-        view.isSetUp = config != nil || phase != nil
-        view.minds = config?.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) } ?? [.init(mind: mind, name: name)]
-        view.active = config?.active ?? mind
-        view.status = lend.statusLine(now: Date(), clock: Lend.clock)
+        view.isSetUp = true
+        view.minds = Rendering.minds
+        view.active = mind
+        view.status = lend.statusLine(now: now, clock: Lend.clock)
         view.phase = lend.phase.name
         view.link = lend.phase.link
-        view.source = config.map { $0.source.line(home: NSHomeDirectory()) }
+        view.source = Rendering.source
         return view
     }
 }

@@ -46,8 +46,9 @@ import { parseArgs } from "node:util";
 const PACKAGE = "@iterate-com/mac-app";
 const here = import.meta.dirname;
 const { version } = JSON.parse(readFileSync(join(here, "package.json"), "utf8"));
-/** The one folder of the app's state; the app reads the same paths (Lend.swift). */
-const home = join(homedir(), "Library/Application Support/iterate-mac-app");
+/** The one folder of the app's state; the app reads the same paths (AppEnvironment.swift). A copy
+ *  of the app with a home of its own runs this file with that home in `ITERATE_MAC_HOME`. */
+const home = process.env.ITERATE_MAC_HOME || join(homedir(), "Library/Application Support/iterate-mac-app");
 const paths = {
   config: join(home, "config.json"),
   source: join(home, "source"),

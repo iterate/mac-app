@@ -19,9 +19,9 @@ import Record
 final class DeviceWindow: ObservableObject {
     nonisolated static let maxCharacters = 20_000
 
-    @Published var readsWindowText = UserDefaults.standard.bool(forKey: "device.windowText") {
+    @Published var readsWindowText = AppEnvironment.current.defaults.bool(forKey: "device.windowText") {
         didSet {
-            UserDefaults.standard.set(readsWindowText, forKey: "device.windowText")
+            AppEnvironment.current.defaults.set(readsWindowText, forKey: "device.windowText")
             watchInput()
             if readsWindowText { trigger("window") }
         }

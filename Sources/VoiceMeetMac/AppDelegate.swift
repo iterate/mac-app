@@ -27,16 +27,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let dictation = Dictation()
     /// The minds' word lists, for the speech model.
     private let words = Words()
+    /// The control socket, for a test with no hand: nil unless `AppEnvironment` asks for it.
+    private var control: ControlSocket?
+    private let environment = AppEnvironment.current
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logRunStart()
         quitOnTerminationSignal()
+        if environment.controlSocket != nil { ControlSocket.makeAccessibilityElements() }
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.target = self
         statusItem.button?.action = #selector(togglePanel)
+        // the button's cell is its accessibility element
+        statusItem.button?.cell?.setAccessibilityIdentifier("statusItem")
         self.statusItem = statusItem
-        if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: IterateIcon.plain.size) }
+        let markSize = environment.hasOwnHome ? IterateIcon.testImage(MenuBarMark(ink: .live, dot: .none)).size : IterateIcon.plain.size
+        if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: markSize) }
 
         let panel = Panel(
             state: panelState,
@@ -64,7 +71,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         // The panel is as tall as its rows need.
         host.sizingOptions = [.preferredContentSize]
         popover.contentViewController = host
-        popover.behavior = .transient
+        // A test's copy is not the app in front, and a click elsewhere would close it at once: its
+        // panel closes by its mark alone.
+        popover.behavior = environment.hasOwnHome ? .applicationDefined : .transient
         popover.delegate = self
 
         model.onChange = { [weak self] in self?.stateDidChange() }
@@ -95,6 +104,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         }
         lend.onChange = { [weak self] in self?.stateDidChange() }
         lend.start()
+        startControl()
         openAtLogin()
         startCapture()
         startInput()
@@ -103,13 +113,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         watchForGrants()
 
         // At the very first start the panel opens by itself, so that the person sees the choices.
-        if !UserDefaults.standard.bool(forKey: "panelShownAtFirstStart") {
-            UserDefaults.standard.set(true, forKey: "panelShownAtFirstStart")
+        // A home of its own is a test's: it opens nothing by itself.
+        if !environment.hasOwnHome, !environment.defaults.bool(forKey: "panelShownAtFirstStart") {
+            environment.defaults.set(true, forKey: "panelShownAtFirstStart")
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in self?.togglePanel() }
         }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        control?.stop()
         lend.stop()
         model.shutDown()
         log.info("==== run end: the app quits")
@@ -132,10 +144,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// The installed app (in /Applications) starts at each login when the person said so to
     /// `npx @iterate-com/mac-app` (its config's `login`). A build run from elsewhere registers
-    /// nothing, so that one copy alone is ever registered. System Settings › General › Login Items
-    /// shows it and can turn it off.
+    /// nothing, so that one copy alone is ever registered, and so does a copy with a home of its own.
+    /// System Settings › General › Login Items shows it and can turn it off.
     private func openAtLogin() {
-        guard Bundle.main.bundlePath.hasPrefix("/Applications/") else { return }
+        guard Bundle.main.bundlePath.hasPrefix("/Applications/"), !environment.hasOwnHome else { return }
         let service = SMAppService.mainApp
         let wanted = lend.config?.login ?? false
         do {
@@ -162,10 +174,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return Capture.Destination(node: config.node, iterateBin: config.iterateBin, uploader: uploader, mind: mind.mind, name: mind.name)
         }
         self.capture = capture
-        model.toggleCapture = { capture.toggle() }
-        model.markCapture = { capture.mark($0) }
-        let isRegistered = HotKey.register(.capture, pressed: { capture.toggle() })
-        log.info(isRegistered ? "capture: \(HotKey.Combo.capture.words) starts and ends one" : "capture: macOS refused the key \(HotKey.Combo.capture.words)")
+        control?.toggleCapture = { capture.toggle() }
+        control?.markCapture = { capture.mark($0) }
+        register(.capture, "capture", "starts and ends one", pressed: { capture.toggle() })
     }
 
     /// ⌥⇧Space opens the input: a text and files, to one of the minds this Mac knows (`MindInput`).
@@ -180,9 +191,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         input.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         input.allow = { [weak self] permission in self?.guide(permission) }
         input.onChange = { [weak self] in self?.stateDidChange() }
-        model.toggleInput = { [weak self] in self?.input.toggle() }
-        let isRegistered = HotKey.register(.input, pressed: { [weak self] in self?.input.toggle() })
-        log.info(isRegistered ? "input: \(HotKey.Combo.input.words) opens it" : "input: macOS refused the key \(HotKey.Combo.input.words)")
+        control?.toggleInput = { [weak self] in self?.input.toggle() }
+        register(.input, "input", "opens it", pressed: { [weak self] in self?.input.toggle() })
     }
 
     /// ⌥⇧D dictates into the app in front, with the word list of the mind this Mac is lent to
@@ -197,8 +207,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.config?.active) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
         dictation.onChange = { [weak self] in self?.stateDidChange() }
-        let isRegistered = HotKey.register(.dictation, pressed: { [weak self] in self?.dictation.pressed() }, released: { [weak self] in self?.dictation.released() })
-        log.info(isRegistered ? "dictation: hold \(HotKey.Combo.dictation.words) and talk" : "dictation: macOS refused the key \(HotKey.Combo.dictation.words)")
+        control?.dictationPressed = { [weak self] in self?.dictation.pressed() }
+        control?.dictationReleased = { [weak self] in self?.dictation.released() }
+        register(.dictation, "dictation", "held, dictates", pressed: { [weak self] in self?.dictation.pressed() }, released: { [weak self] in self?.dictation.released() })
+    }
+
+    /// A key that works in any app. A copy with a home of its own registers none: the keys are the
+    /// installed app's, and a test presses them through the control socket.
+    private func register(_ combo: HotKey.Combo, _ what: String, _ does: String, pressed: @escaping () -> Void, released: (() -> Void)? = nil) {
+        guard !environment.hasOwnHome else { return log.info("\(what): \(combo.words) is not registered in a home of its own") }
+        let isRegistered = HotKey.register(combo, pressed: pressed, released: released)
+        log.info(isRegistered ? "\(what): \(combo.words) \(does)" : "\(what): macOS refused the key \(combo.words)")
+    }
+
+    /// The control socket (`ControlSocket`), when the environment asks for it.
+    private func startControl() {
+        guard let url = environment.controlSocket else { return }
+        let control = ControlSocket(socketURL: url, approval: model.approval)
+        control.state = { [weak self] in self?.controlState() ?? [:] }
+        control.start()
+        self.control = control
+    }
+
+    /// What `ui.state` answers.
+    private func controlState() -> [String: Any] {
+        let active: Any = lend.config?.active ?? NSNull()
+        var state: [String: Any] = [
+            "home": environment.folder.path,
+            "lend": ["phase": lend.state.phase.name, "status": lend.state.statusLine(now: Date(), clock: Lend.clock), "active": active],
+            "minds": lend.config?.minds.map(\.mind) ?? [],
+            "panel": ["visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen],
+            "input": input.controlState(),
+            "dictation": dictation.controlState(),
+            "activity": [
+                "pillVisible": model.acts.isPillVisible,
+                "entries": model.acts.entries.prefix(10).map { entry -> [String: Any] in
+                    ["did": entry.isRunning ? entry.doing : entry.did, "running": entry.isRunning, "failure": entry.failure ?? NSNull(), "detail": entry.detail ?? NSNull()]
+                },
+            ],
+            "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
+            "record": model.record.state(),
+            "sharing": Dictionary(uniqueKeysWithValues: Shareable.all.map { ($0.id, $0.sharing.rawValue) }),
+        ]
+        if #available(macOS 15.0, *), let capture = capture as? Capture { state["capture"] = capture.controlState() }
+        return state
     }
 
     private var isCapturing: Bool {
@@ -310,7 +362,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let mark = MenuBarMark.of(
             bannerShows: banner != nil, inUse: isInUse, microphoneOrCameraOn: isCapturing, glance: glance,
             isRecording: record.isRecording, isPaused: record.isPaused)
-        button.image = IterateIcon.image(mark)
+        // a test copy's mark is its own: the owner never quits the installed app for it
+        button.image = environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark)
         recordDot?.dot = mark.dot
         let lendWords: String
         switch glance {
@@ -322,8 +375,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
             ?? (isInUse ? "iterate: a mind uses this Mac now" : self.isCapturing ? "iterate: your capture runs" : isCapturing ? "iterate: microphone or camera on" : lendWords)
         let label = [words, mark.dot.words(tracks: record.tracks.count, pausedBecause: record.pausedBecause)].compactMap { $0 }.joined(separator: ", ")
-        button.toolTip = label
-        button.setAccessibilityLabel(label)
+        let shown = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path). \(label)" : label
+        button.toolTip = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path)" : label
+        button.setAccessibilityLabel(shown)
+        // the cell is the accessibility element (`ui.tree`, VoiceOver)
+        button.cell?.setAccessibilityLabel(shown)
         if mark.name != shownStatusIcon {
             shownStatusIcon = mark.name
             log.info("menu-bar icon: the iterate mark, \(mark.name)")

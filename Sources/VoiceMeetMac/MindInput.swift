@@ -69,7 +69,7 @@ final class MindInputModel: ObservableObject {
 
     func choose(_ mind: String) {
         self.mind = mind
-        UserDefaults.standard.set(mind, forKey: Self.mindKey)
+        AppEnvironment.current.defaults.set(mind, forKey: Self.mindKey)
     }
 
     /// Tab: the next mind of the list (`by` 1), or the one before (-1).
@@ -170,7 +170,7 @@ final class MindInput {
         let active: String?
     }
 
-    static let folder = Lend.folder.appendingPathComponent("inputs")
+    static let folder = AppEnvironment.current.folder.appendingPathComponent("inputs")
     /// The pictures that came with no file, until their input is sent.
     static let pasted = folder.appendingPathComponent("pasted")
 
@@ -229,7 +229,10 @@ final class MindInput {
     /// macOS refused opens its guide; the bar's own start only says so.
     private func listen(asking: Bool) {
         guard listener == nil, !model.draft.isSending, panel?.isVisible == true else { return }
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        // a home of its own opens no microphone: only an audio fixture is heard (`Dictation` too)
+        let hearsFixture = SpeechListener.environmentFixture != nil
+        if AppEnvironment.current.hasOwnHome, !hearsFixture { return }
+        switch hearsFixture ? .authorized : AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             break
         case .notDetermined:
@@ -312,7 +315,7 @@ final class MindInput {
         let destination = destination()
         model.minds = destination?.minds ?? []
         // the mind chosen last, else the one this Mac is lent to, else the first
-        let wanted = [UserDefaults.standard.string(forKey: MindInputModel.mindKey), destination?.active].compactMap { $0 }
+        let wanted = [AppEnvironment.current.defaults.string(forKey: MindInputModel.mindKey), destination?.active].compactMap { $0 }
         model.mind = wanted.first { address in model.minds.contains { $0.mind == address } } ?? model.minds.first?.mind
         let panel = self.panel ?? makePanel()
         fit()
@@ -430,6 +433,21 @@ final class MindInput {
         close()
     }
 
+    /// For `ui.state` on the control socket.
+    func controlState() -> [String: Any] {
+        var phase: String
+        switch model.draft.phase {
+        case .editing: phase = "editing"
+        case .sending(let progress): phase = "sending \(Int(progress * 100))%"
+        case .failed(let reason): phase = "failed: \(reason)"
+        }
+        return [
+            "visible": panel?.isVisible ?? false, "hasKeyboard": panel?.isKeyWindow ?? false, "text": model.draft.text,
+            "files": model.draft.attachments.map(\.name), "mind": model.mind ?? NSNull(), "minds": model.minds.map(\.mind),
+            "phase": phase, "listening": isListening, "lastLine": lastLine ?? NSNull(),
+        ]
+    }
+
     private func senderWrote(_ text: String, of id: String) {
         guard id == model.draft.id else { return }
         var lines = (pending + text).components(separatedBy: "\n")
@@ -539,6 +557,8 @@ struct MindInputBar: View {
                 .padding(.top, 5)
                 MicrophoneButton(voice: model.voice, level: model.level, press: model.toggleMicrophone)
                     .disabled(model.draft.isSending)
+                    .accessibilityIdentifier("input.microphone")
+                SendButton(isEnabled: model.mind != nil && !model.draft.isEmpty && !model.draft.isSending, press: model.send)
             }
             if !model.draft.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -607,6 +627,7 @@ struct MindInputBar: View {
         .fixedSize()
         .disabled(model.minds.isEmpty || model.draft.isSending)
         .help("The mind this input goes to. Tab chooses the next one.")
+        .accessibilityIdentifier("input.mind")
     }
 
     @ViewBuilder
@@ -678,6 +699,26 @@ private struct MicrophoneButton: View {
         .buttonStyle(.plain)
         .fixedSize()
         .help(voice.isOpen ? "The microphone is on: what you say is written here, on this Mac. Click to turn it off (⌘D)." : "The microphone is off. Click to talk (⌘D).")
+    }
+}
+
+/// The bar's send button: what Return does.
+private struct SendButton: View {
+    let isEnabled: Bool
+    let press: () -> Void
+
+    var body: some View {
+        Button(action: press) {
+            Image(systemName: "arrow.up.circle.fill")
+                .font(.system(size: 24))
+                .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary.opacity(0.5))
+                .frame(height: 28)
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .help("Send (↩)")
+        .accessibilityLabel("Send")
+        .accessibilityIdentifier("input.send")
     }
 }
 
@@ -826,6 +867,7 @@ private struct InputTextView: NSViewRepresentable {
         field.minSize = .zero
         field.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         field.string = model.draft.text
+        field.setAccessibilityIdentifier("input.text")
         scroll.documentView = field
         model.field = field
         let coordinator = context.coordinator
@@ -849,10 +891,11 @@ private struct InputTextView: NSViewRepresentable {
 extension MindInput {
     /// Draws the bar in four states (empty, with a text and files, while it sends, not sent), each in
     /// the light and the dark appearance: eight PNG files in `folder`, for a look with no Mac
-    /// (`--render-input <folder>`). The minds are those of config.json, or `example.com`.
+    /// (`--render-input <folder>`). The minds are the drawings' (`Rendering`).
     static func render(to folder: URL) -> Bool {
         _ = NSApplication.shared
-        let minds = Panel.sampleLend(nil).minds
+        Rendering.fixFaces()
+        let minds = Rendering.minds
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var drawn = true
         for state in ["empty", "listening", "filled", "sending", "failed"] {
@@ -868,27 +911,12 @@ extension MindInput {
                 model.draft.attach(name: "Roadmap 2027.pdf", local: "/tmp/Roadmap 2027.pdf", bytes: 2_200_000, contentType: "application/pdf")
                 model.draft.attach(name: "Pasted picture 14.02.11 1.png", local: "/tmp/Pasted picture 14.02.11 1.png", bytes: 35_000, contentType: "image/png")
             }
-            if state == "sending" || state == "failed" { _ = model.draft.submit(at: Date()) }
+            if state == "sending" || state == "failed" { _ = model.draft.submit(at: Rendering.now) }
             if state == "sending" { _ = model.draft.senderSaid(["progress": 0.4], next: "next") }
             if state == "failed" { _ = model.draft.senderSaid(["failed": "Not signed in to \(minds.first?.mind ?? "example.com"): run `iterate login` once."], next: "next") }
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-                let view = NSHostingView(rootView: MindInputBar(model: model).padding(24).background(Color(nsColor: .windowBackgroundColor)))
-                view.appearance = appearance
-                let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-                window.appearance = appearance
-                window.contentView = view
-                view.layoutSubtreeIfNeeded()
-                // The text learns its height after the first layout: size the window again to it.
-                for _ in 0..<3 {
-                    RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-                    window.setContentSize(view.fittingSize)
-                    view.layoutSubtreeIfNeeded()
-                }
-                guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-                view.cacheDisplay(in: view.bounds, to: picture)
-                let file = folder.appendingPathComponent("input-\(state)-\(tone).png")
-                drawn = drawn && (picture.representation(using: .png, properties: [:]).map { (try? $0.write(to: file)) != nil } ?? false)
+                let view = MindInputBar(model: model).padding(24).background(Color(nsColor: .windowBackgroundColor))
+                drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("input-\(state)-\(tone).png")) && drawn
             }
         }
         return drawn

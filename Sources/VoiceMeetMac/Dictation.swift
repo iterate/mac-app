@@ -28,6 +28,9 @@ final class DictationPillModel: ObservableObject {
 /// list of the mind this Mac is lent to makes the mind's names and terms come out right. The text
 /// goes in through the clipboard and ⌘V, which needs the Accessibility permission; without it the
 /// text stays on the clipboard for the person's own ⌘V.
+///
+/// A copy with a home of its own (`AppEnvironment`) opens no microphone unless an audio fixture is
+/// set (`SpeechListener`), and it writes nothing: the text is kept for the control socket alone.
 @MainActor
 final class Dictation {
     var words: () -> WordList = { .empty }
@@ -36,6 +39,8 @@ final class Dictation {
     var onChange: () -> Void = {}
     /// How the last dictation ended, for the panel.
     private(set) var lastLine: String?
+    /// The last dictation's text, in memory only: for the control socket, never for the log.
+    private(set) var lastText: String?
     var isRunning: Bool { listener != nil }
 
     private let log = AppLog("dictation")
@@ -60,7 +65,12 @@ final class Dictation {
     }
 
     private func start() {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        let hearsFixture = SpeechListener.environmentFixture != nil
+        if AppEnvironment.current.hasOwnHome, !hearsFixture {
+            key.ended()
+            return end("Not started at \(Lend.clock(Date())): a home of its own opens no microphone", failed: nil)
+        }
+        switch hearsFixture ? .authorized : AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             break
         case .notDetermined:
@@ -121,8 +131,12 @@ final class Dictation {
 
     /// The text goes where the cursor is: on the clipboard, ⌘V, and the clipboard as it was.
     private func write(_ text: String) {
+        lastText = text
         guard !text.isEmpty else { return end("Heard no words at \(Lend.clock(Date()))", failed: nil) }
         let words = Spoken.wordCount(text)
+        guard !AppEnvironment.current.hasOwnHome else {
+            return end("Heard \(words) words at \(Lend.clock(Date())); a home of its own writes them nowhere", failed: nil)
+        }
         let pasteboard = NSPasteboard.general
         guard AXIsProcessTrusted() else {
             pasteboard.clearContents()
@@ -167,6 +181,21 @@ final class Dictation {
             hidePill(after: 0)
         }
         onChange()
+    }
+
+    /// For `ui.state` on the control socket.
+    func controlState() -> [String: Any] {
+        var phase: String
+        switch pill.phase {
+        case .loading: phase = "loading"
+        case .listening: phase = "listening"
+        case .writing: phase = "writing"
+        case .failed(let reason): phase = "failed: \(reason)"
+        }
+        return [
+            "running": isRunning, "pillVisible": panel?.isVisible ?? false, "phase": phase, "text": pill.text,
+            "lastLine": lastLine ?? NSNull(), "lastText": lastText ?? NSNull(),
+        ]
     }
 
     // MARK: - The pill
@@ -294,29 +323,5 @@ extension Dictation {
             }
         }
         return drawn
-    }
-}
-
-/// A SwiftUI view as a PNG file, for a look with no Mac (the `--render-*` flags).
-@MainActor
-enum Rendering {
-    static func png<Content: View>(of content: Content, dark: Bool, to file: URL) -> Bool {
-        _ = NSApplication.shared
-        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-        let view = NSHostingView(rootView: content)
-        view.appearance = appearance
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = appearance
-        window.contentView = view
-        view.layoutSubtreeIfNeeded()
-        // A text view learns its height after the first layout: size the window again to it.
-        for _ in 0..<3 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-            window.setContentSize(view.fittingSize)
-            view.layoutSubtreeIfNeeded()
-        }
-        guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-        view.cacheDisplay(in: view.bounds, to: picture)
-        return picture.representation(using: .png, properties: [:]).map { (try? $0.write(to: file)) != nil } ?? false
     }
 }

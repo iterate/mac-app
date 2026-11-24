@@ -341,26 +341,18 @@ final class BannerWindow {
     /// so a fill of the material's tone and a soft shadow stand in.
     static func render(_ kind: String, to file: URL, dark: Bool) -> Bool {
         _ = NSApplication.shared
-        let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+        Rendering.fixFaces()
         let banner = sample(kind)
         let size = size(of: BannerView(banner: banner, press: { _ in }, dismiss: {}))
-        let view = NSHostingView(
-            rootView: BannerView(banner: banner, press: { _ in }, dismiss: {}, renderTone: dark ? Color(white: 0.2) : Color(white: 0.97))
-                .frame(width: size.width, height: size.height)
-                .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
-                .padding(28)
-                .background(dark ? Color(white: 0.08) : Color(white: 0.78))
-        )
-        view.appearance = appearance
+        let view = BannerView(banner: banner, press: { _ in }, dismiss: {}, renderTone: dark ? Color(white: 0.2) : Color(white: 0.97))
+            .frame(width: size.width, height: size.height)
+            .shadow(color: .black.opacity(0.28), radius: 14, y: 6)
+            .padding(28)
+            .background(dark ? Color(white: 0.08) : Color(white: 0.78))
         // the banner's own kind of window, which draws its default button as a key window does
-        let window = KeyablePanel(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = appearance
-        window.contentView = view
-        view.layoutSubtreeIfNeeded()
-        guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-        view.cacheDisplay(in: view.bounds, to: picture)
-        guard let png = picture.representation(using: .png, properties: [:]) else { return false }
-        return (try? png.write(to: file)) != nil
+        return Rendering.png(of: view, dark: dark, to: file) {
+            KeyablePanel(contentRect: $0, styleMask: [.borderless], backing: .buffered, defer: false)
+        }
     }
 
     /// The app's own icon: the bundle's, or, for a bare build that draws to a file, the package's.

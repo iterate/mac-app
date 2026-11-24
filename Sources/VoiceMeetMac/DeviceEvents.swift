@@ -28,15 +28,15 @@ final class DeviceEvents: ObservableObject {
     static let idleAfterSeconds = 120
 
     /// The person's choice: keyboard and mouse events go to the mind.
-    @Published var sharesInput = UserDefaults.standard.bool(forKey: "device.input") {
+    @Published var sharesInput = AppEnvironment.current.defaults.bool(forKey: "device.input") {
         didSet {
-            UserDefaults.standard.set(sharesInput, forKey: "device.input")
+            AppEnvironment.current.defaults.set(sharesInput, forKey: "device.input")
             watchInput()
         }
     }
     /// The person's choice: those events are kept in the mind's log. Off: they are ephemeral.
-    @Published var keepsInput = UserDefaults.standard.bool(forKey: "device.keep") {
-        didSet { UserDefaults.standard.set(keepsInput, forKey: "device.keep") }
+    @Published var keepsInput = AppEnvironment.current.defaults.bool(forKey: "device.keep") {
+        didSet { AppEnvironment.current.defaults.set(keepsInput, forKey: "device.keep") }
     }
     /// How many events went to the mind in this run, and the last failure, for the panel.
     @Published private(set) var sent = 0
@@ -274,10 +274,12 @@ struct DeviceEventsSection: View {
                 }
                 Spacer(minLength: 8)
                 Toggle("", isOn: $events.sharesInput).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                    .accessibilityIdentifier("device.input")
             }
             if events.sharesInput {
                 Toggle("Keep these events in the mind's log", isOn: $events.keepsInput)
                     .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("device.keep")
                     .font(.caption)
                     .padding(.leading, 30)
                     .help("Off: an event reaches whoever listens at that moment, and is in no log")

@@ -30,7 +30,7 @@ final class MindFaces: ObservableObject {
         var title: String { name ?? address }
     }
 
-    nonisolated static let folder = Lend.folder.appendingPathComponent("faces")
+    nonisolated static let folder = AppEnvironment.current.folder.appendingPathComponent("faces")
     /// How often a mind's profile is read again while its face is shown.
     private static let freshFor: TimeInterval = 300
     /// A profile's answer is small: a larger one is not read as a profile.
@@ -42,6 +42,8 @@ final class MindFaces: ObservableObject {
 
     private var faces: [String: Face] = [:]
     private var askedAt: [String: Date] = [:]
+    /// The faces are the drawings' own (`fix`): none is read.
+    private var isFixed = false
     private let session: URLSession = {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.httpCookieAcceptPolicy = .never
@@ -64,13 +66,19 @@ final class MindFaces: ObservableObject {
     /// Reads the mind's profile again unless it was read in the last five minutes. The views that
     /// show the face draw again when the read changed it.
     func refresh(_ address: String) {
-        guard Self.isHostname(address) else { return }
+        guard Self.isHostname(address), !isFixed else { return }
         if let at = askedAt[address], Date().timeIntervalSince(at) < Self.freshFor { return }
         askedAt[address] = Date()
         Task { await read(address) }
     }
 
     /// Reads the profile and the icon now, and keeps them. The answer is the face as it is after.
+    /// The faces of the drawings to a file (`Rendering`), in place of every read.
+    func fix(_ fixed: [Face]) {
+        isFixed = true
+        for face in fixed { faces[face.address] = face }
+    }
+
     @discardableResult
     func read(_ address: String) async -> Face {
         guard Self.isHostname(address), let url = URL(string: "https://\(address)/.well-known/iterate-profile") else {

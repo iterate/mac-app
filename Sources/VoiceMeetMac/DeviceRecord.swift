@@ -41,7 +41,7 @@ final class DeviceRecord: ObservableObject {
 
     /// The switches that are on, remembered across restarts.
     @Published private(set) var on: Set<RecordSource> = Set(
-        RecordSource.allCases.filter { UserDefaults.standard.bool(forKey: "record.\($0.rawValue)") })
+        RecordSource.allCases.filter { AppEnvironment.current.defaults.bool(forKey: "record.\($0.rawValue)") })
     /// The quiet line of state under the switches.
     @Published private(set) var line = "Off"
     /// A recorder runs (the dot on the mark); it may be paused.
@@ -96,7 +96,7 @@ final class DeviceRecord: ObservableObject {
     }
 
     func set(_ source: RecordSource, _ value: Bool) {
-        UserDefaults.standard.set(value, forKey: "record.\(source.rawValue)")
+        AppEnvironment.current.defaults.set(value, forKey: "record.\(source.rawValue)")
         if value { on.insert(source) } else { on.remove(source) }
         log.info("\(source.rawValue): \(value ? "on" : "off")")
         tick()
@@ -119,7 +119,7 @@ final class DeviceRecord: ObservableObject {
     }
 
     static func spool(for mind: String) -> URL {
-        Lend.folder.appendingPathComponent("record").appendingPathComponent(mind)
+        AppEnvironment.current.folder.appendingPathComponent("record").appendingPathComponent(mind)
     }
 
     /// Every 2 s, at each switch, and at once when the presence changes (`AppModel`).
@@ -274,12 +274,13 @@ struct RecordSection: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("RECORD").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
             ForEach(DeviceRecord.switches) { item in
-                row(item.title, symbol: item.symbol, permission: item.permission, isOn: Binding(
+                row(item.title, id: "record.\(item.source.rawValue)", symbol: item.symbol, permission: item.permission, isOn: Binding(
                     get: { record.isOn(item.source) }, set: { record.set(item.source, $0) }))
             }
             VStack(alignment: .leading, spacing: 4) {
                 Toggle("Window text: the text of the window in front", isOn: $window.readsWindowText)
                     .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("record.windowText")
                     .help("On a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s. Never of a password manager.")
                 Text("The app in front and its window's title go to the mind always, while the Mac is lent.")
                     .foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
@@ -291,14 +292,14 @@ struct RecordSection: View {
         }
     }
 
-    private func row(_ title: String, symbol: String, permission: Permission, isOn: Binding<Bool>) -> some View {
+    private func row(_ title: String, id: String, symbol: String, permission: Permission, isOn: Binding<Bool>) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 10) {
                 Image(systemName: symbol).font(.system(size: 14)).frame(width: 20)
                     .foregroundStyle(isOn.wrappedValue && permission.isGranted ? Color.accentColor : Color.secondary)
                 Text(title)
                 Spacer(minLength: 8)
-                Toggle("", isOn: isOn).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                Toggle("", isOn: isOn).toggleStyle(.switch).controlSize(.small).labelsHidden().accessibilityIdentifier(id)
             }
             if isOn.wrappedValue, !permission.isGranted { missing(permission) }
         }

@@ -51,6 +51,10 @@ public actor SpeechModels {
 /// follows the voice; a stretch ends at a pause (`SpeechStretch`), and then its text is final.
 /// The mind's word list does two things: its terms are what the second model listens for in each
 /// ended stretch, and its wrong forms are repaired in every text.
+///
+/// With an audio fixture (`fixture`, or the environment's `ITERATE_MAC_AUDIO_FIXTURE`), the
+/// listener opens no audio device: it plays that file at the pace of the clock through the same
+/// path as the microphone's buffers, and then silence, as a microphone in a quiet room.
 public final class SpeechListener: @unchecked Sendable {
     public enum Event: Sendable {
         /// The model loads or downloads: 0 to 1.
@@ -74,11 +78,38 @@ public final class SpeechListener: @unchecked Sendable {
     private let engine = AVAudioEngine()
     private let converter = AudioConverter()
     private var work: Task<String, Never>?
+    private let fixture: URL?
 
-    public init() {}
+    /// The sound file that the environment's `ITERATE_MAC_AUDIO_FIXTURE` names, if any.
+    public static let environmentFixture: URL? = ProcessInfo.processInfo.environment["ITERATE_MAC_AUDIO_FIXTURE"]
+        .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
+
+    /// `fixture` is a sound file (WAV, AIFF, M4A) heard in place of the microphone.
+    public init(fixture: URL? = SpeechListener.environmentFixture) {
+        self.fixture = fixture
+    }
 
     /// Opens the microphone and starts to write. Call it once for a listener.
     public func start(words: WordList, heard: @escaping @Sendable (Event) -> Void) {
+        if let fixture {
+            let audio: AudioFixture
+            do {
+                audio = try AudioFixture(fixture)
+            } catch {
+                heard(.failed("The audio fixture \(fixture.lastPathComponent) does not read: \(error.localizedDescription)"))
+                return
+            }
+            heard(.note("hears the audio fixture \(fixture.lastPathComponent), \(String(format: "%.1f", audio.seconds)) s, in place of the microphone"))
+            DispatchQueue.global(qos: .userInitiated).async { [self] in
+                while !lock.withLock({ isEnded }) {
+                    guard let buffer = audio.next() else { break }
+                    feed(buffer, heard: heard)
+                    Thread.sleep(forTimeInterval: Double(buffer.frameLength) / buffer.format.sampleRate)
+                }
+            }
+            work = Task { [self] in await write(words: words, heard: heard) }
+            return
+        }
         let input = engine.inputNode
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else {
@@ -86,14 +117,7 @@ public final class SpeechListener: @unchecked Sendable {
             return
         }
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
-            guard let self, let samples = try? self.converter.resampleBuffer(buffer), !samples.isEmpty else { return }
-            var sum: Float = 0
-            for sample in samples { sum += sample * sample }
-            // speech is near 0.05 to 0.2 RMS: the square root makes a quiet voice show
-            heard(.level(min(1, ((sum / Float(samples.count)).squareRoot() * 4).squareRoot())))
-            self.lock.lock()
-            self.pending.append(contentsOf: samples)
-            self.lock.unlock()
+            self?.feed(buffer, heard: heard)
         }
         do {
             engine.prepare()
@@ -104,6 +128,18 @@ public final class SpeechListener: @unchecked Sendable {
             return
         }
         work = Task { [self] in await write(words: words, heard: heard) }
+    }
+
+    /// One buffer of the microphone (or of the fixture): its loudness, and its samples for the model.
+    private func feed(_ buffer: AVAudioPCMBuffer, heard: @Sendable (Event) -> Void) {
+        guard let samples = try? converter.resampleBuffer(buffer), !samples.isEmpty else { return }
+        var sum: Float = 0
+        for sample in samples { sum += sample * sample }
+        // speech is near 0.05 to 0.2 RMS: the square root makes a quiet voice show
+        heard(.level(min(1, ((sum / Float(samples.count)).squareRoot() * 4).squareRoot())))
+        lock.lock()
+        pending.append(contentsOf: samples)
+        lock.unlock()
     }
 
     /// Closes the microphone and answers everything that was said, with the last stretch final.
@@ -123,7 +159,8 @@ public final class SpeechListener: @unchecked Sendable {
         isEnded = true
         isDropped = isDropped || dropped
         lock.unlock()
-        guard !wasEnded else { return }
+        // a fixture opened no device: its player sees the end
+        guard !wasEnded, fixture == nil else { return }
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
     }
@@ -202,5 +239,32 @@ public final class SpeechListener: @unchecked Sendable {
             }
             try? await Task.sleep(nanoseconds: 400_000_000)
         }
+    }
+}
+
+/// A sound file as the microphone's buffers, for a test: the file in pieces of 2048 frames, then
+/// silence for as long as it is asked.
+public final class AudioFixture: @unchecked Sendable {
+    public static let frames: AVAudioFrameCount = 2048
+
+    private let file: AVAudioFile
+    public var format: AVAudioFormat { file.processingFormat }
+    public var seconds: Double { Double(file.length) / file.processingFormat.sampleRate }
+
+    public init(_ url: URL) throws {
+        file = try AVAudioFile(forReading: url)
+    }
+
+    /// The next piece: of the file while it lasts, then of silence.
+    public func next() -> AVAudioPCMBuffer? {
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: Self.frames) else { return nil }
+        if file.framePosition < file.length, (try? file.read(into: buffer, frameCount: Self.frames)) != nil, buffer.frameLength > 0 {
+            return buffer
+        }
+        buffer.frameLength = Self.frames
+        for channel in 0..<Int(format.channelCount) {
+            buffer.floatChannelData?[channel].update(repeating: 0, count: Int(Self.frames))
+        }
+        return buffer
     }
 }

@@ -46,7 +46,7 @@ final class Lend {
             iterateBin = try values.decode(String.self, forKey: .iterateBin)
             bridge = try values.decode(String.self, forKey: .bridge)
             version = try values.decode(String.self, forKey: .version)
-            cli = try values.decodeIfPresent(String.self, forKey: .cli) ?? Lend.folder.appendingPathComponent("source/cli.mjs").path
+            cli = try values.decodeIfPresent(String.self, forKey: .cli) ?? AppEnvironment.current.folder.appendingPathComponent("source/cli.mjs").path
             copy = try values.decodeIfPresent(String.self, forKey: .copy)
             if let minds = try values.decodeIfPresent([Mind].self, forKey: .minds) {
                 self.minds = minds
@@ -63,9 +63,6 @@ final class Lend {
 
         var source: UpdateSource { .of(spec: spec, copy: copy, version: version) }
     }
-
-    nonisolated static let folder = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Application Support/iterate-mac-app")
 
     private(set) var state = LendState()
     private(set) var config: Config?
@@ -190,6 +187,10 @@ final class Lend {
 
     private func run() {
         guard let config, let mind = config.activeMind else { return send(.stopRequested) }
+        guard AppEnvironment.current.lends else {
+            log.info("no lend: a home of its own lends only with --lend")
+            return send(.stopRequested)
+        }
         guard FileManager.default.isExecutableFile(atPath: config.node) else {
             send(.humanLine("Node is gone from \(config.node): run npx @iterate-com/mac-app again"))
             return send(.processEnded(status: -1, ranFor: 0))
@@ -262,7 +263,7 @@ final class Lend {
 
     /// Reads config.json again. A new active mind, or new paths to run with, start the lend anew.
     private func reload(isStart: Bool = false) {
-        let file = Self.folder.appendingPathComponent("config.json")
+        let file = AppEnvironment.current.folder.appendingPathComponent("config.json")
         let old = config
         do {
             config = try JSONDecoder().decode(Config.self, from: Data(contentsOf: file))
@@ -291,9 +292,9 @@ final class Lend {
     /// The folder holds config.json, which the CLI replaces by a rename: a change of the folder's
     /// list of files is a change of the config.
     private func watchFolder() {
-        try? FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
-        let descriptor = Darwin.open(Self.folder.path, O_EVTONLY)
-        guard descriptor >= 0 else { return log.error("cannot watch \(Self.folder.path)") }
+        try? FileManager.default.createDirectory(at: AppEnvironment.current.folder, withIntermediateDirectories: true)
+        let descriptor = Darwin.open(AppEnvironment.current.folder.path, O_EVTONLY)
+        guard descriptor >= 0 else { return log.error("cannot watch \(AppEnvironment.current.folder.path)") }
         let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor, eventMask: [.write, .rename, .delete], queue: .main)
         source.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
@@ -402,7 +403,7 @@ final class Lend {
 
     // MARK: - Words
 
-    static let clock: (Date) -> String = { $0.formatted(date: .omitted, time: .standard) }
+    static var clock: (Date) -> String { AppEnvironment.current.clock }
 
     private static func describe(_ event: LendEvent) -> String {
         switch event {
@@ -421,7 +422,7 @@ final class Lend {
     /// Asks npm for the newest version. Only for the registry: a pkg.pr.new link or a folder is a
     /// trial, updated by hand, and an app built from an owner's copy runs what was built.
     private func checkForUpdate() {
-        guard let config, config.source.updatesItself else { return }
+        guard let config, config.source.updatesItself, !AppEnvironment.current.hasOwnHome else { return }
         guard let url = URL(string: "https://registry.npmjs.org/@iterate-com/mac-app/latest") else { return }
         Task { @MainActor in
             guard let (data, _) = try? await URLSession.shared.data(from: url),

@@ -4,16 +4,15 @@ import OSLog
 /// The app's log. Every line goes to two places:
 ///
 /// - the system's unified log, subsystem `com.iterate.voice-meet-mac`;
-/// - the text file `~/Library/Logs/voice-meet-mac/app.log`, which a person or an agent can follow
-///   with `tail -F`.
+/// - the text file `~/Library/Logs/voice-meet-mac/app.log` (`<home>/logs/app.log` for a copy with a
+///   home of its own, `AppEnvironment`), which a person or an agent can follow with `tail -F`.
 ///
 /// The lines hold states, events, formats, sizes, counts, device names and errors. They hold no
 /// picture, no sound and no window title.
 struct AppLog: Sendable {
     static let subsystem = "com.iterate.voice-meet-mac"
-    static let directory = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent("Library/Logs/voice-meet-mac", isDirectory: true)
-    static let fileURL = directory.appendingPathComponent("app.log")
+    static var directory: URL { AppEnvironment.current.logDirectory }
+    static var fileURL: URL { directory.appendingPathComponent("app.log") }
 
     private let category: String
     private let logger: Logger

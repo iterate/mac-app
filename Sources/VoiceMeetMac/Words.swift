@@ -13,7 +13,7 @@ final class Words {
         let fetcher: String
     }
 
-    static let folder = Lend.folder.appendingPathComponent("words")
+    static let folder = AppEnvironment.current.folder.appendingPathComponent("words")
 
     var source: () -> Source? = { nil }
 

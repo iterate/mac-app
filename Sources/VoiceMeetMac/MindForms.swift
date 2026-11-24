@@ -175,15 +175,7 @@ enum FormWindow {
     }
 
     /// Draws a form to a PNG file, on the window background, for a look at it with no click.
-    static func render<Content: View>(_ content: Content, to file: URL) -> Bool {
-        _ = NSApplication.shared
-        let view = NSHostingView(rootView: content.background(Color(nsColor: .windowBackgroundColor)))
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: view.fittingSize), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.contentView = view
-        view.layoutSubtreeIfNeeded()
-        guard let picture = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return false }
-        view.cacheDisplay(in: view.bounds, to: picture)
-        guard let png = picture.representation(using: .png, properties: [:]) else { return false }
-        return (try? png.write(to: file)) != nil
+    static func render<Content: View>(_ content: Content, to file: URL, dark: Bool = false) -> Bool {
+        Rendering.png(of: content.background(Color(nsColor: .windowBackgroundColor)), dark: dark, to: file)
     }
 }
