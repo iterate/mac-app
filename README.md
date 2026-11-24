@@ -435,11 +435,18 @@ network, the capture stays in `~/Library/Application Support/iterate-mac-app/cap
 text on the clipboard names the files there, and the panel says why; send it later with
 `node bridge/capture-upload.mjs <folder> --finish --iterate <iterate.js> --mind <mind>`.
 
-## Input: type what you want to a mind
+## Input: say or type what you want to a mind
 
-Press **⌥⇧Space** in any app (or **Open** at the bottom of the panel). One bar opens: type what you
-want, and press **Return**. That is all the bar knows: it has no commands and no list of actions.
-What happens with your words is the mind's own matter.
+Press **⌥⇧Space** in any app (or **Open** at the bottom of the panel). One bar opens, and it
+listens: talk, type, or both, and press **Return**. That is all the bar knows: it has no commands
+and no list of actions. What happens with your words is the mind's own matter.
+
+- **The microphone.** The bar starts by listening. What you say is written into the text as you
+  say it, on this Mac ("Dictation" below), with the word list of the mind the input goes to. The
+  button at the right shows the loudness; a click, or **⌘D**, turns the microphone off, and again
+  on. Words that you change by hand stay as you made them: only what you say after that comes in.
+  The microphone is open only while the bar is open: Escape, Return and ⌥⇧Space close it. A bar
+  that comes back with a failed input does not listen.
 
 - **Files.** **⌘V** adds the files on the clipboard, or a picture that is there with no file (a
   screenshot); text on the clipboard goes into the text. Drop files on the bar from any app: the
@@ -478,6 +485,38 @@ in the mind once. **The event is the whole contract.** A mind that does nothing 
 the device's log. To act on it, the mind's config handles that event type (for example: start an
 agent with the text and the files as its first message). Which agent or model answers is the
 mind's choice, and it can change with no new build of this app.
+
+## Dictation: talk, and it is written
+
+Hold **⌥⇧D** in any app and talk. Let go, and what you said is written where the cursor is. A short
+press keeps the dictation on with no key held: the next press ends it. A pill at the bottom of the
+screen shows the words while you talk. This is what the open source app
+[Hex](https://github.com/anomalyco/hex) does, inside this app; the input bar above uses the same
+listener.
+
+- **It runs on this Mac.** The speech model is NVIDIA's Parakeet (TDT 0.6B v3, 25 European
+  languages) as Core ML, through [FluidAudio](https://github.com/FluidInference/FluidAudio), the
+  library of the Swift Hex. No sound and no text leaves the Mac. The first use downloads the model
+  from Hugging Face (about 480 MB, and 100 MB for the second model below) into
+  `~/Library/Application Support/FluidAudio`. You can talk during the download: the microphone is
+  open and what you say is kept. It needs Apple silicon.
+- **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
+  `words.md`, at the root of its config repo: one list item for each term, and after a colon the
+  wrong forms that a transcript showed (`- Templestein: temple stein, temple steen`). The app reads
+  that file as you (`bridge/words-fetch.mjs`, the iterate CLI's sign-in) and keeps a copy in
+  `~/Library/Application Support/iterate-mac-app/words/<mind>.md`, fetched again when it is older
+  than ten minutes. The list does two things. A second, small model listens for the terms in what
+  you said and puts a term in where the sound fits it. Then each wrong form, and each term in
+  another case, is written as the term. ⌥⇧D uses the list of the mind this Mac is lent to; the
+  input bar uses the list of the mind the input goes to. A mind with no `words.md` gives no list.
+- **How the text goes in.** The text is put on the clipboard, ⌘V is pressed for you, and the
+  clipboard gets back what it held. That needs the **Accessibility** permission. Without it the
+  text stays on the clipboard, and the app opens the guide for the permission.
+- **Permissions.** The microphone, at the first use. The panel's last lines say how the last
+  dictation ended. `app.log` holds counts and times, never the words.
+
+While you talk, the text is written again twice a second from the stretch of speech that is going.
+A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final.
 
 ## How it works
 
@@ -547,5 +586,6 @@ anything. A third word draws the lend in one phase: `live`, `reconnecting`, `sto
 `not-allowed`; `ringing` draws a call's banner at the top. `--render-banner banner.png ring`
 draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearance);
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
-closed and open, light and dark, four files. `--render-input <folder>` draws the input bar: empty, with
-a text and files, while it sends and not sent, light and dark, eight files.
+closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
+listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
+listening, failed), light and dark, sixteen files.
