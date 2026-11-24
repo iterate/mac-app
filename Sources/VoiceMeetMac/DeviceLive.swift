@@ -11,16 +11,11 @@ import VoiceMeetCore
 /// the same gate as every other use (`AppModel.liveTracks`): Off, the track is not offered; Ask,
 /// the person is asked once for the watch; Shared, it is sent. While a watcher is connected,
 /// Activity shows it as a running act, and the panel lists it with a button that ends it.
+///
+/// The bridge listens for one mind session (`MindSession`): `use` ends the old session's bridge and
+/// its watches at once.
 @MainActor
 final class DeviceLive: ObservableObject {
-    struct Destination: Equatable {
-        let node: String
-        let iterateBin: String
-        let script: String
-        let mind: String
-        let name: String
-    }
-
     /// A connected watcher, for the panel and `live.state()`.
     struct Watcher: Identifiable, Equatable {
         let id: String
@@ -31,7 +26,8 @@ final class DeviceLive: ObservableObject {
 
     @Published private(set) var watchers: [Watcher] = []
 
-    var destination: () -> Destination? = { nil }
+    /// The session the bridge listens for; none while the Mac is lent to no mind.
+    private(set) var session: MindSession?
     /// The tracks a watcher gets, by the owner's switches, and the reason when it gets none.
     var decide: (_ who: String) async -> (tracks: [String], reason: String) = { _ in ([], "nothing to show") }
     /// The sources the watchers need changed: the recorder runs them (`DeviceRecord.live`).
@@ -43,7 +39,6 @@ final class DeviceLive: ObservableObject {
     let peer = LivePeer()
     private let log = AppLog("live")
     private var bridge: LiveBridge?
-    private var bridgeTo: Destination?
     private var bridgeEndedAt = Date.distantPast
     /// The bridge's word: its connection to the mind is up (`{ connected }`).
     private var isSignalling = false
@@ -106,18 +101,22 @@ final class DeviceLive: ObservableObject {
         ]
     }
 
-    /// Every 2 s: the bridge follows the lend. A bridge that ended starts again after 10 s.
-    private func tick() {
-        let destination = destination()
-        if destination != bridgeTo, let old = bridge {
-            peer.endAll(why: "the Mac is no longer lent to this mind")
-            old.stop()
-            (bridge, bridgeTo, bridgeEndedAt, isSignalling) = (nil, nil, Date(), false)
-        }
-        guard let destination, bridge == nil, Date().timeIntervalSince(bridgeEndedAt) > 10 else { return }
+    /// Another session, or none: the old one's bridge and watches end now. Nothing starts here:
+    /// the next `tick` starts the bridge for the new session.
+    func use(_ session: MindSession?) {
+        self.session = session
+        guard let old = bridge else { return }
+        peer.endAll(why: "the Mac is no longer lent to this mind")
+        old.stop()
+        (bridge, bridgeEndedAt, isSignalling) = (nil, Date(), false)
+    }
+
+    /// Every 2 s: a bridge for the session. A bridge that ended starts again after 10 s.
+    func tick() {
+        guard let session, bridge == nil, Date().timeIntervalSince(bridgeEndedAt) > 10 else { return }
         let made = LiveBridge(
-            node: destination.node, script: destination.script,
-            arguments: [destination.name, "--iterate", destination.iterateBin, "--mind", destination.mind], peer: peer)
+            node: session.helpers.node, script: session.helpers.deviceLive,
+            arguments: [session.name, "--iterate", session.helpers.iterateBin, "--mind", session.mind], peer: peer)
         made.said = { [weak self] line in
             AppLog("live").info("bridge: \(line)")
             guard let up = line["connected"] as? Bool else { return }
@@ -129,14 +128,14 @@ final class DeviceLive: ObservableObject {
                     guard let self, self.bridge === made else { return }
                     self.log.info("the bridge ended (status \(status))")
                     self.peer.endAll(why: "the signalling stopped")
-                    (self.bridge, self.bridgeTo, self.bridgeEndedAt, self.isSignalling) = (nil, nil, Date(), false)
+                    (self.bridge, self.bridgeEndedAt, self.isSignalling) = (nil, Date(), false)
                 }
             }
         }
         do {
             try made.start()
-            (bridge, bridgeTo) = (made, destination)
-            log.info("the bridge listens on \(destination.mind) at /devices/\(destination.name)")
+            bridge = made
+            log.info("session \(session.generation): the bridge listens on \(session.mind) at \(session.path)")
         } catch {
             log.error("the bridge did not start: \(AppLog.describe(error))")
             bridgeEndedAt = Date()

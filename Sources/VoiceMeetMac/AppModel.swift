@@ -38,6 +38,9 @@ final class AppModel {
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
     private var isListening = false
+    private var session: MindSession?
+    /// False while the mind refuses this Mac's key: the lend's calls are refused.
+    private var isAuthorized = true
 
     /// True while any camera runs, for the mark in the menu bar.
     var isAnyCameraRunning: Bool { cameras.values.contains { $0.state.isRunning } }
@@ -80,6 +83,25 @@ final class AppModel {
         live.start()
     }
 
+    /// Another mind session, or none, or another authorization (`Lend.sessionChanged`). A refusal
+    /// of this Mac's key ends every approval and refuses every call of the lend; the session's work
+    /// goes on. Another session: the old one's approvals end, and its publisher, bridge, recorder
+    /// and uploader stop, all before any of them starts for the new one.
+    func use(_ session: MindSession?, isAuthorized: Bool) {
+        self.isAuthorized = isAuthorized
+        if !isAuthorized { approval.refuse() }
+        guard session != self.session else { return }
+        self.session = session
+        approval.use(session)
+        deviceEvents.use(session)
+        live.use(session)
+        record.use(session)
+        acts.mind = session?.mind
+        deviceEvents.tick()
+        live.tick()
+        record.tick()
+    }
+
     func shutDown() {
         endpoint.stop()
         live.stop()
@@ -114,6 +136,7 @@ final class AppModel {
     /// A thing on "Ask" waits for the person's approval. A caller can change no choice and can
     /// bring up no permission prompt: the person does both in the panel.
     private func answer(_ method: String, _ parameters: [String: Any]) async throws -> [String: Any] {
+        guard isAuthorized else { throw EndpointRefusal("The mind refuses this Mac's key now: a member allows it again.") }
         let maxWidth = parameters["maxWidth"] as? Int ?? 1600
         switch method {
         case "state":
