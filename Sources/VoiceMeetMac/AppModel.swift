@@ -50,6 +50,8 @@ final class AppModel {
 
     /// The panel's preview of one camera draws this layer.
     func cameraPreviewLayer(for id: String) -> CALayer { unit(id).owner.previewLayer }
+    /// The camera's newest picture as JPEG bytes, while it runs.
+    func cameraSnapshot(_ id: String, maxWidth: Int) -> Data? { cameras[id]?.owner.snapshot(maxWidth: maxWidth)?.data }
 
     init() {
         audioOwner.onEvent = { [weak self] event in self?.send(event) }

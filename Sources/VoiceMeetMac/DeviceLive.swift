@@ -87,6 +87,11 @@ final class DeviceLive: ObservableObject {
         peer.endAll(why: "the Mac stopped")
     }
 
+    /// For a drawing (`Rendering`): watchers as given, with no peer.
+    func fixForDrawing(_ watchers: [Watcher]) {
+        self.watchers = watchers
+    }
+
     /// The panel's button, or `live.end` on the endpoint.
     func end(_ watcher: String, why: String) {
         log.info("\(watcher.prefix(8)): ended, \(why)")
@@ -140,24 +145,30 @@ final class DeviceLive: ObservableObject {
     }
 }
 
-/// The panel's watchers, while there are any: who, what, since when, and a button that ends it.
+/// The panel's watchers, while there are any, first under the mind: one red row for each, who,
+/// what and since when, and the button that ends it.
 struct LiveSection: View {
     @ObservedObject var live: DeviceLive
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text("WATCHED LIVE").font(.caption2.weight(.semibold)).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 6) {
             ForEach(live.watchers) { watcher in
                 HStack(spacing: 10) {
-                    Image(systemName: "eye.fill").font(.system(size: 14)).frame(width: 20).foregroundStyle(.red)
+                    Image(systemName: "eye.fill").font(.system(size: 14)).frame(width: 22).foregroundStyle(Palette.redText)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(watcher.who).lineLimit(1).truncationMode(.middle)
-                        Text("\(Self.words(watcher.tracks)) · since \(watcher.since.formatted(date: .omitted, time: .shortened))")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text("\(watcher.who) is watching live").font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
+                        Text("\(Self.words(watcher.tracks)) · since \(Lend.shortClock(watcher.since))")
+                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                     }
                     Spacer(minLength: 8)
-                    Button("End") { live.end(watcher.id, why: "the owner ended it") }.controlSize(.small)
+                    Button("End") { live.end(watcher.id, why: "the owner ended it") }
+                        .buttonStyle(FillButtonStyle(prominent: true, height: 26))
+                        .help("Ends this watch now")
                 }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Palette.redWash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.redEdge))
             }
         }
     }

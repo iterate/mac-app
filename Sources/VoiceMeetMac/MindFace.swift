@@ -258,18 +258,20 @@ struct MindLabel: View {
     var note: String?
     /// A dot on the avatar (`MindAvatar.badge`).
     var badge: Color?
+    /// The name's size; the address is a little smaller.
+    var titleSize: CGFloat = 13
     @ObservedObject private var faces = MindFaces.shared
 
     var body: some View {
         let face = faces.face(of: mind)
-        HStack(spacing: size > 26 ? 10 : 8) {
+        HStack(spacing: size > 26 ? 11 : 8) {
             MindAvatar(mind: mind, size: size, badge: badge)
             VStack(alignment: .leading, spacing: 1) {
                 Text(face.title)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: titleSize, weight: .semibold))
                     .lineLimit(1)
                 Text([mind, note].compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: 11))
+                    .font(.system(size: titleSize - 2))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)

@@ -298,4 +298,29 @@ final class LendStateTests: XCTestCase {
         _ = state.handle(.stopRequested, now: at(3))
         XCTAssertNil(state.mindAddress)
     }
+
+    /// The panel's words are the status line's, in other places.
+    func testWordsForThePanel() {
+        var state = LendState()
+        XCTAssertEqual(state.words(now: at(0), clock: clock), LendWords(title: "Not lent", detail: "no mind is active"))
+        _ = state.handle(.started, now: at(1))
+        XCTAssertEqual(state.words(now: at(2), clock: clock), LendWords(title: "Connecting", detail: "since t1"))
+        _ = state.handle(.stateLine(live), now: at(2))
+        XCTAssertEqual(state.words(now: at(3), clock: clock), LendWords(title: "Live", detail: "since t2"))
+        _ = state.handle(.stateLine(reconnecting(2, inMs: 30000, "fetch failed")), now: at(3))
+        XCTAssertEqual(
+            state.words(now: at(3), clock: clock),
+            LendWords(title: "Reconnecting", detail: "attempt 2 of 14", block: "Attempt 2 of 14. Next try in 30 s.", code: "Last failure: fetch failed", tone: .waits))
+        _ = state.handle(.stateLine(#"{"state":"stopped","why":"iterate.example.com could not be reached. Check the address."}"#), now: at(4))
+        _ = state.handle(.processEnded(status: 1, ranFor: 3), now: at(4))
+        XCTAssertEqual(
+            state.words(now: at(5), clock: clock),
+            LendWords(
+                title: "Stopped", detail: "next start in 3 s", block: "The lend process ended (exit 1). Next start in 3 s.",
+                code: "iterate.example.com could not be reached. Check the address.", tone: .stopped))
+        _ = state.handle(.stateLine(#"{"state":"incompatible","why":"the mind is newer"}"#), now: at(6))
+        XCTAssertEqual(
+            state.words(now: at(6), clock: clock),
+            LendWords(title: "Incompatible", detail: "update the CLI", block: "The mind is newer. Update the iterate CLI:", code: LendState.updateCommand, tone: .stopped))
+    }
 }

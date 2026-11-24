@@ -174,8 +174,12 @@ async function start(app, home, env = {}) {
 }
 
 const scenarios = {
-  /** The app starts, answers, and its panel opens under the mark in the menu bar. */
+  /**
+   * The app starts, answers, and its panel opens under the mark in the menu bar. The home has a
+   * mind (the panel shows the choices only then), and lends nothing without --lend.
+   */
   async boot({ app, home }) {
+    withMind(home);
     const run = await start(app, home);
     try {
       const state = await run.state();
@@ -199,6 +203,33 @@ const scenarios = {
       // a segment of a sharing control, pressed by its label
       await run.control("ui.press", { id: "sharing.speaker", label: "Shared" });
       await until("the speakers shared", 5, async () => (await run.state()).sharing.speaker === "shared");
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /** "All" shows the Activity page in place of the panel's middle, and its back button the main page again. */
+  async "panel-pages"({ app, home }) {
+    withMind(home);
+    const run = await start(app, home);
+    const ids = async () => new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id).filter(Boolean));
+    try {
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await until("the main page", 5, async () => {
+        const shown = await ids();
+        return shown.has("activity.all") && shown.has("sharing.commands") && !shown.has("activity.context");
+      });
+      await run.control("ui.press", { id: "activity.all" });
+      await until("the Activity page", 5, async () => {
+        const shown = await ids();
+        return (await run.state()).panel.page === "activity" && shown.has("activity.back") && shown.has("activity.context") && shown.has("activity.showsPill") && !shown.has("sharing.commands");
+      });
+      await run.control("ui.press", { id: "activity.back" });
+      await until("the main page again", 5, async () => {
+        const shown = await ids();
+        return (await run.state()).panel.page === "main" && shown.has("activity.all") && shown.has("record.screens") && !shown.has("activity.back");
+      });
     } finally {
       await run.quit();
     }

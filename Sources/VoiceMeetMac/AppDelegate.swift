@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import ServiceManagement
 import SpeechText
 import SwiftUI
@@ -20,6 +21,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var displayPictureTimer: Timer?
     /// The cameras that run for the open panel's previews.
     private var camerasHeldByThePanel: Set<String> = []
+    /// The Activity page hides the previews: their timer and cameras stop while it shows.
+    private var pageWatch: AnyCancellable?
+    /// The last lines of capture, input and dictation the panel saw: a new one is the newest result.
+    private var seenLines: [String: String] = [:]
     /// The person's own capture (⌥⇧S). It needs macOS 15: nil before.
     private var capture: AnyObject?
     /// The speech model of dictation, the input and capture: the person's choice in the panel.
@@ -61,18 +66,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 self?.popover.performClose(nil)
                 if let index { self?.model.banners.press(index) } else { self?.model.banners.dismiss() }
             },
-            openInput: { [weak self] in
-                self?.popover.performClose(nil)
-                self?.input.toggle()
-            },
+            actions: PanelActions(
+                capture: { [weak self] in
+                    self?.popover.performClose(nil)
+                    if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() }
+                },
+                openInput: { [weak self] in
+                    self?.popover.performClose(nil)
+                    self?.input.toggle()
+                },
+                dictate: { [weak self] in
+                    self?.popover.performClose(nil)
+                    // a short press of ⌥⇧D: a dictation that stays on until the next press
+                    self?.dictation.pressed()
+                    self?.dictation.released()
+                }
+            ),
             lendActions: LendActions(
                 reconnect: { [weak self] in self?.lend.reconnectNow() },
                 use: { [weak self] mind in self?.lend.use(mind) },
                 add: { [weak self] in self?.addMind() },
                 remove: { [weak self] mind in self?.removeMind(mind) },
                 open: { link in if let url = URL(string: link) { NSWorkspace.shared.open(url) } }
-            )
+            ),
+            cameraLayer: { [weak self] id in self?.model.cameraPreviewLayer(for: id) ?? CALayer() },
+            bigPicture: { [weak self] thing in await self?.bigPicture(of: thing) }
         )
+        if #unavailable(macOS 15.0) { panelState.canCapture = false }
+        pageWatch = panelState.$isActivityOpen.removeDuplicates().dropFirst().sink { [weak self] isOpen in
+            guard let self, self.popover.isShown else { return }
+            if isOpen { self.stopPreviews() } else { self.startPreviews() }
+        }
         let host = NSHostingController(rootView: panel)
         // The panel is as tall as its rows need.
         host.sizingOptions = [.preferredContentSize]
@@ -251,7 +275,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "lend": ["phase": lend.state.phase.name, "status": lend.state.statusLine(now: Date(), clock: Lend.clock), "active": active],
             "minds": lend.config?.minds.map(\.mind) ?? [],
             "session": lend.session.map { ["generation": $0.generation, "mind": $0.mind, "name": $0.name, "authorized": lend.isAuthorized] } ?? NSNull(),
-            "panel": ["visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen],
+            "panel": [
+                "visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen,
+                "page": panelState.isActivityOpen ? "activity" : "main",
+            ],
             "input": input.controlState(),
             "dictation": dictation.controlState(),
             "speech": speechChoice.controlState(),
@@ -285,6 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         view.minds = lend.config?.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) } ?? []
         view.active = lend.config?.activeMind?.mind
         view.status = lend.state.statusLine(now: Date(), clock: Lend.clock)
+        view.words = lend.state.words(now: Date(), clock: Lend.shortClock)
         view.phase = lend.state.phase.name
         view.link = lend.state.phase.link ?? lend.commandLink
         view.commandLine = lend.commandLine
@@ -354,16 +382,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     private func stateDidChange() {
         updateStatusButton()
-        panelState.things = Shareable.all
-        panelState.revision += 1
         let banner = model.banners.state.showing
         if banner != panelState.banner { panelState.banner = banner }
-        if #available(macOS 15.0, *) { panelState.captureLine = (capture as? Capture)?.lastLine }
-        if panelState.inputLine != input.lastLine { panelState.inputLine = input.lastLine }
-        if panelState.dictationLine != dictation.lastLine { panelState.dictationLine = dictation.lastLine }
+        noteLastResult()
+        showLend()
+        // the things, their choices and the permissions are read for an open panel only
+        if popover.isShown { refreshPanel() }
+    }
+
+    /// What the panel shows of this Mac, read here and not while it draws: the things, their
+    /// choices, the permissions macOS has not given, the approvals and uses, and what keeps fn
+    /// dictation from working.
+    private func refreshPanel() {
+        let things = Shareable.all
+        if things != panelState.things { panelState.things = things }
+        let sharing = Dictionary(uniqueKeysWithValues: things.map { ($0.id, $0.sharing) })
+        if sharing != panelState.sharing { panelState.sharing = sharing }
+        let missing = Set(Permission.allCases.filter { !$0.isGranted })
+        if missing != panelState.missing { panelState.missing = missing }
+        let approvals = Dictionary(uniqueKeysWithValues: things.compactMap { thing in model.approval.isApproved(thing).map { (thing.id, $0) } })
+        if approvals != panelState.approvals { panelState.approvals = approvals }
+        if model.uses != panelState.uses { panelState.uses = model.uses }
+        panelState.revision += 1
         let fnLines = dictation.fnLines
         if speechChoice.fnLines != fnLines { speechChoice.fnLines = fnLines }
-        showLend()
+    }
+
+    /// The newest of the last capture, input and dictation: the one whose line changed last.
+    private func noteLastResult() {
+        var lines: [(what: String, line: String?, failed: Bool)] = [
+            ("Last input", input.lastLine, input.lastFailed), ("Last dictation", dictation.lastLine, dictation.lastFailed),
+        ]
+        if #available(macOS 15.0, *), let capture = capture as? Capture { lines.append(("Last capture", capture.lastLine, capture.lastFailed)) }
+        for (what, line, failed) in lines {
+            guard let line, seenLines[what] != line else { continue }
+            seenLines[what] = line
+            panelState.lastResult = PanelState.LastResult(what: what, line: line, failed: failed)
+        }
     }
 
     /// The iterate mark: green while a banner shows, red for 3 seconds at each use by a
@@ -416,6 +471,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             // a lend that waits for its next start starts now: the owner looks at it
             lend.panelOpened()
             stateDidChange()
+            refreshPanel()
             NSApp.activate(ignoringOtherApps: true)
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         }
@@ -425,7 +481,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// for its picture, and a display's picture is a new small one every second.
     func popoverDidShow(_ notification: Notification) {
         log.info("the panel opens")
+        if !panelState.isActivityOpen { startPreviews() }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        stopPreviews()
+        panelState.isSwitcherOpen = false
+        panelState.isActivityOpen = false
+    }
+
+    /// The previews run while the panel's main page shows: the cameras, and a display's picture
+    /// each second.
+    private func startPreviews() {
         syncPreviews()
+        displayPictureTimer?.invalidate()
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshDisplayPictures() }
         }
@@ -433,13 +502,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         displayPictureTimer = timer
     }
 
-    func popoverDidClose(_ notification: Notification) {
+    private func stopPreviews() {
         displayPictureTimer?.invalidate()
         displayPictureTimer = nil
         camerasHeldByThePanel.forEach(model.releaseCamera)
         camerasHeldByThePanel = []
         panelState.displayPictures = [:]
-        panelState.isSwitcherOpen = false
+    }
+
+    /// A large picture of a display or a camera, for the popover of its small one.
+    private func bigPicture(of thing: Shareable) async -> CGImage? {
+        switch thing.power {
+        case .screen:
+            return try? await Screen.image(of: Screen.id(of: thing), maxWidth: 640)
+        case .camera:
+            guard let picture = model.cameraSnapshot(String(thing.id.dropFirst("camera.".count)), maxWidth: 640) else { return nil }
+            return NSImage(data: picture)?.cgImage(forProposedRect: nil, context: nil, hints: nil)
+        default:
+            return nil
+        }
     }
 
     private func choiceChanged() {
@@ -467,14 +548,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         refreshDisplayPictures()
     }
 
+    /// Each display's small picture, at the size it is drawn (30 points, 60 pixels wide), made by
+    /// ScreenCaptureKit off the main thread.
     private func refreshDisplayPictures() {
-        for thing in Shareable.all where thing.power == .screen {
-            guard thing.sharing != .off, thing.isPermitted else {
+        for thing in panelState.things where thing.power == .screen {
+            guard panelState.sharing[thing.id, default: .off] != .off, !panelState.missing.contains(.screenRecording) else {
                 panelState.displayPictures[thing.id] = nil
                 continue
             }
             Task { @MainActor in
-                guard let picture = try? await Screen.image(of: Screen.id(of: thing), maxWidth: 480), popover.isShown else { return }
+                guard let picture = try? await Screen.image(of: Screen.id(of: thing), maxWidth: 60), popover.isShown, !panelState.isActivityOpen else { return }
                 panelState.displayPictures[thing.id] = picture
             }
         }

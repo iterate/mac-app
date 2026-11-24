@@ -179,6 +179,8 @@ final class MindInput: SpeechClient {
     var onChange: () -> Void = {}
     /// How the last input ended, for the panel.
     private(set) var lastLine: String?
+    /// The last input was not sent: the panel draws its line in orange.
+    private(set) var lastFailed = false
 
     private let log = AppLog("input")
     private let model = MindInputModel()
@@ -447,11 +449,13 @@ final class MindInput: SpeechClient {
         case .sent:
             log.info("input \(id): sent to \(sendingTo)")
             lastLine = "Sent to \(sendingTo) at \(Lend.clock(Date()))"
+            lastFailed = false
             // the new draft names none of the pictures that came with no file
             try? FileManager.default.removeItem(at: Self.pasted)
         case .failed(let reason):
             log.error("input \(id): not sent to \(sendingTo): \(reason)")
             lastLine = "Not sent to \(sendingTo) at \(Lend.clock(Date())): \(reason)"
+            lastFailed = true
             // The input comes back with its reason. It takes no keyboard: the person may be typing elsewhere.
             show(takingKeys: false)
         }

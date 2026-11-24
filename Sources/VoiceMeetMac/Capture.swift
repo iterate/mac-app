@@ -69,6 +69,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private(set) var isRunning = false
     /// The last capture's outcome, for the panel.
     private(set) var lastLine: String?
+    /// The last capture failed: the panel draws its line in orange.
+    private(set) var lastFailed = false
     var onChange: () -> Void = {}
     /// The session of the mind this Mac is lent to now (`Lend.sessionChanged`).
     var session: MindSession?
@@ -712,6 +714,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             log.info("capture \(id): sent to \(mind) as /captures/\(id)/")
             // The folder stays: an agent on this Mac reads the pictures from it.
             lastLine = "Sent to \(mind) at \(Lend.clock(Date())), and copied"
+            lastFailed = false
             say("Copied: paste it to an agent", for: 3)
             onChange()
         }
@@ -721,6 +724,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         log.error("capture \(id): \(reason)")
         if !keep { try? FileManager.default.removeItem(at: folder) }
         lastLine = reason
+        lastFailed = true
         say(reason, for: 8)
         onChange()
     }

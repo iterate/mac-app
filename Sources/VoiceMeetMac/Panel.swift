@@ -2,28 +2,45 @@ import AppKit
 import SwiftUI
 import VoiceMeetCore
 
-/// What the panel shows that is not in the settings: which things exist now, and the newest small
-/// picture of each display. `revision` goes up whenever a choice, a permission or a use changed.
+/// What the panel shows that is not in its sub-models: the things that exist now, their choices,
+/// the permissions macOS has not given, the newest small picture of each display. The app fills it
+/// when the panel opens and at each change while it is open (`AppDelegate.refreshPanel`), so no
+/// view reads the defaults, a device or a permission while it draws.
 @MainActor
 final class PanelState: ObservableObject {
     @Published var things: [Shareable] = []
+    /// Each thing's choice, by its id.
+    @Published var sharing: [String: Sharing] = [:]
+    /// The permissions of macOS that are not given.
+    @Published var missing: Set<Permission> = []
+    /// The things approved for a while (`Approval`), and until when.
+    @Published var approvals: [String: Date] = [:]
+    /// How many times a mind used each thing since the app started.
+    @Published var uses: [String: Int] = [:]
     @Published var revision = 0
+    /// Each display's small picture, the size it is drawn at (60 pixels wide), made off the main thread.
     @Published var displayPictures: [String: CGImage] = [:]
     @Published var didCopy = false
+    @Published var didCopyCommand = false
     /// The lend (AppDelegate `showLend`): the minds, the active one, the state in words.
     @Published var lend = LendView()
     /// The banner on the screen, while one shows (`Banners`).
     @Published var banner: Banner?
-    /// How the person's last capture (⌥⇧S) ended.
-    @Published var captureLine: String?
-    /// How the person's last input (⌥⇧Space) ended.
-    @Published var inputLine: String?
-    /// How the person's last dictation (⌥⇧D) ended.
-    @Published var dictationLine: String?
+    /// How the newest of the person's capture (⌥⇧S), input (⌥⇧Space) and dictation ended.
+    @Published var lastResult: LastResult?
+    /// The capture needs macOS 15.
+    @Published var canCapture = true
     /// The mind switcher shows its list of minds. It closes with the panel.
     @Published var isSwitcherOpen = false
-    /// Whether the list of what a mind did is open.
+    /// The Activity page shows in place of the middle of the panel.
     @Published var isActivityOpen = false
+
+    /// One line: "Last input: Sent to … at 14:01", orange when it failed.
+    struct LastResult: Equatable {
+        let what: String
+        let line: String
+        let failed: Bool
+    }
 }
 
 /// What the panel shows of the lend.
@@ -39,6 +56,8 @@ struct LendView: Equatable {
     var isSetUp = false
     /// The phase in words: `LendState.statusLine`.
     var status = ""
+    /// The phase as the panel lays it out: `LendState.words`.
+    var words = LendWords(title: "Not lent", detail: "no mind is active")
     var phase = "idle"
     /// Where a member allows the key, when the CLI printed one.
     var link: String?
@@ -59,8 +78,17 @@ struct LendActions {
     var open: (String) -> Void = { _ in }
 }
 
-/// The app's one piece of interface: a panel under the mark in the menu bar. Each thing on this
-/// Mac that a mind can use has one control with three choices: Off, Ask, Shared.
+/// What the panel's three action buttons do.
+struct PanelActions {
+    var capture: () -> Void = {}
+    var openInput: () -> Void = {}
+    var dictate: () -> Void = {}
+}
+
+/// The app's one piece of interface: a panel under the mark in the menu bar, 400 points wide. From
+/// the top: the banner while one shows, the mind and the lend's phase, who watches live, the three
+/// action buttons, the things a mind can use (each with Off, Ask, Shared), the events, the record,
+/// the newest acts, and the footer. "All" shows the Activity page in place of the middle.
 struct Panel: View {
     @ObservedObject var state: PanelState
     let model: AppModel
@@ -73,174 +101,137 @@ struct Panel: View {
     let copyPrompt: () -> Void
     /// The person presses a button of the banner (its index), or closes it (nil).
     var pressBanner: (Int?) -> Void = { _ in }
-    /// The person opens the input from the panel, as ⌥⇧Space does.
-    var openInput: () -> Void = {}
+    var actions = PanelActions()
     var lendActions = LendActions()
+    /// A camera's live picture, for its small picture in the row. Nil in a drawing.
+    var cameraLayer: ((String) -> CALayer)?
+    /// A large picture of a display or a camera, made at a click on its small one.
+    var bigPicture: (Shareable) async -> CGImage? = { _ in nil }
     /// The height the scrolling middle needs; it is at most `middleMaxHeight`.
     @State private var middleHeight: CGFloat = 400
 
-    /// The middle's room: the screen's height under the menu bar, less the banner, the lend
-    /// section, the footer and the popover's own margins (about 330 points together).
+    static let width: CGFloat = 400
+
+    /// The middle's room: the screen's height under the menu bar, less the banner, the mind,
+    /// the footer and the popover's own margins (about 300 points together).
     static var middleMaxHeight: CGFloat {
         // a drawing is the same on every screen
-        if AppEnvironment.current.isRendering { return 900 }
+        if AppEnvironment.current.isRendering { return 1200 }
         let screen = NSScreen.screens.first { NSMouseInRect(NSEvent.mouseLocation, $0.frame, false) } ?? NSScreen.main
-        return max(240, (screen?.visibleFrame.height ?? 900) - 330)
+        return max(240, (screen?.visibleFrame.height ?? 900) - 300)
     }
 
     var body: some View {
+        let lend = state.lend
         VStack(alignment: .leading, spacing: 0) {
             if let banner = state.banner {
                 bannerSection(banner)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 12)
                 Divider()
             }
             lendSection
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            Divider()
-            // The middle scrolls when the panel would be taller than the screen, so the mind at the
-            // top and Quit at the bottom are always reachable (seen on 22 Nov 2026: with the record's
-            // rows the panel ran past a laptop's screen and its top could not be reached).
-            ScrollView(.vertical) {
-            VStack(alignment: .leading, spacing: 0) {
-            VStack(alignment: .leading, spacing: 16) {
-                section("Displays", of: .screen)
-                section("Cameras", of: .camera)
-                section("This Mac", of: .microphone, .speaker, .banners, .accessibility, .commands)
-                SpeechSection(choice: speech)
-                DeviceEventsSection(events: model.deviceEvents)
-                LiveWatching(live: model.live)
-                RecordSection(record: model.record, window: model.deviceWindow, allow: allow)
-            }
-            .padding(.horizontal, 16)
-            .padding(.top, 14)
-            .padding(.bottom, 12)
-            Divider()
-            VStack(alignment: .leading, spacing: 2) {
-                Text("⌥⇧S captures: talk, click, hold ⇧ and move the pointer to draw. ⌥⇧S again sends it to the mind and copies its text for an agent.")
-                if let line = state.captureLine { Text("Last capture: \(line)").textSelection(.enabled) }
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("⌥⇧Space opens the input: talk or type what you want, paste or drop files, choose the mind, Return sends.")
-                    Button("Open", action: openInput).buttonStyle(.link).accessibilityIdentifier("panel.openInput")
-                }
-                .padding(.top, 4)
-                if let line = state.inputLine { Text("Last input: \(line)").textSelection(.enabled) }
-                Text("Hold fn (🌐) or ⌥⇧D and talk: what you say is written where the cursor is, on this Mac, with the mind's word list. Tap fn twice to talk hands-free until the next tap; a short press of ⌥⇧D keeps it on until the next press.")
-                    .padding(.top, 4)
-                if let line = state.dictationLine { Text("Last dictation: \(line)").textSelection(.enabled) }
-            }
-            .font(.caption)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-            Divider()
-            ActivityList(log: model.acts, isOpen: $state.isActivityOpen)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-            }
-            .background(GeometryReader { geometry in
-                Color.clear.preference(key: MiddleHeight.self, value: geometry.size.height)
-            })
-            }
-            .frame(height: min(middleHeight, Panel.middleMaxHeight))
-            .onPreferenceChange(MiddleHeight.self) { middleHeight = $0 }
-            Divider()
-            HStack(spacing: 12) {
-                Button(state.didCopy ? "Copied" : "Copy Prompt", action: copyPrompt)
-                    .controlSize(.large)
-                    .accessibilityIdentifier("panel.copyPrompt")
-                    .help("Copies how an agent uses this Mac, to paste into a chat with it")
-                VStack(alignment: .leading, spacing: 2) {
-                    if let source = state.lend.source {
-                        Text(source)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 6)
+            if lend.minds.isEmpty {
+                noMind
+            } else {
+                Divider()
+                // The middle scrolls when the panel would be taller than the screen, so the mind at the
+                // top and Quit at the bottom are always reachable.
+                ScrollView(.vertical) {
+                    Group {
+                        if state.isActivityOpen {
+                            ActivityPage(log: model.acts, isOpen: $state.isActivityOpen)
+                        } else {
+                            middle
+                        }
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.top, 12)
+                    .padding(.bottom, 12)
+                    .background(GeometryReader { geometry in
+                        Color.clear.preference(key: MiddleHeight.self, value: geometry.size.height)
+                    })
                 }
-                Spacer()
-                Button("Quit") { NSApp.terminate(nil) }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
-                    .controlSize(.large)
-                    .keyboardShortcut("q")
-                    .accessibilityIdentifier("panel.quit")
+                .frame(height: min(middleHeight, Panel.middleMaxHeight))
+                .onPreferenceChange(MiddleHeight.self) { middleHeight = $0 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 12)
+            Divider()
+            footer
         }
-        .frame(width: 430)
+        .frame(width: Self.width)
     }
 
-    /// The mind this Mac is lent to (`MindSwitcher`), and the lend's state in words.
+    // MARK: - The mind and the phase
+
+    /// The mind this Mac is lent to (`MindSwitcher`) with the phase at its right, and under it the
+    /// phase's block while the lend is held up.
     private var lendSection: some View {
         let lend = state.lend
-        let active = lend.minds.first { $0.mind == lend.active }
         return VStack(alignment: .leading, spacing: 8) {
-            MindSwitcher(lend: lend, isOpen: $state.isSwitcherOpen, actions: lendActions, dot: Self.color(of: lend.phase))
-                // the rows' own inset: the avatar stands in line with the panel's other rows
-                .padding(.horizontal, -8)
-                .padding(.top, -4)
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if lend.phase == "connecting" || lend.phase == "reconnecting" {
-                    ProgressView().controlSize(.mini).alignmentGuide(.firstTextBaseline) { $0[VerticalAlignment.center] + 4 }
-                }
-                Text(lend.isSetUp ? lend.status : "Not set up: run npx @iterate-com/mac-app in a terminal")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                Button("Reconnect Now", action: lendActions.reconnect)
-                    .controlSize(.small)
-                    .disabled(active == nil)
-                    .help("Ends the wait or the attempt, and starts the lend at once")
-                    .accessibilityIdentifier("panel.reconnect")
+            MindSwitcher(
+                lend: lend, isOpen: $state.isSwitcherOpen, actions: lendActions, dot: Self.color(of: lend.phase),
+                phaseColor: Self.textColor(of: lend.phase))
+            if lend.active != nil, let block = lend.words.block {
+                phaseBlock(block, lend: lend).padding(.horizontal, 6)
             }
-            if let link = lend.link {
-                Button("Open the Link to Allow This Mac") { lendActions.open(link) }.controlSize(.small)
+            if !lend.isSetUp, !lend.minds.isEmpty {
+                Text("Not set up: run npx @iterate-com/mac-app in a terminal")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 8)
             }
             if let line = lend.commandLine {
                 HStack(spacing: 6) {
                     if lend.isCommandRunning { ProgressView().controlSize(.mini) }
-                    Text(line).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(line).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
+                .padding(.horizontal, 8)
             }
         }
     }
 
-    /// The banner on the screen, again: its title, its text and its buttons, and a close.
-    private func bannerSection(_ banner: Banner) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: banner.isCall ? "phone.fill" : "bell.badge").foregroundStyle(.green).frame(width: 20)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(banner.isCall ? "\(banner.title) calls" : banner.title).lineLimit(1)
-                    if !banner.body.isEmpty {
-                        Text(banner.body).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                }
-                Spacer(minLength: 8)
-                Button { pressBanner(nil) } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.borderless)
-                    .help(banner.isCall ? "Decline" : "Close the banner with no button")
+    /// The reason the lend is held up, in orange while the CLI tries again by itself and in red when
+    /// it stopped, with what the person can do.
+    private func phaseBlock(_ block: String, lend: LendView) -> some View {
+        let waits = lend.words.tone == .waits
+        return VStack(alignment: .leading, spacing: 8) {
+            Text(block).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+            if let code = lend.words.code {
+                Text(code)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
-            HStack(spacing: 6) {
-                Spacer()
-                ForEach(Array(banner.buttons.enumerated()), id: \.offset) { index, button in
-                    if index == banner.defaultButton {
-                        Button(button.label) { pressBanner(index) }.controlSize(.small).buttonStyle(.borderedProminent)
-                    } else {
-                        Button(button.label) { pressBanner(index) }.controlSize(.small)
+            HStack(spacing: 8) {
+                if lend.phase == "incompatible" {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(LendState.updateCommand, forType: .string)
+                        state.didCopyCommand = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { state.didCopyCommand = false }
+                    } label: {
+                        Label(state.didCopyCommand ? "Copied" : "Copy Command", systemImage: "doc.on.doc")
                     }
+                    .buttonStyle(FillButtonStyle())
+                } else {
+                    if let link = lend.link {
+                        Button("Open the Link to Allow This Mac") { lendActions.open(link) }.buttonStyle(FillButtonStyle(prominent: true))
+                    }
+                    Button("Reconnect Now", action: lendActions.reconnect)
+                        .buttonStyle(FillButtonStyle())
+                        .help("Ends the wait or the attempt, and starts the lend at once")
+                        .accessibilityIdentifier("panel.reconnect")
                 }
             }
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(waits ? Palette.waitWash : Palette.redWash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(waits ? Palette.waitEdge : Palette.redEdge))
     }
 
+    /// The dot on the mind's face.
     private static func color(of phase: String) -> Color {
         switch phase {
         case "live": return .green
@@ -250,84 +241,167 @@ struct Panel: View {
         }
     }
 
-    /// One group of rows under a small title. No background: the popover's own is enough.
-    @ViewBuilder
-    private func section(_ title: String, of powers: Power...) -> some View {
-        let things = state.things.filter { powers.contains($0.power) }
-        if !things.isEmpty {
-            VStack(alignment: .leading, spacing: 9) {
-                Text(title.uppercased())
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                ForEach(things) { row($0) }
-            }
+    /// The phase's name at the right of the row.
+    private static func textColor(of phase: String) -> Color {
+        switch phase {
+        case "live": return Palette.liveText
+        case "connecting", "reconnecting": return Palette.waitText
+        case "idle": return .secondary
+        default: return Palette.redText
         }
     }
 
-    private func row(_ thing: Shareable) -> some View {
-        // Reading the revision makes the row draw again when a choice, a permission or a use changes.
-        let sharing = state.revision >= 0 ? thing.sharing : .off
-        return VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 10) {
-                Image(systemName: thing.symbol)
-                    .font(.system(size: 14))
-                    .frame(width: 20)
-                    .foregroundStyle(sharing == .off ? Color.secondary : Color.accentColor)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(thing.title).lineLimit(1)
-                    if let note = note(for: thing) {
-                        Text(note).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+    // MARK: - The middle
+
+    private var middle: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            LiveWatching(live: model.live)
+            actionsSection(hasMind: true)
+            CanUseSection(
+                state: state, acts: model.acts, live: model.live, changed: changed, allow: allow, cameraLayer: cameraLayer,
+                bigPicture: bigPicture)
+            DeviceEventsSection(events: model.deviceEvents, accessibilityMissing: state.missing.contains(.accessibility), allow: allow)
+            RecordSection(record: model.record, window: model.deviceWindow, missing: state.missing, allow: allow)
+            ActivitySummary(log: model.acts, isOpen: $state.isActivityOpen)
+        }
+    }
+
+    /// Capture, Input and Dictate, how the newest of them ended, and the speech model.
+    private func actionsSection(hasMind: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                actionButton("Capture", symbol: "viewfinder", key: "⌥⇧S", action: actions.capture)
+                    .disabled(!hasMind || !state.canCapture)
+                    .help("Talk, click, hold ⇧ and move the pointer to draw. ⌥⇧S again sends it to the mind and copies its text for an agent.")
+                actionButton("Input", symbol: "text.bubble", key: "⌥⇧Space", action: actions.openInput)
+                    .disabled(!hasMind)
+                    .help("Talk or type what you want, paste or drop files, choose the mind, Return sends.")
+                    .accessibilityIdentifier("panel.openInput")
+                actionButton("Dictate", symbol: "waveform", key: "hold fn", action: actions.dictate)
+                    .help("Hold fn and talk: what you say is written where the cursor is, on this Mac. Tap fn twice to keep it on until the next tap. This button keeps it on until ⌥⇧D.")
+            }
+            if let last = state.lastResult {
+                Text("\(last.what): \(last.line)")
+                    .font(.system(size: 11))
+                    .foregroundStyle(last.failed ? Palette.waitText : Color.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 2)
+            }
+            SpeechSection(choice: speech)
+        }
+    }
+
+    private func actionButton(_ title: String, symbol: String, key: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                Label(title, systemImage: symbol).font(.system(size: 12, weight: .semibold))
+                Text(key).font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }
+        .buttonStyle(TileStyle())
+    }
+
+    // MARK: - No mind yet
+
+    private var noMind: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Add a mind to lend this Mac to. It gets a key for one name, and a member of the mind allows it with a passkey.")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button(action: lendActions.add) {
+                Text("Add a Mind…").font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity)
+            }
+            .buttonStyle(FillButtonStyle(prominent: true, height: 32))
+            .disabled(!state.lend.isSetUp || state.lend.isCommandRunning)
+            VStack(alignment: .leading, spacing: 5) {
+                Text("Or in a terminal").font(.system(size: 11)).foregroundStyle(.secondary)
+                Text("npx @iterate-com/mac-app")
+                    .font(.system(size: 12, design: .monospaced))
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 12)
+                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
+                    .background(Palette.fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+            }
+            VStack(alignment: .leading, spacing: 8) {
+                meaning("lock", "Everything starts at Off. You choose Off, Ask or Shared for each thing.")
+                meaning("touchid", "Ask means you approve each use with Touch ID.")
+                meaning("waveform", "Dictation already works: it runs on this Mac and needs no mind.")
+            }
+            actionsSection(hasMind: false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 12)
+    }
+
+    private func meaning(_ symbol: String, _ words: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: symbol).font(.system(size: 12)).frame(width: 16).foregroundStyle(.secondary)
+            Text(words).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    // MARK: - The footer
+
+    private var footer: some View {
+        HStack(spacing: 8) {
+            if !state.lend.minds.isEmpty {
+                Button(state.didCopy ? "Copied" : "Copy Prompt", action: copyPrompt)
+                    .buttonStyle(FillButtonStyle(height: 26))
+                    .accessibilityIdentifier("panel.copyPrompt")
+                    .help("Copies how an agent uses this Mac, to paste into a chat with it")
+            }
+            if let source = state.lend.source {
+                Text(source)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button("Quit") { NSApp.terminate(nil) }
+                .buttonStyle(.borderless)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .keyboardShortcut("q")
+                .accessibilityIdentifier("panel.quit")
+        }
+        .padding(.leading, 12)
+        .padding(.trailing, 14)
+        .padding(.vertical, 8)
+    }
+
+    // MARK: - The banner
+
+    /// The banner on the screen, again: its title, its text and its buttons, and a close.
+    private func bannerSection(_ banner: Banner) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top, spacing: 11) {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 34, height: 34)
+                    .overlay(Image(systemName: banner.isCall ? "phone.fill" : "bell.badge").font(.system(size: 14)).foregroundStyle(.white))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(banner.isCall ? "\(banner.title) calls" : banner.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                    if !banner.body.isEmpty {
+                        Text(banner.body).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                     }
                 }
                 Spacer(minLength: 8)
-                Picker("", selection: Binding(get: { sharing }, set: { thing.sharing = $0; changed() })) {
-                    ForEach(Sharing.allCases) { Text($0.title).tag($0) }
-                }
-                .pickerStyle(.segmented)
-                .controlSize(.small)
-                .labelsHidden()
-                .frame(width: 168)
-                .accessibilityIdentifier("sharing.\(thing.id)")
+                Button { pressBanner(nil) } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.borderless)
+                    .help(banner.isCall ? "Decline" : "Close the banner with no button")
             }
-            if sharing != .off {
-                if let permission = thing.power.permission, !thing.isPermitted {
-                    HStack(spacing: 8) {
-                        Label("macOS has not allowed \(permission.title) yet", systemImage: "exclamationmark.triangle.fill")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                        Spacer()
-                        Button("Allow…") { allow(permission) }.controlSize(.small)
-                    }
-                    .padding(.leading, 30)
-                } else {
-                    preview(of: thing).padding(.leading, 30)
+            HStack(spacing: 8) {
+                ForEach(Array(banner.buttons.enumerated()), id: \.offset) { index, button in
+                    Button { pressBanner(index) } label: { Text(button.label).frame(maxWidth: .infinity) }
+                        .buttonStyle(FillButtonStyle(prominent: index == banner.defaultButton, height: 28))
                 }
             }
         }
-    }
-
-    /// The small picture of what a mind would get: a display's, or a camera's live one.
-    @ViewBuilder
-    private func preview(of thing: Shareable) -> some View {
-        if thing.power == .screen, let picture = state.displayPictures[thing.id] {
-            Image(decorative: picture, scale: 1)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(height: 96)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        } else if thing.power == .camera {
-            LayerView(layer: model.cameraPreviewLayer(for: String(thing.id.dropFirst("camera.".count))))
-                .frame(width: 170, height: 96)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-    }
-
-    private func note(for thing: Shareable) -> String? {
-        if let until = model.approval.isApproved(thing) {
-            return "Approved until \(until.formatted(date: .omitted, time: .shortened))"
-        }
-        let uses = model.uses[thing.id] ?? 0
-        return uses > 0 ? "Used \(uses)× since the app started" : nil
     }
 
     /// What "Copy Prompt" copies: how an agent of the mind uses this Mac. It names no secret.
@@ -370,54 +444,219 @@ private struct MiddleHeight: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
-extension Panel {
-    /// Draws the panel to a PNG file, with the drawings' things and minds (`Rendering`): it opens
-    /// nothing on screen and starts no capture. `phase` is the lend's: live, reconnecting, stopped,
-    /// not-allowed, incompatible or connecting (the default); `ringing` also shows a ring.
-    @MainActor
-    static func render(to file: URL, phase: String? = nil, dark: Bool = false) -> Bool {
-        _ = NSApplication.shared
-        Rendering.fixFaces()
-        let state = PanelState()
-        state.things = Rendering.things
-        state.lend = sampleLend(phase)
-        if phase == "ringing" { state.banner = BannerWindow.sample("ring") }
-        let panel = Panel(state: state, model: AppModel(), changed: {}, allow: { _ in }, copyPrompt: {})
-        // The panel has no background of its own (a popover gives it one); the file needs one.
-        return Rendering.png(of: panel.background(Color(nsColor: .windowBackgroundColor)), dark: dark, to: file)
+// MARK: - A mind can use
+
+/// "A mind can use": one card, in the README's order of inputs (each display, each camera, the
+/// microphone, the window text), outputs (the speakers, banners) and compute (commands). A row is
+/// the thing's icon or its small picture, its name, a note, and Off, Ask, Shared.
+private struct CanUseSection: View {
+    @ObservedObject var state: PanelState
+    /// The acts that run, and the watchers: their things get a red note.
+    @ObservedObject var acts: ActivityLog
+    @ObservedObject var live: DeviceLive
+    let changed: () -> Void
+    let allow: (Permission) -> Void
+    let cameraLayer: ((String) -> CALayer)?
+    let bigPicture: (Shareable) async -> CGImage?
+
+    private static let groups: [[Power]] = [[.screen, .camera, .microphone, .accessibility], [.speaker, .banners], [.commands]]
+
+    var body: some View {
+        let busy = busyWords()
+        let groups = Self.groups.map { powers in powers.flatMap { power in state.things.filter { $0.power == power } } }.filter { !$0.isEmpty }
+        VStack(alignment: .leading, spacing: 7) {
+            SectionTitle(title: "A mind can use") {
+                Menu {
+                    Button("Everything Off") { setAll(.off) }
+                    Button("Ask for Everything") { setAll(.ask) }
+                } label: {
+                    Text("Set all").font(.system(size: 12))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .foregroundStyle(.secondary)
+            }
+            Card {
+                ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
+                    if index > 0 { Divider().padding(.horizontal, 8).padding(.vertical, 3) }
+                    ForEach(group) { thing in
+                        ThingRow(
+                            thing: thing, sharing: state.sharing[thing.id] ?? .off, note: note(for: thing, busy: busy),
+                            isMissing: thing.power.permission.map(state.missing.contains) ?? false,
+                            picture: state.displayPictures[thing.id], cameraLayer: cameraLayer, bigPicture: bigPicture,
+                            choose: { choice in
+                                thing.sharing = choice
+                                state.sharing[thing.id] = choice
+                                changed()
+                            },
+                            allow: allow)
+                    }
+                }
+            }
+        }
     }
 
-    /// The drawings' lend (`Rendering.minds`), in a phase made from the CLI's own states: a copy
-    /// that only draws starts no lend.
-    @MainActor
-    static func sampleLend(_ phase: String?) -> LendView {
-        let name = Rendering.minds[0].name
-        let mind = Rendering.minds[0].mind
-        let now = Rendering.now
-        var lend = LendState()
-        let start = now.addingTimeInterval(-40)
-        _ = lend.handle(.started, now: start)
-        let live = #"{"state":"live","mind":"\#(mind)","name":"itx.\#(name)","again":false}"#
-        let lines: [String] =
-            switch phase {
-            case "live", "ringing": [live]
-            case "reconnecting": [live, #"{"state":"reconnecting","attempt":2,"of":14,"inMs":60000,"lastFailure":"fetch failed"}"#]
-            case "not-allowed": [#"{"state":"notAllowed","why":"No member has allowed this key yet.","link":"https://\#(mind)/keys/enrol?provide=\#(name)","waiting":true}"#]
-            case "incompatible": [#"{"state":"incompatible","why":"the statement is for another mind: this iterate CLI and the mind do not agree on the protocol"}"#]
-            case "stopped": [#"{"state":"stopped","why":"\#(mind) could not be reached. Check the address."}"#]
-            default: []
+    private func setAll(_ choice: Sharing) {
+        for thing in state.things {
+            thing.sharing = choice
+            state.sharing[thing.id] = choice
+        }
+        changed()
+    }
+
+    /// "running" for a thing whose act runs, "watched" for one whose track a watcher gets.
+    private func busyWords() -> [String: String] {
+        var words: [String: String] = [:]
+        for watcher in live.watchers {
+            for track in watcher.tracks {
+                let power: Power? = track.hasPrefix("screen-") ? .screen : track.hasPrefix("camera-") ? .camera : track.hasPrefix("mic-") ? .microphone : nil
+                for thing in state.things where thing.power == power && state.sharing[thing.id, default: .off] != .off {
+                    words[thing.id] = "watched"
+                }
             }
-        for line in lines { _ = lend.handle(.stateLine(line), now: start.addingTimeInterval(10)) }
-        if phase == "stopped" { _ = lend.handle(.processEnded(status: 1, ranFor: 3), now: now.addingTimeInterval(-1)) }
-        var view = LendView()
-        view.isSetUp = true
-        view.minds = Rendering.minds
-        view.active = mind
-        view.status = lend.statusLine(now: now, clock: Lend.clock)
-        view.phase = lend.phase.name
-        view.link = lend.phase.link
-        view.source = Rendering.source
-        return view
+        }
+        for row in acts.rows where row.isRunning { words[row.thing] = "running" }
+        return words
+    }
+
+    private func note(for thing: Shareable, busy: [String: String]) -> ThingRow.Note? {
+        if let word = busy[thing.id] { return .busy(word) }
+        if let until = state.approvals[thing.id] { return .approved("Approved until \(Lend.shortClock(until))") }
+        let uses = state.uses[thing.id] ?? 0
+        return uses > 0 ? .used("Used \(uses)×") : nil
+    }
+}
+
+private struct ThingRow: View {
+    enum Note: Equatable {
+        case busy(String)
+        case approved(String)
+        case used(String)
+    }
+
+    let thing: Shareable
+    let sharing: Sharing
+    let note: Note?
+    let isMissing: Bool
+    let picture: CGImage?
+    let cameraLayer: ((String) -> CALayer)?
+    let bigPicture: (Shareable) async -> CGImage?
+    let choose: (Sharing) -> Void
+    let allow: (Permission) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                lead.frame(width: 30)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(thing.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+                    if let note { noteView(note) }
+                }
+                Spacer(minLength: 6)
+                SharingControl(id: thing.id, title: thing.title, selection: sharing, choose: choose)
+            }
+            .frame(minHeight: note == nil ? 28 : 40)
+            if sharing != .off, isMissing, let permission = thing.power.permission {
+                MissingPermission(words: "macOS has not allowed \(permission.title) yet") { allow(permission) }
+                    .padding(.leading, 38)
+                    .padding(.bottom, 4)
+            }
+        }
+        .padding(.horizontal, 6)
+        .help(note.flatMap { if case .used = $0 { return "Uses since the app started" } else { return nil } } ?? "")
+    }
+
+    @ViewBuilder
+    private var lead: some View {
+        if sharing != .off, !isMissing, thing.power == .screen || thing.power == .camera {
+            Thumbnail(thing: thing, picture: picture, cameraLayer: cameraLayer, bigPicture: bigPicture)
+        } else {
+            Image(systemName: thing.symbol)
+                .font(.system(size: 14))
+                .foregroundStyle(sharing == .off ? Color.secondary : Palette.accentText)
+        }
+    }
+
+    @ViewBuilder
+    private func noteView(_ note: Note) -> some View {
+        switch note {
+        case .busy(let word):
+            HStack(spacing: 5) {
+                Circle().fill(Color.red).frame(width: 6, height: 6)
+                Text(word)
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(Palette.redText)
+        case .approved(let words):
+            Text(words).font(.system(size: 11)).foregroundStyle(Palette.accentText)
+        case .used(let words):
+            Text(words).font(.system(size: 11)).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// What a mind would get of a display or a camera, 30 × 19 points; a click shows a large one.
+private struct Thumbnail: View {
+    let thing: Shareable
+    let picture: CGImage?
+    let cameraLayer: ((String) -> CALayer)?
+    let bigPicture: (Shareable) async -> CGImage?
+    @State private var isZoomed = false
+
+    var body: some View {
+        Button {
+            isZoomed = true
+        } label: {
+            content
+                .frame(width: 30, height: 19)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(Color.primary.opacity(0.14)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help("What a mind gets. Click for a large picture.")
+        .popover(isPresented: $isZoomed, arrowEdge: .leading) {
+            BigPicture(thing: thing, make: bigPicture)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if thing.power == .screen, let picture {
+            Image(decorative: picture, scale: 2).resizable().interpolation(.medium).aspectRatio(contentMode: .fill)
+        } else if thing.power == .camera, let cameraLayer {
+            LayerView(layer: cameraLayer(String(thing.id.dropFirst("camera.".count))))
+        } else {
+            ZStack {
+                Palette.fill
+                Image(systemName: thing.power == .camera ? "person" : thing.symbol).font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+/// The large picture of a thumbnail's thing, made when it opens.
+private struct BigPicture: View {
+    let thing: Shareable
+    let make: (Shareable) async -> CGImage?
+    @State private var picture: CGImage?
+    @State private var isDone = false
+
+    var body: some View {
+        Group {
+            if let picture {
+                Image(decorative: picture, scale: 2).resizable().aspectRatio(contentMode: .fit)
+            } else {
+                Text(isDone ? "No picture: macOS or the device gave none." : "Making the picture…")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+        }
+        .frame(width: 320, height: 200)
+        .padding(8)
+        .task {
+            picture = await make(thing)
+            isDone = true
+        }
     }
 }
 
@@ -443,5 +682,78 @@ private struct LiveWatching: View {
 
     var body: some View {
         if !live.watchers.isEmpty { LiveSection(live: live) }
+    }
+}
+
+// MARK: - Drawings
+
+extension Panel {
+    /// The phases `render` draws: the lend's, and the panel's own states.
+    static let renderPhases = [
+        "connecting", "live", "reconnecting", "stopped", "not-allowed", "incompatible", "ringing", "busy", "blocked", "activity", "no-mind",
+    ]
+
+    /// Draws the panel to a PNG file, with the drawings' things, minds and acts (`Rendering`): it
+    /// opens nothing on screen and starts no capture. `phase` is the lend's (live, reconnecting,
+    /// stopped, not-allowed, incompatible or connecting, the default), or one of the panel's:
+    /// `ringing` (a call's banner), `busy` (watched, recording, an act that runs), `blocked` (two
+    /// permissions not given), `activity` (the Activity page), `no-mind`.
+    @MainActor
+    static func render(to file: URL, phase: String? = nil, dark: Bool = false) -> Bool {
+        _ = NSApplication.shared
+        Rendering.fixFaces()
+        let state = PanelState()
+        let model = AppModel()
+        let sample = Rendering.Sample(phase: phase ?? "connecting")
+        state.things = sample.things
+        state.sharing = Dictionary(uniqueKeysWithValues: sample.things.map { ($0.id, $0.sharing) })
+        state.missing = sample.missing
+        state.approvals = sample.approvals
+        state.uses = sample.uses
+        state.lastResult = phase == "no-mind" ? nil : sample.lastResult
+        state.displayPictures = ["screen.1": Rendering.displayPicture]
+        state.lend = sampleLend(phase == "no-mind" ? nil : phase ?? "connecting")
+        if phase == "no-mind" { state.lend.minds = [] }
+        state.isActivityOpen = phase == "activity"
+        if phase == "ringing" { state.banner = BannerWindow.sample("ring") }
+        ActivityLog.fillSample(model.acts, running: phase == "busy" || phase == "activity", older: phase == "activity" ? 12 : 0)
+        sample.fix(model)
+        let panel = Panel(state: state, model: model, changed: {}, allow: { _ in }, copyPrompt: {})
+        // The panel has no background of its own (a popover gives it one); the file needs one.
+        return Rendering.png(of: panel.background(Color(nsColor: .windowBackgroundColor)), dark: dark, to: file)
+    }
+
+    /// The drawings' lend (`Rendering.minds`), in a phase made from the CLI's own states: a copy
+    /// that only draws starts no lend.
+    @MainActor
+    static func sampleLend(_ phase: String?) -> LendView {
+        let name = Rendering.minds[0].name
+        let mind = Rendering.minds[0].mind
+        let now = Rendering.now
+        var lend = LendState()
+        let start = now.addingTimeInterval(-70)
+        let live = #"{"state":"live","mind":"\#(mind)","name":"itx.\#(name)","again":false}"#
+        let lines: [String] =
+            switch phase {
+            case "live", "ringing", "busy", "blocked", "activity": [live]
+            case "reconnecting": [live, #"{"state":"reconnecting","attempt":2,"of":14,"inMs":90000,"lastFailure":"fetch failed"}"#]
+            case "not-allowed": [#"{"state":"notAllowed","why":"No member has allowed this key yet.","link":"https://\#(mind)/keys/enrol?provide=\#(name)","waiting":true}"#]
+            case "incompatible": [#"{"state":"incompatible","why":"the statement is for another mind: this iterate CLI and the mind do not agree on the protocol"}"#]
+            case "stopped": [#"{"state":"stopped","why":"\#(mind) could not be reached. Check the address."}"#]
+            default: []
+            }
+        if phase != nil { _ = lend.handle(.started, now: start) }
+        for line in lines { _ = lend.handle(.stateLine(line), now: start.addingTimeInterval(10)) }
+        if phase == "stopped" { _ = lend.handle(.processEnded(status: 1, ranFor: 3), now: now.addingTimeInterval(-1)) }
+        var view = LendView()
+        view.isSetUp = true
+        view.minds = Rendering.minds
+        view.active = mind
+        view.status = lend.statusLine(now: now, clock: Lend.clock)
+        view.words = lend.words(now: now, clock: Lend.shortClock)
+        view.phase = lend.phase.name
+        view.link = lend.phase.link
+        view.source = Rendering.source
+        return view
     }
 }

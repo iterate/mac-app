@@ -227,54 +227,85 @@ enum ActivityLine {
     }
 }
 
-/// The panel's "Activity": a line that opens the list of the last acts, each with its time.
-struct ActivityList: View {
+/// The panel's "Activity", closed: the two newest acts, the count, and "All", which shows the
+/// Activity page in place of the panel's middle.
+struct ActivitySummary: View {
     @ObservedObject var log: ActivityLog
     @Binding var isOpen: Bool
-    /// How many acts the open list shows.
-    var shown = 8
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 4) {
+            SectionTitle(title: "Activity") {
+                HStack(spacing: 8) {
+                    if !log.rows.isEmpty {
+                        Text("\(log.rows.count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                    }
+                    Button {
+                        isOpen = true
+                    } label: {
+                        HStack(spacing: 3) {
+                            Text("All")
+                            Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        }
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("What a mind did with this Mac: the acts on this Mac's context in the mind")
+                    .accessibilityLabel("All")
+                    .accessibilityIdentifier("activity.all")
+                }
+            }
+            if log.rows.isEmpty {
+                Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 2)
+            }
+            ForEach(log.rows.prefix(2)) { ActivityRow(entry: $0) }
+        }
+    }
+}
+
+/// The Activity page: the context the log shows, the tick for the pill, and the last acts.
+struct ActivityPage: View {
+    @ObservedObject var log: ActivityLog
+    @Binding var isOpen: Bool
+    /// How many acts the page shows.
+    var shown = 9
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
             Button {
-                isOpen.toggle()
+                isOpen = false
             } label: {
                 HStack(spacing: 6) {
-                    Image(systemName: "chevron.right")
-                        .font(.caption.weight(.semibold))
-                        .rotationEffect(.degrees(isOpen ? 90 : 0))
-                        .foregroundStyle(.secondary)
-                    Text("Activity").font(.subheadline.weight(.semibold))
-                    if let last = log.rows.first, !isOpen {
-                        Text("\(ActivityLine.title(of: last)), \(Self.clock(last.startedAt))")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+                    Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
+                    Text("Activity").font(.system(size: 15, weight: .semibold))
+                    if !log.rows.isEmpty {
+                        Text("\(log.rows.count)").font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 0)
-                    if !log.rows.isEmpty {
-                        Text("\(log.rows.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                    }
                 }
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .help("What a mind did with this Mac: the acts on this Mac's context in the mind")
-            if isOpen {
-                Text(context).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                    .textSelection(.enabled)
-                    .accessibilityIdentifier("activity.context")
-                Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.caption)
-                    .accessibilityIdentifier("activity.showsPill")
+            .help("Back to the panel")
+            .accessibilityLabel("Back")
+            .accessibilityIdentifier("activity.back")
+            Text(context).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                .textSelection(.enabled)
+                .accessibilityIdentifier("activity.context")
+            Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.system(size: 12))
+                .accessibilityIdentifier("activity.showsPill")
+            VStack(alignment: .leading, spacing: 2) {
                 if log.rows.isEmpty {
                     Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
-                ForEach(log.rows.prefix(shown)) { entry in row(entry) }
-                if log.rows.count > shown {
-                    Text("and \(log.rows.count - shown) before these").font(.caption).foregroundStyle(.tertiary)
-                }
+                ForEach(log.rows.prefix(shown)) { ActivityRow(entry: $0) }
+            }
+            if log.rows.count > shown {
+                Text("and \(log.rows.count - shown) before these").font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 2)
             }
         }
     }
@@ -284,52 +315,87 @@ struct ActivityList: View {
         guard let path = log.path, let mind = log.mind else { return "Lent to no mind: these acts are on this Mac only" }
         return "\(path) on \(mind)" + (log.fold.presence.map { " · \($0.state)" } ?? "")
     }
+}
 
-    private func row(_ entry: ActivityLog.Row) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(Self.clock(entry.startedAt)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-            Image(systemName: ActivityLine.symbol(entry.thing)).font(.caption).frame(width: 16).foregroundStyle(entry.isRunning ? Color.red : Color.secondary)
+/// One act: its time, the thing's icon (red while it runs or when it failed), what it did, its
+/// detail in monospace, the orange cloud while it is not yet in the mind, and how long it took.
+struct ActivityRow: View {
+    let entry: ActivityLog.Row
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text(Lend.clock(entry.startedAt)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+            Image(systemName: ActivityLine.symbol(entry.thing))
+                .font(.system(size: 12))
+                .frame(width: 18)
+                .foregroundStyle(entry.isRunning || entry.failure != nil ? Palette.redText : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
-                Text(ActivityLine.title(of: entry)).font(.caption).lineLimit(2)
+                Text(ActivityLine.title(of: entry)).font(.system(size: 12)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 if let detail = entry.detail {
-                    Text(detail).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2).truncationMode(.middle).textSelection(.enabled)
+                    Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                        .textSelection(.enabled)
                 }
             }
             Spacer(minLength: 0)
             if !entry.isInMind {
-                Image(systemName: "icloud.slash").font(.caption2).foregroundStyle(.orange).help("Not yet in the mind: it goes when the connection is back")
+                Image(systemName: "icloud.slash").font(.system(size: 11)).foregroundStyle(Palette.waitText)
+                    .help("Not yet in the mind: it goes when the connection is back")
             }
-            if let took = ActivityLine.took(entry) { Text(took).font(.caption.monospacedDigit()).foregroundStyle(.tertiary) }
+            if let took = ActivityLine.took(entry) {
+                Text(took).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+            }
         }
-    }
-
-    private static func clock(_ date: Date) -> String {
-        Lend.clock(date)
+        .padding(.horizontal, 2)
+        .padding(.vertical, 3)
+        .frame(minHeight: 30)
     }
 }
 
 extension ActivityLog {
-    /// Draws the pill and the panel's open list to PNG files in `folder`, with sample acts, in
-    /// light and dark: a look with no Mac bar (`--render-activity <folder>`).
+    /// The drawings' acts (`Rendering`), as the context holds them: eight that ended, the newest at
+    /// 14:01:29; with `running`, a command that runs now and that the context has not echoed yet;
+    /// and `older` more acts before them.
+    static func fillSample(_ log: ActivityLog, running: Bool, older: Int = 0) {
+        let now = Rendering.now
+        log.mind = Rendering.minds[0].mind
+        log.path = "/devices/\(Rendering.minds[0].name)"
+        let display = "“Built-in Retina Display”"
+        var acts: [(thing: String, doing: String, did: String, failure: String?, detail: String?, at: TimeInterval, took: TimeInterval)] = []
+        for index in 0..<older {
+            acts.append(("screen.1", "Taking a picture of the display \(display)", "Took a picture of the display \(display)", nil, nil, -900 - Double(index) * 120, 0.4))
+        }
+        acts += [
+            ("record.screens", "Recording the screens", "Record the screens until switched off", nil, nil, -761, 0.2),
+            ("accessibility", "Reading the window in front", "Read the window in front", nil, "Ghostty “my project”", -726, 0.3),
+            ("live", "Watched live by Misha", "Watched live by Misha", nil, "the screen, the microphone", -593, 190),
+            ("banners", "Showing a banner", "Showed a banner: “Join” was pressed", nil, "Design review is starting", -451, 12),
+            ("speaker", "Saying “Lunch is ready” through the speakers", "Said “Lunch is ready” through the speakers", nil, nil, -429, 2),
+            ("commands", "Running a command", "Ran a command", "it ended with status 1", "/usr/bin/false", -300, 1),
+            ("microphone", "Listening to the microphone for 5 s", "Listened to the microphone for 5 s", nil, nil, -95, 5),
+            ("screen.1", "Taking a picture of the display \(display)", "Took a picture of the display \(display)", nil, nil, -42, 0.4),
+        ]
+        var offset = 0
+        for (index, act) in acts.enumerated() {
+            let id = "sample-\(index)"
+            offset += 1
+            log.fold.take(ContextEvent(.actStarted(act: id, thing: act.thing, doing: act.doing, detail: act.detail), at: now.addingTimeInterval(act.at), offset: offset))
+            offset += 1
+            log.fold.take(ContextEvent(.actEnded(act: id, did: act.did, failure: act.failure), at: now.addingTimeInterval(act.at + act.took), offset: offset))
+        }
+        log.fold.take(ContextEvent(.presenceChanged(state: "active"), at: now.addingTimeInterval(-30), offset: offset + 1))
+        if running {
+            // an act of this app that the context has not echoed yet
+            log.fold.take(ContextEvent(.actStarted(act: "sample-running", thing: "commands", doing: "Running a command", detail: "/bin/zsh -lc git -C ~/src/app status --short"), at: now, offset: nil))
+        }
+    }
+
+    /// Draws the pill and the Activity page to PNG files in `folder`, with sample acts, in light
+    /// and dark: a look with no Mac bar (`--render-activity <folder>`).
     static func render(to folder: URL) -> Bool {
         _ = NSApplication.shared
         Rendering.fixFaces()
         let log = ActivityLog()
-        let now = Rendering.now
-        log.mind = "iterate.example.com"
-        log.path = "/devices/jane.mac"
-        // the context's events, and one act of this app that the context has not echoed yet
-        let events: [(DeviceFact, TimeInterval, Int?)] = [
-            (.actStarted(act: "1", thing: "commands", doing: "Running a command", detail: "/usr/bin/false"), -300, 1),
-            (.actEnded(act: "1", did: "Ran a command", failure: "it ended with status 1"), -299, 2),
-            (.actStarted(act: "2", thing: "microphone", doing: "Listening to the microphone for 5 s", detail: nil), -95, 3),
-            (.actEnded(act: "2", did: "Listened to the microphone for 5 s", failure: nil), -90, 4),
-            (.presenceChanged(state: "active"), -60, 5),
-            (.actStarted(act: "3", thing: "screen.1", doing: "Taking a picture of the display “Built-in Retina Display”", detail: nil), -42, 6),
-            (.actEnded(act: "3", did: "Took a picture of the display “Built-in Retina Display”", failure: nil), -41.6, 7),
-            (.actStarted(act: "4", thing: "commands", doing: "Running a command", detail: "/bin/zsh -lc git -C ~/src/app status --short"), 0, nil),
-        ]
-        for (fact, seconds, offset) in events { log.fold.take(ContextEvent(fact, at: now.addingTimeInterval(seconds), offset: offset)) }
+        fillSample(log, running: true)
         let shown = ShownActivity()
         shown.entry = log.rows.first
         shown.mind = log.mind
@@ -337,7 +403,7 @@ extension ActivityLog {
         for (dark, tone) in [(false, "light"), (true, "dark")] {
             let pill = ActivityPillView(shown: shown).frame(width: 340, height: 56).padding(12).background(Color(nsColor: .windowBackgroundColor))
             drawn = Rendering.png(of: pill, dark: dark, to: folder.appendingPathComponent("activity-pill-\(tone).png")) && drawn
-            let list = ActivityList(log: log, isOpen: .constant(true)).frame(width: 398).padding(16).background(Color(nsColor: .windowBackgroundColor))
+            let list = ActivityPage(log: log, isOpen: .constant(true)).frame(width: 376).padding(12).background(Color(nsColor: .windowBackgroundColor))
             drawn = Rendering.png(of: list, dark: dark, to: folder.appendingPathComponent("activity-list-\(tone).png")) && drawn
         }
         return drawn

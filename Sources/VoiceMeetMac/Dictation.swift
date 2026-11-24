@@ -59,6 +59,8 @@ final class Dictation: SpeechClient {
     var onChange: () -> Void = {}
     /// How the last dictation ended, for the panel.
     private(set) var lastLine: String?
+    /// The last dictation failed or wrote nothing where the cursor is: the panel draws its line in orange.
+    private(set) var lastFailed = false
     /// The last dictation's text, in memory only: for the control socket, never for the log.
     private(set) var lastText: String?
     var isRunning: Bool { session.isListening(for: self) }
@@ -285,6 +287,7 @@ final class Dictation: SpeechClient {
         // the log holds counts, never the words
         log.info(line)
         lastLine = line
+        lastFailed = failed != nil
         if let failed {
             pill.phase = .failed(failed)
             hidePill(after: 4)

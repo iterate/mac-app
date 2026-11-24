@@ -262,6 +262,77 @@ public struct LendState: Equatable, Sendable {
     }
 }
 
+/// The phase as the panel lays it out: its name and a short second line at the right of the mind's
+/// row, and, while the lend is held up, a block under the row with the reason. The words are
+/// `statusLine`'s, in other places.
+public struct LendWords: Equatable, Sendable {
+    /// How the block is coloured: orange while the CLI tries again by itself, red when it stopped.
+    public enum Tone: String, Sendable { case waits, stopped }
+
+    /// "Live", "Reconnecting".
+    public var title: String
+    /// "since 14:01", "attempt 2 of 14".
+    public var detail: String
+    /// The reason, in sentences; nil while connecting, live or not lent.
+    public var block: String?
+    /// A line for the block in monospace: the last failure, the CLI's reason, a command.
+    public var code: String?
+    public var tone: Tone?
+
+    public init(title: String, detail: String, block: String? = nil, code: String? = nil, tone: Tone? = nil) {
+        (self.title, self.detail, self.block, self.code, self.tone) = (title, detail, block, code, tone)
+    }
+}
+
+extension LendState {
+    /// The command that updates the iterate CLI, for the incompatible phase's block.
+    public static let updateCommand = "npx @iterate-com/mac-app update"
+
+    /// The phase for the panel (`LendWords`). `clock` writes a time of day.
+    public func words(now: Date, clock: (Date) -> String) -> LendWords {
+        let inSeconds = { (date: Date) in max(0, Int(date.timeIntervalSince(now).rounded(.up))) }
+        let sentence = { (text: String) in text.prefix(1).uppercased() + text.dropFirst() }
+        let stop = { (text: String) in text.hasSuffix(".") ? text : text + "." }
+        switch phase {
+        case .idle:
+            return LendWords(title: "Not lent", detail: "no mind is active")
+        case .connecting(let since):
+            return LendWords(title: "Connecting", detail: "since \(clock(since))")
+        case .live(let since):
+            return LendWords(title: "Live", detail: "since \(clock(since))")
+        case .reconnecting(let attempt, let of, let next, let failure):
+            let when = inSeconds(next) > 0 ? "Next try in \(inSeconds(next)) s." : "Trying now."
+            return LendWords(
+                title: "Reconnecting", detail: "attempt \(attempt) of \(of)", block: "Attempt \(attempt) of \(of). \(when)",
+                code: "Last failure: \(failure)", tone: .waits)
+        case .stopped(let reason, let next):
+            let seconds = inSeconds(next)
+            let when = seconds > 0 ? "Next start in \(seconds) s." : "Starting again now."
+            // "the lend process ended (exit 1): <what it said>": the end in words, what it said in monospace
+            if let split = reason.range(of: "): ") {
+                let head = reason[..<split.lowerBound] + ")"
+                return LendWords(
+                    title: "Stopped", detail: seconds > 0 ? "next start in \(seconds) s" : "starting again now",
+                    block: "\(sentence(String(head))). \(when)", code: String(reason[split.upperBound...]), tone: .stopped)
+            }
+            return LendWords(
+                title: "Stopped", detail: seconds > 0 ? "next start in \(seconds) s" : "starting again now",
+                block: "\(stop(sentence(reason))) \(when)", tone: .stopped)
+        case .notAllowed(let reason, let link, let next):
+            let fix = link == nil
+                ? "A member allows the key on the mind's /keys page, or add the mind again."
+                : "A member opens the link and allows it with a passkey."
+            let again = next.map { " Next try in \(inSeconds($0)) s." } ?? ""
+            return LendWords(title: "Not allowed", detail: "the key waits", block: "\(reason) \(fix)\(again)", tone: .stopped)
+        case .incompatible(let reason, let next):
+            let again = next.map { " Next try in \(inSeconds($0)) s." } ?? ""
+            return LendWords(
+                title: "Incompatible", detail: "update the CLI", block: "\(stop(sentence(reason)))\(again) Update the iterate CLI:",
+                code: Self.updateCommand, tone: .stopped)
+        }
+    }
+}
+
 /// The lend at a glance, as the menu-bar mark shows it.
 public enum LendGlance: String, Equatable, Sendable, CaseIterable {
     /// Lent: the plain mark.
