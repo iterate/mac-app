@@ -589,6 +589,49 @@ While you talk, the text is written again twice a second from the stretch of spe
 A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final:
 one segment, with its times from the start.
 
+## Online and local (a proposal, not built)
+
+What the speech bench measured on 24 November 2026 (`harness/speech-bench`, the synthetic set: 48
+clips of `say -o`, two voices; an M4 Max on a home connection). The owner's own voice
+(`--set owner`) must confirm it before anything is built.
+
+| Engine | WER % (Daniel / Anna) | Terms right, false | End of audio → final, p50 / p90 | First partial | $ / min |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `parakeet-v3`, the app's model | 21.8 (3.4 / 40.2) | 124/146, 30 | 0.43 / 0.66 s | 0.47 s | 0 |
+| `gpt-live-transcribe`, delay low | 10.3 (3.1 / 17.4) | 130/146, 8 | 0.71 / 0.79 s | 0.92 s | 0.017 |
+| `gpt-transcribe` | 11.0 (3.1 / 19.0) | 121/146, 3 | 0.80 / 1.09 s | none | 0.0045 |
+| `oruk-fourier-2b` (local, CC BY-NC) | 12.1 (4.8 / 19.3) | 99/146, 3 | 0.26 / 0.32 s | none | 0 |
+
+On a clear voice (Daniel) Parakeet is as good as OpenAI; on the accented voice it makes twice the
+errors, and its word-list boosting writes terms that were not said (30 times in 48 clips, the
+others 3 to 8). A new connection costs 0.6 s to connect and 0.2 s for `session.update`.
+
+The proposal:
+
+- **Local always.** Parakeet runs on every dictation, as now: its partials are the pill's text,
+  and it is the answer when there is no network.
+- **Online too, when it is set and reachable.** At fn down the app streams the same 24 kHz audio
+  to `gpt-live-transcribe` (delay `low`: of the two delays it had the lower WER and the faster
+  final) with the mind's `words.md` terms as `keywords`. The audio is kept from fn down, so a
+  socket that opens late loses no word: only its partials come later.
+- **At the end of speech, wait at most X = 900 ms for OpenAI's final; else write local's.** X is
+  OpenAI's end-to-final p90 (0.79 s) plus 0.1 s for a slower network than this one: 9 dictations of
+  10 get the online text, and each one waits about 0.3 s more than local alone (0.71 s against
+  0.43 s at p50). With `gpt-transcribe` (a quarter of the price) X would be 1.2 s (its p90 is
+  1.09 s). When the socket did not open, failed, or has not had all the audio, there is no wait.
+- **The key stays in the mind.** The mind holds `/secrets/openai`. The app never gets it: it asks
+  its mind (through the bridge, as `words-fetch.mjs` does) for a client secret, and the mind makes
+  one with `POST /v1/realtime/client_secrets`: the transcription session (model, delay, `keywords`
+  from its `words.md`, `prompt`, `languages: ["en"]`) and `expires_after` of 600 s. The app
+  connects with `Authorization: Bearer ek_…`; the session is already set, so no `session.update`
+  goes. The bench checked this path: the secret came in 1.09 s, the socket opened in 0.74 s, and
+  the final came 0.72 s after the end. The secret is the slowest step, so the app gets the next one
+  before the current one expires, not at fn down. The mind also decides who may dictate online.
+- **What changes for the person.** "No sound and no text leaves the Mac" is then not true for a
+  mind with online speech: it must be a choice of the mind, said in the panel's speech section.
+  At the measured prices, an hour of dictation costs $1.02 (`gpt-live-transcribe`) or $0.27
+  (`gpt-transcribe`).
+
 ## How it works
 
 - **The app** (`Sources/`) holds macOS's permissions: Screen Recording, Accessibility, Camera and
@@ -699,16 +742,47 @@ listening, with a text and files, while it sends, not sent) and the dictation pi
 listening, failed), light and dark, sixteen files. `--render-all <folder>` draws every view, light
 and dark.
 
-**The speech bench** (local only, never in CI: it reads the owner's own captures, and nothing of
-them leaves the Mac or goes into the repository). `swift build -c release --product speech-bench`,
-then `node harness/speech-bench/run.mjs [--text] [--oruk <folder>]` runs each model of the app's
-list on the same clips: up to five captures whose stored `transcript.json` has words, and a
-sentence of `words.md`'s hard terms from `say -o`. Per model it prints the errors on the list's
-terms, the word agreement with the stored text, the seconds from the end of speech to the final
-text, the first segment's start against the stored one, and the load. `--oruk` adds Oruk Fourier
-2B (MLX 8-bit, CC BY-NC 4.0) through Python mlx-audio in a venv of that folder (`oruk.py`); it is
-not a model of the app. `.build/release/speech-bench --model <id> [--words words.md] <file>…`
-prints one model's segments for any sound file.
+**The speech bench** (local only, never in CI) compares speech-to-text engines on sentences with
+known text: `harness/speech-bench/sentences.md`, 24 sentences as the owner dictates to a coding
+agent: 16 dense with the terms of iterate.com's `words.md` (each term is in one at least), 4 plain,
+2 with numbers and paths, 2 long ones with self-corrections. It has two sets of clips:
+
+- `owner`: the owner's own voice. `node harness/speech-bench/record.mjs` shows one sentence at a
+  time and records the Mac's default microphone while you talk (Enter starts, Enter stops; `r` says
+  it again), into `~/.cache/iterate-speech-bench/clips/NN.wav` with the sentence as `NN.txt`.
+- `synthetic`: each sentence from `say -o` in two voices, Daniel and Anna (a German voice that reads
+  English). It is made at the first run, so that every engine can be measured before the owner
+  recorded.
+
+`swift build -c release --product speech-bench`, then `node harness/speech-bench/run.mjs --set
+owner` (or `--set synthetic`; `--engines a,b`, `--clips 01,02`, `--text` for each clip's text).
+Each engine is a file in `harness/speech-bench/engines/` with its setup at its top, behind one
+interface: the clips (16 kHz WAV) and the word list in; per clip its partials with their times, its
+final text, the time to the first partial, the time from the end of the audio to the final text
+("how long after I let go"), and the setup: the first ever (install, download, the first load), each
+start of the app, each dictation. A streaming engine hears the clip at the pace of the clock in
+pieces of 0.1 s; a model that hears whole utterances gets the clip at its end.
+
+| Engine | Runtime | Word list |
+| --- | --- | --- |
+| `parakeet-v3`, `parakeet-ultra` | The app's recognizer (`speech-bench`, Core ML) | CTC boosting and repair, as the app |
+| `fluid-speech-pro` | Core ML, the FluidVoice fork of FluidAudio, patched for Xcode 16 | The fork's CTC boosting |
+| `phonon-2.5-english` | Core ML on the Neural Engine, the package's C library | 25 hotwords (its most) |
+| `oruk-fourier-2b` | MLX 8-bit, Python mlx-audio (CC BY-NC 4.0) | The terms in its prompt |
+| `granite-speech-5.0-470m-turboctc` | MLX, Python mlx-audio (Granite-MLX needs macOS 26) | None (CTC) |
+| `gpt-live-transcribe-low`, `-medium` | OpenAI, a WebSocket; deltas while you talk | `keywords`, `prompt` |
+| `gpt-transcribe` | OpenAI, a WebSocket; the committed turn | `keywords`, `prompt` |
+
+`score.mjs` scores a run: the word error rate after the app's word-list repair (every engine's text
+goes through it), the terms written exactly (and before the repair), the literals (`AGENTS.md`,
+`/devices/jonas.mac`, `15`: the word error rate drops punctuation), the two latencies at p50 and
+p90, the setup and the cost per minute. The table goes to stdout, the JSON to
+`~/.cache/iterate-speech-bench/results/<date>.json`. Everything that is not code (clips, venvs,
+models, results) is in `~/.cache/iterate-speech-bench`, never in the repository. The OpenAI engines
+send the bench's clips, and only those, to OpenAI; `run.mjs` reads `OPENAI_API_KEY` from Doppler
+(`_shared/dev`) into its environment and never prints or writes it.
+`.build/release/speech-bench --model <id> [--words words.md] <file>…` prints one model's segments
+and partials for any sound file.
 
 ### Testing with no hand
 

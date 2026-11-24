@@ -1,157 +1,91 @@
 #!/usr/bin/env node
-// speech-bench: the speech models on the same clips of the owner's own voice, side by side
-// (README, "Developing"). LOCAL ONLY, never in CI: the clips are the owner's captures, which hold
-// their real voice, and nothing of them leaves this Mac. Nothing of them is written into the repo.
+// speech-bench: speech-to-text engines on the same clips with known text, side by side (README,
+// "The speech bench"). LOCAL ONLY, never in CI.
 //
-//   node harness/speech-bench/run.mjs [--captures <folder>] [--words <words.md>] [--models a,b]
-//                                     [--oruk <folder with .venv and fourier/>] [--max 5] [--text]
+//   node harness/speech-bench/run.mjs [--set synthetic|owner] [--engines a,b] [--clips 01,02]
+//                                     [--voices Daniel,Anna] [--text]
 //
-// Clips: each capture's voice.m4a whose stored transcript.json (the mind's Whisper) has words, at
-// most `--max`, and a sentence of words.md terms from `say -o`. Each model of the app's list runs
-// through `speech-bench` (swift build -c release --product speech-bench), with the words.md
-// boosting. `--oruk` adds Oruk Fourier 2B (MLX 8-bit, CC BY-NC 4.0) through Python mlx-audio
-// (`oruk.py`), which is not a model of the app. Per model it prints: the errors on words.md terms
-// (a term in the reference and not in the text, or the other way round), the word agreement with
-// the reference (1 − word error rate; the reference is Whisper's text, or the sentence said), the
-// seconds from the end of the sound to the final text, the start of the first segment against
-// Whisper's, and the load. `--text` prints each clip's texts side by side, on this terminal only.
-import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+// The sets: `owner` is the owner's own voice (record.mjs, BENCH/clips); `synthetic` is each
+// sentence from `say -o` in two voices (made here at the first run). Each engine of `engines/`
+// gets the clips and the mind's word list, and gives per clip its partials with their times, its
+// final text, the time to the first partial and from the end of the audio to the final text, and
+// its setup. A streaming engine hears the audio at the pace of the clock in pieces of 0.1 s. The
+// local engines run one after another; then the online ones together (each on its own
+// connection), so that no engine slows another's latency. Everything goes to
+// BENCH/results/runs/<time>-<set>/; score.mjs prints the table.
+//
+// The online engines (OpenAI) send the bench's clips, and only those, to OpenAI. Their key comes
+// from Doppler (`_shared/dev`, OPENAI_API_KEY) into this process's environment; it is never printed
+// or written. `--engines` without them, or no key, keeps everything on this Mac.
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
+import { BENCH, VOICES, WORDS, clips as setClips, synthesize, wordList } from "./lib.mjs";
+import { report } from "./score.mjs";
 
-const root = join(import.meta.dirname, "../..");
-const support = join(homedir(), "Library/Application Support/iterate-mac-app");
 const { values } = parseArgs({
   options: {
-    captures: { type: "string", default: join(support, "captures") },
-    words: { type: "string", default: join(support, "words/iterate.com.md") },
-    models: { type: "string", default: "parakeet-v3,parakeet-ultra" },
-    oruk: { type: "string" },
-    max: { type: "string", default: "5" },
+    set: { type: "string", default: "synthetic" },
+    engines: { type: "string" },
+    clips: { type: "string" },
+    voices: { type: "string" },
+    words: { type: "string", default: WORDS },
     text: { type: "boolean" },
   },
 });
 
-const bench = join(root, ".build/release/speech-bench");
-if (!existsSync(bench)) throw new Error("no speech-bench: run swift build -c release --product speech-bench");
+const all = [];
+for (const name of readdirSync(join(import.meta.dirname, "engines")).filter((name) => name.endsWith(".mjs") && name !== "worker.mjs").sort())
+  all.push(...(await import(`./engines/${name}`)).default);
+const chosen = values.engines ? values.engines.split(",").map((id) => all.find((engine) => engine.id === id) ?? fail(`no engine ${id}: ${all.map((e) => e.id).join(", ")}`)) : all;
+function fail(message) {
+  console.error(message);
+  process.exit(2);
+}
 
-// The word list's terms, as WordList reads them: `- term: wrong, wrong`.
-const entries = readFileSync(values.words, "utf8")
-  .split("\n")
-  .filter((line) => line.startsWith("- "))
-  .map((line) => ({ term: line.slice(2).split(":")[0].trim(), hasWrong: line.includes(":") }))
-  .filter(({ term }) => term);
-const terms = entries.map(({ term }) => term);
-const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const has = (text, term) => new RegExp(`(?<![\\p{L}\\p{N}])${escape(term)}(?![\\p{L}\\p{N}])`, "iu").test(text);
-const normal = (text) =>
-  text
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}'\s]/gu, " ")
-    .split(/\s+/)
-    .filter(Boolean);
-function wordErrors(reference, text) {
-  const [a, b] = [normal(reference), normal(text)];
-  let row = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= a.length; i++) {
-    const next = [i];
-    for (let j = 1; j <= b.length; j++)
-      next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
-    row = next;
+if (values.set === "synthetic") synthesize(values.voices ? values.voices.split(",") : VOICES);
+let clips = setClips(values.set);
+if (values.voices) clips = clips.filter((clip) => values.voices.split(",").includes(clip.voice));
+if (values.clips) clips = clips.filter((clip) => values.clips.split(",").includes(clip.id));
+if (!clips.length) fail(values.set === "owner" ? "no clips: record them first (node harness/speech-bench/record.mjs)" : "no clips");
+
+if (chosen.some((engine) => engine.online) && !process.env.OPENAI_API_KEY) {
+  try {
+    process.env.OPENAI_API_KEY = execFileSync("doppler", ["secrets", "get", "OPENAI_API_KEY", "--project", "_shared", "--config", "dev", "--plain"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    console.error("no OPENAI_API_KEY from Doppler: the online engines will not run");
   }
-  return { errors: row[b.length], words: a.length };
 }
 
-// THE CLIPS
-const clips = [];
-for (const name of existsSync(values.captures) ? readdirSync(values.captures).sort() : []) {
-  const folder = join(values.captures, name);
-  const transcript = join(folder, "transcript.json");
-  if (!existsSync(join(folder, "voice.m4a")) || !existsSync(transcript)) continue;
-  const segments = JSON.parse(readFileSync(transcript, "utf8")).segments ?? [];
-  if (!segments.some((segment) => segment.text?.trim())) continue;
-  clips.push({ name, file: join(folder, "voice.m4a"), reference: segments.map((s) => s.text).join(" "), firstMs: segments[0].t });
-  if (clips.length >= Number(values.max)) break;
-}
-const scratch = mkdtempSync(join(tmpdir(), "speech-bench-"));
-// the hard terms: those a transcript already got wrong (they have wrong forms in the list)
-const hard = entries.filter(({ hasWrong }) => hasWrong).map(({ term }) => term);
-const sentence = `Ask ${hard.slice(0, 2).join(" and ")} why ${hard[2]} broke the ${hard[3]} in ${hard[4]}, then open ${hard[5]} with ${hard.slice(6, 9).join(", ")} and ${hard[9]}.`;
-const fixture = join(scratch, "fixture.aiff");
-// `say -o` writes a file and plays nothing
-execFileSync("say", ["-o", fixture, sentence]);
-clips.push({ name: "say fixture", file: fixture, reference: sentence });
+const date = new Date().toISOString().slice(0, 10);
+const folder = join(BENCH, "results/runs", `${new Date().toISOString().replace(/[:.]/g, "-")}-${values.set}`);
+const scratch = join(folder, "scratch");
+mkdirSync(scratch, { recursive: true });
+copyFileSync(values.words, join(folder, "words.md"));
+const entries = wordList(readFileSync(values.words, "utf8"));
+const voices = [...new Set(clips.map((clip) => clip.voice))];
+writeFileSync(join(folder, "run.json"), JSON.stringify({ set: values.set, date, clips: clips.length, voices, engines: chosen.map((e) => e.id) }, null, 1));
+console.error(`${clips.length} clips (${voices.join(", ")}, ${Math.round(clips.reduce((sum, clip) => sum + clip.seconds, 0))} s), ${chosen.length} engines -> ${folder}`);
 
-// THE MODELS
-const results = {};
-for (const model of values.models.split(",").filter(Boolean)) {
-  const run = spawnSync(bench, ["--model", model, "--words", values.words, ...clips.map((clip) => clip.file)], {
-    encoding: "utf8",
-    maxBuffer: 1 << 26,
-    stdio: ["ignore", "pipe", "inherit"],
-  });
-  const lines = run.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  results[model] = { load: lines[0], clips: Object.fromEntries(lines.slice(1).map((line) => [line.file, line])) };
-}
-if (values.oruk) {
-  const python = join(values.oruk, ".venv/bin/python");
-  // 16 kHz WAV copies in the scratch folder: what mlx-audio reads without ffmpeg
-  const wavs = clips.map((clip, index) => {
-    const wav = join(scratch, `${index}.wav`);
-    execFileSync("afconvert", ["-f", "WAVE", "-d", "LEI16@16000", "-c", "1", clip.file, wav]);
-    return wav;
-  });
-  const run = spawnSync(python, ["-I", join(import.meta.dirname, "oruk.py"), join(values.oruk, "fourier/mlx/8bit"), values.words, ...wavs], {
-    encoding: "utf8",
-    maxBuffer: 1 << 26,
-    stdio: ["ignore", "pipe", "inherit"],
-    env: { ...process.env, HF_HUB_OFFLINE: "1" },
-  });
-  const lines = run.stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  results["oruk-fourier-2b"] = { load: lines[0], clips: Object.fromEntries(lines.slice(1).map((line, index) => [clips[index].file, line])) };
-}
-
-// THE COMPARISON
-const round = (number, digits = 2) => (number === undefined || Number.isNaN(number) ? "–" : number.toFixed(digits));
-console.log(`${clips.length} clips (${clips.length - 1} captures with words, 1 say fixture); ${terms.length} words.md terms`);
-console.log(["model", "term errors", "terms right", "word agreement", "final after end s", "first start Δ ms", "load s"].join(" | "));
-for (const [model, { load, clips: heard }] of Object.entries(results)) {
-  let termErrors = 0;
-  let termsWanted = 0;
-  let termsRight = 0;
-  let errors = 0;
-  let words = 0;
-  const after = [];
-  const starts = [];
-  for (const clip of clips) {
-    const line = heard[clip.file];
-    const text = (line?.segments ?? []).map((segment) => segment.text).join(" ");
-    for (const term of terms) {
-      const wanted = has(clip.reference, term);
-      const got = has(text, term);
-      termsWanted += wanted ? 1 : 0;
-      termsRight += wanted && got ? 1 : 0;
-      termErrors += wanted !== got ? 1 : 0;
-    }
-    const counted = wordErrors(clip.reference, text);
-    errors += counted.errors;
-    words += counted.words;
-    if (line?.finalAfterEnd !== undefined) after.push(line.finalAfterEnd);
-    if (clip.firstMs !== undefined && line?.segments?.[0]) starts.push(line.segments[0].t - clip.firstMs);
-    if (values.text) console.log(`  [${model}] ${clip.name}\n    reference: ${clip.reference}\n    heard:     ${text}`);
+async function bench(engine) {
+  const { run, ...about } = engine;
+  const started = performance.now();
+  let result;
+  try {
+    const heard = await run(clips, { entries, wordsFile: values.words, scratch, log: (line) => process.stderr.write(`\r${line}        `) });
+    result = { ...about, setup: heard.setup, clips: clips.map((clip, index) => ({ ...clip, ...heard.clips[index] })) };
+  } catch (error) {
+    result = { ...about, failed: error.message };
   }
-  const mean = (list) => list.reduce((a, b) => a + b, 0) / list.length;
-  console.log(
-    [
-      model,
-      load?.failed ? `failed: ${load.failed}` : termErrors,
-      `${termsRight}/${termsWanted}`,
-      `${round(100 * (1 - errors / Math.max(words, 1)), 0)}%`,
-      round(mean(after)),
-      starts.length ? `${round(mean(starts), 0)} (|Δ| ${round(mean(starts.map(Math.abs)), 0)})` : "–",
-      round(load?.loadSeconds, 1),
-    ].join(" | "),
-  );
+  writeFileSync(join(folder, `${engine.id}.engine.json`), `${JSON.stringify(result, null, 1)}\n`);
+  console.error(`\n${engine.id}: ${result.failed ? `did not run: ${result.failed}` : "done"} (${Math.round((performance.now() - started) / 1000)} s)`);
 }
+
+for (const engine of chosen.filter((engine) => !engine.online)) await bench(engine);
+await Promise.all(chosen.filter((engine) => engine.online).map(bench));
+
+report(folder, { text: values.text });

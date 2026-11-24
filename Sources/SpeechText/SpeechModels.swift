@@ -25,9 +25,9 @@ public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
         id: "parakeet-ultra", name: "Parakeet Ultra", megabytes: 632, license: "CC BY 4.0", runtime: "Core ML (FluidAudio)",
         version: .ultra)
     /// The models the app offers. Tried and left out (speech-bench, 24 Nov 2026): Fluid Speech Pro
-    /// (`FluidVoice-Labs/fluid-speech-pro-coreml`) loads as an Ultra-type folder, but its joint is
-    /// the older contract and FluidAudio 0.18.4 cuts its text short; it needs FluidAudio's own
-    /// support for it (its model card names a fork).
+    /// (`FluidVoice-Labs/fluid-speech-pro-coreml`): FluidAudio 0.18.4 cuts its text short; through
+    /// its fork (altic-dev/FluidAudio) it reads right, but it got 67 of 146 terms on the synthetic
+    /// set where v3 got 124. Phonon-2.5 English (Core ML) got 60.
     public static let all = [parakeetV3, parakeetUltra]
 
     /// The model of a stored choice; the default for none, or for an id the list does not have.
