@@ -18,6 +18,8 @@ final class PanelState: ObservableObject {
     @Published var captureLine: String?
     /// How the person's last input (⌥⇧Space) ended.
     @Published var inputLine: String?
+    /// How the person's last dictation (⌥⇧D) ended.
+    @Published var dictationLine: String?
     /// The mind switcher shows its list of minds. It closes with the panel.
     @Published var isSwitcherOpen = false
     /// Whether the list of what a mind did is open.
@@ -115,11 +117,14 @@ struct Panel: View {
                 Text("⌥⇧S captures: talk, click, hold ⇧ and move the pointer to draw. ⌥⇧S again sends it to the mind and copies its text for an agent.")
                 if let line = state.captureLine { Text("Last capture: \(line)").textSelection(.enabled) }
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("⌥⇧Space opens the input: type what you want, paste or drop files, choose the mind, Return sends.")
+                    Text("⌥⇧Space opens the input: talk or type what you want, paste or drop files, choose the mind, Return sends.")
                     Button("Open", action: openInput).buttonStyle(.link)
                 }
                 .padding(.top, 4)
                 if let line = state.inputLine { Text("Last input: \(line)").textSelection(.enabled) }
+                Text("Hold ⌥⇧D and talk: what you say is written where the cursor is, on this Mac, with the mind's word list. A short press keeps it on until the next press.")
+                    .padding(.top, 4)
+                if let line = state.dictationLine { Text("Last dictation: \(line)").textSelection(.enabled) }
             }
             .font(.caption)
             .foregroundStyle(.secondary)

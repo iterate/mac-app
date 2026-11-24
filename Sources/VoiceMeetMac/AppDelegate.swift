@@ -23,6 +23,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var capture: AnyObject?
     /// The person's input to a mind (⌥⇧Space).
     private let input = MindInput()
+    /// The person's dictation into the app in front (⌥⇧D).
+    private let dictation = Dictation()
+    /// The minds' word lists, for the speech model.
+    private let words = Words()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logRunStart()
@@ -87,12 +91,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.start()
         lend.isBusy = { [weak self] in
             (self?.model.microphone.isRunning ?? false) || (self?.model.isAnyCameraRunning ?? false) || (self?.isCapturing ?? false)
+                || (self?.dictation.isRunning ?? false) || (self?.input.isListening ?? false)
         }
         lend.onChange = { [weak self] in self?.stateDidChange() }
         lend.start()
         openAtLogin()
         startCapture()
         startInput()
+        startDictation()
         stateDidChange()
         watchForGrants()
 
@@ -171,10 +177,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 node: config.node, iterateBin: config.iterateBin, sender: sender,
                 minds: config.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) }, active: config.active)
         }
+        input.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
+        input.allow = { [weak self] permission in self?.guide(permission) }
         input.onChange = { [weak self] in self?.stateDidChange() }
         model.toggleInput = { [weak self] in self?.input.toggle() }
         let isRegistered = HotKey.register(.input, pressed: { [weak self] in self?.input.toggle() })
         log.info(isRegistered ? "input: \(HotKey.Combo.input.words) opens it" : "input: macOS refused the key \(HotKey.Combo.input.words)")
+    }
+
+    /// ⌥⇧D dictates into the app in front, with the word list of the mind this Mac is lent to
+    /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
+    private func startDictation() {
+        words.source = { [weak self] in
+            guard let config = self?.lend.config else { return nil }
+            let fetcher = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("words-fetch.mjs").path
+            return Words.Source(node: config.node, iterateBin: config.iterateBin, fetcher: fetcher)
+        }
+        for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
+        dictation.words = { [weak self] in self?.words.list(of: self?.lend.config?.active) ?? .empty }
+        dictation.allow = { [weak self] permission in self?.guide(permission) }
+        dictation.onChange = { [weak self] in self?.stateDidChange() }
+        let isRegistered = HotKey.register(.dictation, pressed: { [weak self] in self?.dictation.pressed() }, released: { [weak self] in self?.dictation.released() })
+        log.info(isRegistered ? "dictation: hold \(HotKey.Combo.dictation.words) and talk" : "dictation: macOS refused the key \(HotKey.Combo.dictation.words)")
     }
 
     private var isCapturing: Bool {
@@ -264,6 +288,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if banner != panelState.banner { panelState.banner = banner }
         if #available(macOS 15.0, *) { panelState.captureLine = (capture as? Capture)?.lastLine }
         if panelState.inputLine != input.lastLine { panelState.inputLine = input.lastLine }
+        if panelState.dictationLine != dictation.lastLine { panelState.dictationLine = dictation.lastLine }
         showLend()
     }
 

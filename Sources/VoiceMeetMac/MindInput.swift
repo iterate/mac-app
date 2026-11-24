@@ -1,5 +1,7 @@
 import AppKit
 import Combine
+import AVFoundation
+import SpeechText
 import SwiftUI
 import UniformTypeIdentifiers
 import VoiceMeetCore
@@ -17,11 +19,47 @@ final class MindInputModel: ObservableObject {
     @Published var mind: String?
     @Published var textHeight: CGFloat = MindInputModel.lineHeight
     @Published var isDropTargeted = false
+    /// The microphone of the bar: it listens when the bar opens, and its button turns it off.
+    @Published var voice: Voice = .off
+    let level = VoiceLevel()
+    /// The typed and the spoken words as one text, while the microphone is on.
+    var spoken: SpokenText?
     var send: () -> Void = {}
     var close: () -> Void = {}
+    var toggleMicrophone: () -> Void = {}
     /// The text view, for the keyboard's focus.
     weak var field: NSTextView?
     private var pictures = 0
+
+    enum Voice: Equatable {
+        case off
+        /// The speech model loads or downloads, 0 to 1. The microphone is open: what is said is kept.
+        case loading(Double)
+        case listening
+        /// The last words are written after the microphone closed.
+        case finishing
+        case failed(String)
+
+        var isOpen: Bool {
+            switch self {
+            case .loading, .listening: return true
+            case .off, .finishing, .failed: return false
+            }
+        }
+    }
+
+    /// The person changed the text by hand.
+    func edited(_ text: String) {
+        draft.text = text
+        spoken?.edited(text)
+    }
+
+    /// Everything said in this listening so far.
+    func heard(_ said: String) {
+        guard !draft.isSending else { return }
+        spoken?.heard(said)
+        if let text = spoken?.text, text != draft.text { draft.text = text }
+    }
 
     /// An input's id: its time and four random digits, as a capture's.
     static func newId() -> String {
@@ -104,8 +142,17 @@ final class MindInputModel: ObservableObject {
     }
 }
 
-/// THE INPUT: ⌥⇧Space in any app opens one bar. The person types what they want, pastes or drops
-/// files, chooses the mind, and presses Return (README, "Input").
+/// The microphone's loudness, apart from the bar's model: it changes many times a second.
+@MainActor
+final class VoiceLevel: ObservableObject {
+    @Published var level: Float = 0
+}
+
+/// THE INPUT: ⌥⇧Space in any app opens one bar. It listens at once: the person talks, types, or
+/// both, pastes or drops files, chooses the mind, and presses Return (README, "Input").
+///
+/// What is said is written on this Mac (`SpeechListener`, with the chosen mind's word list). The
+/// microphone is open only while the bar is open and has the keyboard, and its button turns it off.
 ///
 /// The bar closes at once. `bridge/input-send.mjs` puts the files into that mind's files and
 /// appends one event, `device/input-submitted`, to `/devices/<name>`, as the person (the iterate
@@ -128,6 +175,10 @@ final class MindInput {
     static let pasted = folder.appendingPathComponent("pasted")
 
     var destination: () -> Destination? = { nil }
+    /// The word list of a mind, for the speech model.
+    var words: (String?) -> WordList = { _ in .empty }
+    /// Opens the guide for a permission of macOS.
+    var allow: (Permission) -> Void = { _ in }
     var onChange: () -> Void = {}
     /// How the last input ended, for the panel.
     private(set) var lastLine: String?
@@ -138,12 +189,17 @@ final class MindInput {
     private var host: NSHostingView<MindInputBar>?
     private var changes: AnyCancellable?
     private var sendingTo = ""
+    private var listener: SpeechListener?
+    /// Counts the listenings, so that a late word of an old one changes nothing.
+    private var round = 0
+    var isListening: Bool { listener != nil }
     /// What the sender printed after its last whole line.
     private var pending = ""
 
     init() {
         model.send = { [weak self] in self?.submit() }
         model.close = { [weak self] in self?.close() }
+        model.toggleMicrophone = { [weak self] in self?.toggleMicrophone() }
     }
 
     /// ⌥⇧Space: open the bar, give it the keyboard when it is open without it, or close it.
@@ -153,7 +209,103 @@ final class MindInput {
     }
 
     private func close() {
+        // a closed bar never listens
+        stopListening(keepingLastWords: false)
         panel?.orderOut(nil)
+    }
+
+    // MARK: - The microphone
+
+    /// The bar's microphone button.
+    private func toggleMicrophone() {
+        switch model.voice {
+        case .loading, .listening: stopListening(keepingLastWords: true)
+        case .off, .failed: listen(asking: true)
+        case .finishing: break
+        }
+    }
+
+    /// Opens the microphone. `asking` is true for the person's own click: then a permission that
+    /// macOS refused opens its guide; the bar's own start only says so.
+    private func listen(asking: Bool) {
+        guard listener == nil, !model.draft.isSending, panel?.isVisible == true else { return }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] isGranted in
+                DispatchQueue.main.async { MainActor.assumeIsolated { if isGranted { self?.listen(asking: false) } } }
+            }
+            return
+        default:
+            model.voice = .failed("iterate may not use the microphone")
+            if asking { allow(.microphone) }
+            return
+        }
+        round += 1
+        let round = round
+        let listener = SpeechListener()
+        self.listener = listener
+        model.spoken = SpokenText(base: model.draft.text)
+        model.voice = SpeechModels.isOnDisk ? .listening : .loading(0)
+        model.level.level = 0
+        log.info("listening: on")
+        listener.start(words: words(model.mind)) { [weak self] event in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.heard(event, round: round) } }
+        }
+        onChange()
+    }
+
+    private func heard(_ event: SpeechListener.Event, round: Int) {
+        if case .note(let note) = event { return log.info("listening: \(note)") }
+        guard round == self.round, listener != nil else { return }
+        switch event {
+        case .loading(let progress):
+            if progress < 1 { model.voice = .loading(progress) }
+        case .listening:
+            if case .loading = model.voice { model.voice = .listening }
+        case .text(let said):
+            model.heard(said)
+        case .level(let level):
+            model.level.level = level
+        case .failed(let reason):
+            listener = nil
+            model.spoken = nil
+            model.voice = .failed(reason)
+            log.error("listening: \(reason)")
+            onChange()
+        case .note:
+            break
+        }
+    }
+
+    /// Closes the microphone. With `keepingLastWords` the words that were said last are still
+    /// written, and `then` runs after them.
+    private func stopListening(keepingLastWords: Bool, then: @escaping () -> Void = {}) {
+        guard let listener else {
+            if model.voice.isOpen { model.voice = .off }
+            return then()
+        }
+        self.listener = nil
+        round += 1
+        model.level.level = 0
+        log.info("listening: off")
+        guard keepingLastWords else {
+            listener.cancel()
+            model.spoken = nil
+            model.voice = .off
+            onChange()
+            return then()
+        }
+        model.voice = .finishing
+        Task { @MainActor in
+            let said = await listener.finish()
+            self.model.heard(said)
+            self.model.spoken = nil
+            if self.model.voice == .finishing { self.model.voice = .off }
+            self.onChange()
+            then()
+        }
     }
 
     private func show(takingKeys: Bool) {
@@ -174,6 +326,8 @@ final class MindInput {
         }
         guard takingKeys else { return panel.orderFrontRegardless() }
         panel.makeKeyAndOrderFront(nil)
+        // the bar starts by listening
+        listen(asking: false)
         focus()
         // at the first opening the text view may not be made yet: once more after the layout
         DispatchQueue.main.async { MainActor.assumeIsolated { self.focus() } }
@@ -199,6 +353,7 @@ final class MindInput {
         panel.isReleasedWhenClosed = false
         panel.isMovableByWindowBackground = true
         panel.cancelled = { [weak self] in self?.close() }
+        panel.microphone = { [weak self] in self?.toggleMicrophone() }
         panel.contentView = host
         self.panel = panel
         self.host = host
@@ -219,8 +374,14 @@ final class MindInput {
 
     // MARK: - Send
 
-    /// Return: the input goes to the chosen mind, and the bar closes.
+    /// Return: the input goes to the chosen mind, and the bar closes. The words that were said last
+    /// are written first.
     private func submit() {
+        guard model.voice != .finishing else { return }
+        stopListening(keepingLastWords: true) { [weak self] in self?.send() }
+    }
+
+    private func send() {
         guard let destination = destination(), let mind = destination.minds.first(where: { $0.mind == model.mind }) else {
             return model.draft.refuse("No mind is set up: add one in the panel under the 𝑖.")
         }
@@ -308,6 +469,7 @@ final class MindInput {
 /// has no Edit menu, which is where ⌘V, ⌘C, ⌘X, ⌘A and ⌘Z come from in other apps.
 private final class InputPanel: NSPanel {
     var cancelled: () -> Void = {}
+    var microphone: () -> Void = {}
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
@@ -331,6 +493,9 @@ private final class InputPanel: NSPanel {
             case "z": action = Selector(("undo:"))
             case "w":
                 cancelled()
+                return true
+            case "d":
+                microphone()
                 return true
             default: break
             }
@@ -363,7 +528,7 @@ struct MindInputBar: View {
                 mindMenu
                 ZStack(alignment: .topLeading) {
                     if model.draft.text.isEmpty {
-                        Text(model.mind == nil ? "Add a mind first" : "Tell \(title) what you want")
+                        Text(model.mind == nil ? "Add a mind first" : model.voice.isOpen ? "Talk or type: tell \(title) what you want" : "Tell \(title) what you want")
                             .font(.system(size: MindInputModel.fontSize))
                             .foregroundStyle(.tertiary)
                             .lineLimit(1)
@@ -372,6 +537,8 @@ struct MindInputBar: View {
                     InputTextView(model: model).frame(height: model.textHeight)
                 }
                 .padding(.top, 5)
+                MicrophoneButton(voice: model.voice, level: model.level, press: model.toggleMicrophone)
+                    .disabled(model.draft.isSending)
             }
             if !model.draft.attachments.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
@@ -386,7 +553,7 @@ struct MindInputBar: View {
                 status
                 Spacer(minLength: 12)
                 if !isFailed {
-                    Text("↩ sends · ⇧↩ new line · ⇥ next mind · ⌘V or drop a file · esc closes")
+                    Text("↩ sends · ⇧↩ new line · ⇥ next mind · ⌘V or drop a file · ⌘D microphone · esc closes")
                         .foregroundStyle(.tertiary)
                         .lineLimit(1)
                 }
@@ -460,6 +627,14 @@ struct MindInputBar: View {
                 Text("Sending to \(title)…")
             }
             .foregroundStyle(.secondary)
+        } else if case .loading(let progress) = model.voice {
+            Text(progress > 0 ? "Getting the speech model: \(Int(progress * 100))%. Talk now, it is kept." : "Loading the speech model. Talk now, it is kept.")
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        } else if case .failed(let reason) = model.voice {
+            Label("Not listening: \(reason)", systemImage: "mic.slash")
+                .foregroundStyle(.orange)
+                .lineLimit(1)
         } else if let mind = model.mind {
             Text("To \(title) · \(mind)")
                 .foregroundStyle(.secondary)
@@ -468,6 +643,41 @@ struct MindInputBar: View {
             Text("No mind is set up: add one in the panel under the 𝑖.")
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+/// The bar's microphone: red with the loudness while it listens, and a click turns it off or on.
+private struct MicrophoneButton: View {
+    let voice: MindInputModel.Voice
+    @ObservedObject var level: VoiceLevel
+    let press: () -> Void
+
+    var body: some View {
+        Button(action: press) {
+            HStack(spacing: 5) {
+                switch voice {
+                case .listening:
+                    LevelBars(level: level.level)
+                    Image(systemName: "mic.fill").foregroundStyle(.red)
+                case .loading:
+                    ProgressView().controlSize(.small)
+                    Image(systemName: "mic.fill").foregroundStyle(.red)
+                case .finishing:
+                    ProgressView().controlSize(.small)
+                    Image(systemName: "mic").foregroundStyle(.secondary)
+                case .off, .failed:
+                    Image(systemName: "mic.slash").foregroundStyle(.secondary)
+                }
+            }
+            .font(.system(size: 15))
+            .frame(height: 28)
+            .padding(.horizontal, 8)
+            .background(Color.primary.opacity(voice.isOpen ? 0.08 : 0.04), in: Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .fixedSize()
+        .help(voice.isOpen ? "The microphone is on: what you say is written here, on this Mac. Click to turn it off (⌘D)." : "The microphone is off. Click to talk (⌘D).")
     }
 }
 
@@ -573,7 +783,7 @@ private struct InputTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let field = notification.object as? NSTextView else { return }
-            model.draft.text = field.string
+            model.edited(field.string)
             measure(field)
         }
 
@@ -628,6 +838,9 @@ private struct InputTextView: NSViewRepresentable {
         field.isEditable = !model.draft.isSending
         guard field.string != model.draft.text else { return }
         field.string = model.draft.text
+        // spoken words came in: the cursor stays after them
+        field.setSelectedRange(NSRange(location: (field.string as NSString).length, length: 0))
+        field.scrollRangeToVisible(field.selectedRange())
         let coordinator = context.coordinator
         DispatchQueue.main.async { MainActor.assumeIsolated { coordinator.measure(field) } }
     }
@@ -642,11 +855,15 @@ extension MindInput {
         let minds = Panel.sampleLend(nil).minds
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var drawn = true
-        for state in ["empty", "filled", "sending", "failed"] {
+        for state in ["empty", "listening", "filled", "sending", "failed"] {
             let model = MindInputModel()
             model.minds = minds
             model.mind = minds.first?.mind
-            if state != "empty" {
+            if state == "empty" || state == "listening" { model.voice = .listening }
+            if state == "listening" {
+                model.level.level = 0.7
+                model.draft.text = "Open the roadmap on Misha's computer and tell him"
+            } else if state != "empty" {
                 model.draft.text = "Open the roadmap on Misha's computer, and tell him why.\nThe two files are what I mean."
                 model.draft.attach(name: "Roadmap 2027.pdf", local: "/tmp/Roadmap 2027.pdf", bytes: 2_200_000, contentType: "application/pdf")
                 model.draft.attach(name: "Pasted picture 14.02.11 1.png", local: "/tmp/Pasted picture 14.02.11 1.png", bytes: 35_000, contentType: "image/png")

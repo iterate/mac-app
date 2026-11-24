@@ -4,6 +4,7 @@ import PackageDescription
 var products: [Product] = [
     .library(name: "VoiceMeetCore", targets: ["VoiceMeetCore"]),
 ]
+var dependencies: [Package.Dependency] = []
 var targets: [Target] = [
     .target(name: "VoiceMeetCore"),
     .testTarget(name: "VoiceMeetCoreTests", dependencies: ["VoiceMeetCore"]),
@@ -13,7 +14,12 @@ var targets: [Target] = [
 // the package is VoiceMeetCore and its tests.
 #if os(macOS)
 products.append(.executable(name: "VoiceMeetMac", targets: ["VoiceMeetMac"]))
-targets.append(.executableTarget(name: "VoiceMeetMac", dependencies: ["VoiceMeetCore", "Record", "Live"]))
+targets.append(.executableTarget(name: "VoiceMeetMac", dependencies: ["VoiceMeetCore", "Record", "Live", "SpeechText"]))
+// Speech: the microphone as text, on this Mac (README.md, "Dictation"). Everything that touches the
+// speech model is here. The model is NVIDIA's Parakeet as Core ML, through FluidAudio, the library
+// that the Swift app Hex used.
+dependencies.append(.package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.18.4"))
+targets.append(.target(name: "SpeechText", dependencies: ["VoiceMeetCore", .product(name: "FluidAudio", package: "FluidAudio")]))
 // The recorder: screens, cameras, microphones and speakers into 30-second files in a spool
 // (README.md, "The record"). `record-run` drives it from a terminal, for tests.
 targets.append(.target(name: "Record"))
@@ -37,5 +43,6 @@ let package = Package(
     // macOS 14.0 is the first with SCContentSharingPicker and with the control of ducking.
     platforms: [.macOS(.v14)],
     products: products,
+    dependencies: dependencies,
     targets: targets
 )

@@ -16,16 +16,22 @@ enum HotKey {
         static let capture = Combo(id: 1, key: kVK_ANSI_S, modifiers: optionKey | shiftKey, words: "⌥⇧S")
         /// Opens the input to a mind (`MindInput`).
         static let input = Combo(id: 2, key: kVK_Space, modifiers: optionKey | shiftKey, words: "⌥⇧Space")
+        /// Dictates into the app in front (`Dictation`).
+        static let dictation = Combo(id: 3, key: kVK_ANSI_D, modifiers: optionKey | shiftKey, words: "⌥⇧D")
     }
 
     private static var pressed: [UInt32: () -> Void] = [:]
+    private static var released: [UInt32: () -> Void] = [:]
     private static var isInstalled = false
 
     /// False when macOS refuses the key.
-    static func register(_ combo: Combo, pressed: @escaping () -> Void) -> Bool {
+    static func register(_ combo: Combo, pressed: @escaping () -> Void, released: (() -> Void)? = nil) -> Bool {
         if !isInstalled {
             isInstalled = true
-            var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
+            let specs = [
+                EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
+                EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
+            ]
             InstallEventHandler(
                 GetApplicationEventTarget(),
                 { _, event, _ in
@@ -35,11 +41,13 @@ enum HotKey {
                         MemoryLayout<EventHotKeyID>.size, nil, &hotKey)
                     guard status == noErr else { return status }
                     let id = hotKey.id
-                    DispatchQueue.main.async { MainActor.assumeIsolated { HotKey.pressed[id]?() } }
+                    let isRelease = GetEventKind(event) == UInt32(kEventHotKeyReleased)
+                    DispatchQueue.main.async { MainActor.assumeIsolated { (isRelease ? HotKey.released[id] : HotKey.pressed[id])?() } }
                     return noErr
-                }, 1, &spec, nil, nil)
+                }, specs.count, specs, nil, nil)
         }
         self.pressed[combo.id] = pressed
+        self.released[combo.id] = released
         var key: EventHotKeyRef?
         // the signature is "itxc"
         let id = EventHotKeyID(signature: 0x6974_7863, id: combo.id)
