@@ -16,6 +16,8 @@ final class PanelState: ObservableObject {
     @Published var banner: Banner?
     /// How the person's last capture (⌥⇧S) ended.
     @Published var captureLine: String?
+    /// How the person's last input (⌥⇧Space) ended.
+    @Published var inputLine: String?
     /// The mind switcher shows its list of minds. It closes with the panel.
     @Published var isSwitcherOpen = false
     /// Whether the list of what a mind did is open.
@@ -67,6 +69,8 @@ struct Panel: View {
     let copyPrompt: () -> Void
     /// The person presses a button of the banner (its index), or closes it (nil).
     var pressBanner: (Int?) -> Void = { _ in }
+    /// The person opens the input from the panel, as ⌥⇧Space does.
+    var openInput: () -> Void = {}
     var lendActions = LendActions()
     /// The height the scrolling middle needs; it is at most `middleMaxHeight`.
     @State private var middleHeight: CGFloat = 400
@@ -110,6 +114,12 @@ struct Panel: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("⌥⇧S captures: talk, click, hold ⇧ and move the pointer to draw. ⌥⇧S again sends it to the mind and copies its text for an agent.")
                 if let line = state.captureLine { Text("Last capture: \(line)").textSelection(.enabled) }
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("⌥⇧Space opens the input: type what you want, paste or drop files, choose the mind, Return sends.")
+                    Button("Open", action: openInput).buttonStyle(.link)
+                }
+                .padding(.top, 4)
+                if let line = state.inputLine { Text("Last input: \(line)").textSelection(.enabled) }
             }
             .font(.caption)
             .foregroundStyle(.secondary)

@@ -21,6 +21,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var camerasHeldByThePanel: Set<String> = []
     /// The person's own capture (⌥⇧S). It needs macOS 15: nil before.
     private var capture: AnyObject?
+    /// The person's input to a mind (⌥⇧Space).
+    private let input = MindInput()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logRunStart()
@@ -41,6 +43,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             pressBanner: { [weak self] index in
                 self?.popover.performClose(nil)
                 if let index { self?.model.banners.press(index) } else { self?.model.banners.dismiss() }
+            },
+            openInput: { [weak self] in
+                self?.popover.performClose(nil)
+                self?.input.toggle()
             },
             lendActions: LendActions(
                 reconnect: { [weak self] in self?.lend.reconnectNow() },
@@ -86,6 +92,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         lend.start()
         openAtLogin()
         startCapture()
+        startInput()
         stateDidChange()
         watchForGrants()
 
@@ -149,10 +156,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return Capture.Destination(node: config.node, iterateBin: config.iterateBin, uploader: uploader, mind: mind.mind, name: mind.name)
         }
         self.capture = capture
-        CaptureHotKey.pressed = { capture.toggle() }
         model.toggleCapture = { capture.toggle() }
         model.markCapture = { capture.mark($0) }
-        log.info(CaptureHotKey.register() ? "capture: ⌥⇧S starts and ends one" : "capture: macOS refused the key ⌥⇧S")
+        let isRegistered = HotKey.register(.capture, pressed: { capture.toggle() })
+        log.info(isRegistered ? "capture: ⌥⇧S starts and ends one" : "capture: macOS refused the key ⌥⇧S")
+    }
+
+    /// ⌥⇧Space opens the input: a text and files, to one of the minds this Mac knows (`MindInput`).
+    private func startInput() {
+        input.destination = { [weak self] in
+            guard let config = self?.lend.config else { return nil }
+            let sender = URL(fileURLWithPath: config.bridge).deletingLastPathComponent().appendingPathComponent("input-send.mjs").path
+            return MindInput.Destination(
+                node: config.node, iterateBin: config.iterateBin, sender: sender,
+                minds: config.minds.map { LendView.Mind(mind: $0.mind, name: $0.name) }, active: config.active)
+        }
+        input.onChange = { [weak self] in self?.stateDidChange() }
+        model.toggleInput = { [weak self] in self?.input.toggle() }
+        let isRegistered = HotKey.register(.input, pressed: { [weak self] in self?.input.toggle() })
+        log.info(isRegistered ? "input: ⌥⇧Space opens it" : "input: macOS refused the key ⌥⇧Space")
     }
 
     private var isCapturing: Bool {
@@ -241,6 +263,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let banner = model.banners.state.showing
         if banner != panelState.banner { panelState.banner = banner }
         if #available(macOS 15.0, *) { panelState.captureLine = (capture as? Capture)?.lastLine }
+        if panelState.inputLine != input.lastLine { panelState.inputLine = input.lastLine }
         showLend()
     }
 

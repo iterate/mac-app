@@ -1,30 +1,8 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
-import Carbon.HIToolbox
 import ScreenCaptureKit
 import SwiftUI
-
-/// ⌥⇧S in any app: a Carbon hot key, which needs no permission of macOS.
-@MainActor
-enum CaptureHotKey {
-    static var pressed: () -> Void = {}
-
-    /// False when macOS refuses the key.
-    static func register() -> Bool {
-        var spec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(
-            GetApplicationEventTarget(),
-            { _, _, _ in
-                DispatchQueue.main.async { MainActor.assumeIsolated { CaptureHotKey.pressed() } }
-                return noErr
-            }, 1, &spec, nil, nil)
-        var key: EventHotKeyRef?
-        // the signature is "itxc"
-        let id = EventHotKeyID(signature: 0x6974_7863, id: 1)
-        return RegisterEventHotKey(UInt32(kVK_ANSI_S), UInt32(optionKey | shiftKey), id, GetApplicationEventTarget(), 0, &key) == noErr
-    }
-}
 
 /// What the pill at the top of the display says.
 @MainActor

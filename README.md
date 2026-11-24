@@ -140,7 +140,7 @@ Three parts are what a thing lent to a mind from a Mac needs; keep them:
 For a minimal app, delete the things it shares and their methods in `AppModel.swift` and the
 bridge: `Camera.swift` and `CameraState.swift`, `AudioOwner.swift`, `AudioDevices.swift` and
 `MicrophoneState.swift`, `Speaker.swift`, `Banner.swift` and `BannerState.swift`, `Powers.swift`
-(screen, window text, commands), `Capture.swift` and `bridge/capture-upload.mjs`, `Presence.swift`, and their tests; `swift build` then names what
+(screen, window text, commands), `Capture.swift` and `bridge/capture-upload.mjs`, `MindInput.swift`, `InputDraft.swift` and `bridge/input-send.mjs`, `Presence.swift`, and their tests; `swift build` then names what
 still refers to them, in the panel and the app's delegate. Then add your own method: a
 case in `AppModel.swift`, a function in the bridge, a line in its description.
 
@@ -261,6 +261,7 @@ again:
 | `record/slot-stored`      | While a switch under **Record** is on: once for each 30 seconds, after its files are in the mind                                                                        | `t`, `tracks` (below)                                         |
 | `device/live-watch-started` | A member's page began to watch this Mac live (below, "Live")                                                                                                          | `watcher`, `who`, `tracks`                                    |
 | `device/live-watch-ended` | The watch ended                                                                                                                                                         | `watcher`, `who`, `seconds`, `why`                            |
+| `device/input-submitted`  | You sent an input with ⌥⇧Space (below, "Input"). It goes to the mind you chose, which need not be the one this Mac is lent to                                             | `id`, `text`, `at`, `files`                                   |
 
 A key event holds the key itself, so what you type goes to the mind, a password too. Keyboard and
 mouse is off until you turn it on. Its events are ephemeral: they reach whoever listens at that
@@ -434,6 +435,49 @@ network, the capture stays in `~/Library/Application Support/iterate-mac-app/cap
 text on the clipboard names the files there, and the panel says why; send it later with
 `node bridge/capture-upload.mjs <folder> --finish --iterate <iterate.js> --mind <mind>`.
 
+## Input: type what you want to a mind
+
+Press **⌥⇧Space** in any app (or **Open** at the bottom of the panel). One bar opens: type what you
+want, and press **Return**. That is all the bar knows: it has no commands and no list of actions.
+What happens with your words is the mind's own matter.
+
+- **Files.** **⌘V** adds the files on the clipboard, or a picture that is there with no file (a
+  screenshot); text on the clipboard goes into the text. Drop files on the bar from any app: the
+  bar stays open while another app is in front. Each file is a chip with its size and a ×; Delete
+  in an empty text takes the last one away. At most 20 files, each at most 500 MB; a folder is
+  refused.
+- **The mind.** The face at the left is the mind the input goes to. A click lists the minds this
+  Mac knows (the panel's mind switcher adds and removes them); **Tab** chooses the next one. The
+  bar starts with the mind you chose last, else the one this Mac is lent to. The choice changes
+  nothing of the lend: an input can go to a mind this Mac is not lent to.
+- **Keys.** ⇧Return and ⌥Return make a new line. Escape closes the bar and keeps what you wrote;
+  ⌥⇧Space opens it again.
+
+Return closes the bar at once. The input goes up as you, as a capture does: `bridge/input-send.mjs`
+uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
+(no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
+reason, and Return sends the same input again. The panel's last line says how the last one ended.
+
+**What the mind gets.** Each file is a file of the mind, and then ONE event is on the context
+`/devices/<name>` (the name of this Mac in that mind):
+
+```
+/devices/<name>/inputs/<id>/<n>-<file name>
+
+device/input-submitted {
+  id: "20261124T140211Z-3fa9",
+  text: "Open the roadmap on Misha's computer",
+  at: "2026-11-24T14:02:11Z",
+  files: [{ path: "/devices/jane.mac/inputs/…/1-Roadmap.pdf", name: "Roadmap.pdf", contentType: "application/pdf", bytes: 2200000 }]
+}
+```
+
+The event has the idempotency key `device/input-submitted/<id>`, so an input that is sent twice is
+in the mind once. **The event is the whole contract.** A mind that does nothing with it keeps it in
+the device's log. To act on it, the mind's config handles that event type (for example: start an
+agent with the text and the files as its first message). Which agent or model answers is the
+mind's choice, and it can change with no new build of this app.
+
 ## How it works
 
 - **The app** (`Sources/`) holds macOS's permissions: Screen Recording, Accessibility, Camera and
@@ -471,7 +515,7 @@ script of the bridge parses, and the bridges' tests pass (`node --test 'bridge/*
 ./run-on-mac.sh               # build, install in /Applications, open, follow the logs
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
-swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live
+swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live, the input's draft
 node --test 'bridge/*.test.mjs'  # the bridges' tests: a fake mind that ends sessions (1008) and subscriptions
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
@@ -479,6 +523,7 @@ npx . init /tmp/mac --no-install   # a copy, without building or installing it
 
 `printf '{"method":"capture.toggle"}\n' | nc -U ~/Library/Application\ Support/voice-meet-mac/endpoint.sock`
 does what ⌥⇧S does, from a script on this Mac; the bridge lends no such call to a mind.
+`{"method":"input.toggle"}` does what ⌥⇧Space does.
 
 A script can also draw a mark in the capture that runs, for a test with no hand:
 `{"method":"capture.mark","points":[[x,y],…]}` (points of the display from its top left).
@@ -501,4 +546,5 @@ anything. A third word draws the lend in one phase: `live`, `reconnecting`, `sto
 `not-allowed`; `ringing` draws a call's banner at the top. `--render-banner banner.png ring`
 draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearance);
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
-closed and open, light and dark, four files.
+closed and open, light and dark, four files. `--render-input <folder>` draws the input bar: empty, with
+a text and files, while it sends and not sent, light and dark, eight files.
