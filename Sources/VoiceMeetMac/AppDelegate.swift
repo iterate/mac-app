@@ -159,7 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.toggleCapture = { capture.toggle() }
         model.markCapture = { capture.mark($0) }
         let isRegistered = HotKey.register(.capture, pressed: { capture.toggle() })
-        log.info(isRegistered ? "capture: ⌥⇧S starts and ends one" : "capture: macOS refused the key ⌥⇧S")
+        log.info(isRegistered ? "capture: \(HotKey.Combo.capture.words) starts and ends one" : "capture: macOS refused the key \(HotKey.Combo.capture.words)")
     }
 
     /// ⌥⇧Space opens the input: a text and files, to one of the minds this Mac knows (`MindInput`).
@@ -174,7 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         input.onChange = { [weak self] in self?.stateDidChange() }
         model.toggleInput = { [weak self] in self?.input.toggle() }
         let isRegistered = HotKey.register(.input, pressed: { [weak self] in self?.input.toggle() })
-        log.info(isRegistered ? "input: ⌥⇧Space opens it" : "input: macOS refused the key ⌥⇧Space")
+        log.info(isRegistered ? "input: \(HotKey.Combo.input.words) opens it" : "input: macOS refused the key \(HotKey.Combo.input.words)")
     }
 
     private var isCapturing: Bool {

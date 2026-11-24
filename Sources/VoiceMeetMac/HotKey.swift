@@ -9,14 +9,14 @@ enum HotKey {
         let id: UInt32
         let key: Int
         let modifiers: Int
-        /// The key in words, for the log and the panel.
+        /// The key in words, for the log.
         let words: String
-    }
 
-    /// Starts the person's capture and ends it (`Capture`).
-    static let capture = Combo(id: 1, key: kVK_ANSI_S, modifiers: optionKey | shiftKey, words: "⌥⇧S")
-    /// Opens the input to a mind (`MindInput`).
-    static let input = Combo(id: 2, key: kVK_Space, modifiers: optionKey | shiftKey, words: "⌥⇧Space")
+        /// Starts the person's capture and ends it (`Capture`).
+        static let capture = Combo(id: 1, key: kVK_ANSI_S, modifiers: optionKey | shiftKey, words: "⌥⇧S")
+        /// Opens the input to a mind (`MindInput`).
+        static let input = Combo(id: 2, key: kVK_Space, modifiers: optionKey | shiftKey, words: "⌥⇧Space")
+    }
 
     private static var pressed: [UInt32: () -> Void] = [:]
     private static var isInstalled = false
