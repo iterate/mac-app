@@ -233,6 +233,38 @@ const scenarios = {
     },
   },
 
+  /**
+   * An act is two events on the device's context, and the log shows it once: the row made at
+   * once, then the same row as the context echoes it.
+   */
+  async activity({ app, home }) {
+    const sent = withMind(home);
+    execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "shared"]);
+    const run = await start(app, home);
+    try {
+      await until("the session", 10, async () => (await run.state()).session);
+      await run.endpoint("run", { argv: ["/bin/echo", "an act"] });
+      const started = await until("device/act-started in the fake mind", 30, () => sent().find((e) => e.type === "device/act-started"));
+      const { act } = started.payload;
+      if (started.path !== `/devices/${NAME}` || started.payload.thing !== "commands" || started.payload.doing !== "Running a command")
+        throw new Error(`the mind got ${JSON.stringify(started)}`);
+      if (started.idempotencyKey !== `device/act-started/${act}`) throw new Error(`the key is ${started.idempotencyKey}`);
+      const ended = await until("device/act-ended in the fake mind", 30, () => sent().find((e) => e.type === "device/act-ended"));
+      if (ended.payload.act !== act || ended.payload.did !== "Ran a command" || "failure" in ended.payload)
+        throw new Error(`the mind got ${JSON.stringify(ended)}`);
+      const activity = await until("the row in the mind", 30, async () => {
+        const activity = (await run.state()).activity;
+        return activity.entries.some((row) => row.act === act && row.inMind) && activity;
+      });
+      const rows = activity.entries.filter((row) => row.act === act);
+      if (rows.length !== 1 || activity.entries.length !== 1 || rows[0].did !== "Ran a command" || rows[0].running)
+        throw new Error(`the activity is ${JSON.stringify(activity.entries)}`);
+      if (activity.context !== `/devices/${NAME}`) throw new Error(`the log's context is ${activity.context}`);
+    } finally {
+      await run.quit();
+    }
+  },
+
   /** A use whose choice is Ask waits for the answer: approved, it runs; denied, it is refused. */
   async approval({ app, home }) {
     execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "ask"]);

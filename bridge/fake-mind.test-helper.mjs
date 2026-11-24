@@ -1,5 +1,7 @@
 // A fake mind for the bridges' tests: connections that end as the mind ends them (1008), that
-// fail to connect, subscriptions that end with no word, appends that fail.
+// fail to connect, subscriptions that end with no word, appends that fail. Each appended event gets
+// an offset and a time; `readEvents` reads the kept ones of a path, a page at a time, and each
+// read is in `reads` as `{ after, events }`.
 export const SIGN_IN_ENDED = "1008 the sign-in for this session ended: authenticate again";
 
 export function fakeMind() {
@@ -11,6 +13,8 @@ export function fakeMind() {
     failNextAppend: undefined,
     waits: [],
     clock: 0,
+    offset: 0,
+    reads: [],
   };
   mind.sleep = (ms) => {
     mind.waits.push(ms);
@@ -51,9 +55,21 @@ export function fakeMind() {
             mind.failNextAppend = undefined;
             throw error;
           }
-          mind.appended.push(...events);
-          mind.deliver(events, connection);
-          return events;
+          const stored = events.map((event) => ({
+            ...event,
+            path,
+            offset: ++mind.offset,
+            createdAt: new Date(Date.UTC(2026, 10, 24, 14) + mind.offset * 1000).toISOString(),
+          }));
+          mind.appended.push(...stored);
+          mind.deliver(stored, connection);
+          return stored;
+        },
+        async readEvents(afterOffset = 0, limit = 1000) {
+          const kept = mind.appended.filter((e) => e.path === path && !e.ephemeral && e.offset > afterOffset);
+          const events = kept.slice(0, limit);
+          mind.reads.push({ after: afterOffset, events: events.length });
+          return { events, scannedThroughOffset: events.at(-1)?.offset ?? mind.offset, atHead: events.length === kept.length };
         },
         async subscribe({ name, consumes, target }) {
           const subscription = { name, consumes, target, connection, alive: true };

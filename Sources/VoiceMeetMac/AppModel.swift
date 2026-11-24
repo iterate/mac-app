@@ -24,7 +24,8 @@ final class AppModel {
     let banners = Banners()
     /// The person's approvals, for things whose choice is "Ask".
     let approval = Approval()
-    /// What a mind did with this Mac, for the pill on the screen and the panel's list.
+    /// What a mind did with this Mac, for the pill on the screen and the panel's list: a view of
+    /// the device's context, whose events go and come back through `deviceEvents`.
     let acts = ActivityLog()
     /// What this Mac tells its mind about itself: presence, and keyboard and mouse when shared.
     let deviceEvents = DeviceEvents()
@@ -58,6 +59,8 @@ final class AppModel {
     func start() {
         endpoint.start()
         deviceEvents.readPresence = { Self.presence() }
+        acts.publish = { [weak self] fact in self?.deviceEvents.publish(fact.type, fact.payload, ephemeral: false, idempotencyKey: fact.idempotencyKey) }
+        deviceEvents.heard = { [weak self] event in self?.acts.heard(event) }
         deviceEvents.start()
         deviceWindow.publish = { [weak self] type, payload in self?.deviceEvents.publish(type, payload, ephemeral: false) }
         deviceWindow.isLent = { [weak self] in self?.deviceEvents.path != nil }
@@ -76,7 +79,7 @@ final class AppModel {
             self.record.tick()
         }
         live.began = { [weak self] who, tracks in
-            self?.acts.began(.live, doing: "Watched live by \(who)", did: "Watched live by \(who)", detail: LiveSection.words(tracks)) ?? 0
+            self?.acts.began(.live, doing: "Watched live by \(who)", did: "Watched live by \(who)", detail: LiveSection.words(tracks)) ?? ""
         }
         live.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
         record.start()
@@ -96,7 +99,7 @@ final class AppModel {
         deviceEvents.use(session)
         live.use(session)
         record.use(session)
-        acts.mind = session?.mind
+        acts.use(session)
         deviceEvents.tick()
         live.tick()
         record.tick()
