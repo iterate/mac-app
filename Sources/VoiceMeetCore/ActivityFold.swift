@@ -85,7 +85,7 @@ public struct ContextEvent: Equatable, Sendable {
         self.offset = offset
     }
 
-    /// An event as the device-events bridge writes it: `{ type, payload, offset, createdAt }`.
+    /// An event as the job `events` of `bridge/mind.mjs` says it: `{ type, payload, offset, createdAt }`.
     public init?(json: [String: Any]) {
         guard let type = json["type"] as? String, let payload = json["payload"] as? [String: Any],
             let fact = DeviceFact(type: type, payload: payload), let offset = json["offset"] as? Int,

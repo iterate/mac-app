@@ -195,7 +195,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         speech.log = { speechLog.info($0) }
         speechChoice.onChange = { [weak self] in self?.stateDidChange() }
         speechChoice.allowAccessibility = { [weak self] in self?.guide(.accessibility) }
-        words.helpers = { [weak self] in self?.lend.helpers }
+        words.bridge = { [weak self] mind in
+            guard let helpers = self?.lend.helpers, let known = self?.lend.config?.minds.first(where: { $0.mind == mind }) else { return nil }
+            return MindBridge.of(mind: mind, name: known.name, helpers: helpers)
+        }
         for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }

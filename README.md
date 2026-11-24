@@ -81,7 +81,8 @@ This Mac can know several minds, each with its own key (`keys/<mind>.key`). The 
 one of them, the active one. The top of the panel is the mind switcher: the active mind's icon
 (with the lend's dot), its name, its address and this Mac's name there. A click lists the minds,
 with a check mark on the active one, then **Add a Mind…** and **Remove a Mind…**. It does the same
-as these commands:
+as these commands (a switch and a removal the app writes into config.json itself, as the CLI does;
+**Add a Mind…** runs the CLI's `add`):
 
 ```sh
 npx @iterate-com/mac-app list                                      # the minds; * marks the active one
@@ -149,7 +150,9 @@ Three parts are what a thing lent to a mind from a Mac needs; keep them:
 For a minimal app, delete the things it shares and their methods in `AppModel.swift` and the
 bridge: `Camera.swift` and `CameraState.swift`, `AudioOwner.swift`, `AudioDevices.swift` and
 `MicrophoneState.swift`, `Speaker.swift`, `Banner.swift` and `BannerState.swift`, `Powers.swift`
-(screen, window text, commands), `Capture.swift` and `bridge/capture-upload.mjs`, `MindInput.swift`, `InputDraft.swift` and `bridge/input-send.mjs`, `Presence.swift`, and their tests; `swift build` then names what
+(screen, window text, commands), `Capture.swift` and `bridge/capture.mjs`, `MindInput.swift`,
+`InputDraft.swift` and `bridge/input.mjs`, `Presence.swift`, and their tests (and their jobs in
+`bridge/mind.mjs`); `swift build` then names what
 still refers to them, in the panel and the app's delegate. Then add your own method: a
 case in `AppModel.swift`, a function in the bridge, a line in its description.
 
@@ -246,8 +249,8 @@ Each act of a mind with this Mac shows twice:
 
 The list is a view of the device's context in the mind (below), not a store of the app. Each act
 is two kept events there, `device/act-started` and `device/act-ended`, by one act id; the list
-folds them by act into one row (`ActivityFold` in `VoiceMeetCore`). The device-events bridge reads
-the context back, those types alone: it subscribes to them, and when it connects it reads the log
+folds them by act into one row (`ActivityFold` in `VoiceMeetCore`). The job `events` of the mind's
+process (below, "How it works") reads the context back, those types alone: it subscribes to them, and when it connects it reads the log
 backwards, 500 offsets a page, until it has 50 acts, at most 10 pages (5,000 offsets). Every other
 event (most of the log is keys and moves) is dropped as its page comes, and the bridge keeps only
 the offsets of the last 200 events it told. An act of this Mac shows
@@ -264,9 +267,10 @@ An act that was refused (the thing is off, or you said no) is no act and shows i
 ## What the Mac tells its mind: `/devices/<name>`
 
 A lent Mac has a context of its own in the mind, `/devices/<name>`, with the name of its lend
-(`itx.<name>`). The app adds events there, through `bridge/device-events.mjs`, as you (the iterate
-CLI's own sign-in; the Mac's key lends and does nothing else). When that connection ends (a
-session's sign-in lasts 4 hours, a network goes), the bridge connects again
+(`itx.<name>`). The app adds events there, through the job `events` of the mind's process
+(`bridge/events.mjs`), as you (the iterate CLI's own sign-in; the Mac's key lends and does nothing
+else). When that connection ends (a session's sign-in lasts 4 hours, a network goes), it connects
+again
 (`bridge/mind-connection.mjs`: 1 s, then twice as long, at most 60 s); the events wait meanwhile
 (at most 2,000: the oldest moves and keys go first), go up in order, and the app says its presence
 again:
@@ -335,10 +339,10 @@ the screens.
 
 The recorder (`Sources/Record`) writes each slot's files into a spool on this Mac first
 (`~/Library/Application Support/iterate-mac-app/record/<mind>/`, a file's path there is its path
-in the mind), and `slots/<t>.json` once every track of the slot has closed. `bridge/record-upload.mjs`
-takes the slots oldest first: it puts each file into the mind by a signed upload link
-(`itx.r2.presign`, the links of a slot asked for in one go; the file streams from disk, so no
-byte of it passes through the connection), then appends `record/slot-stored`
+in the mind), and `slots/<t>.json` once every track of the slot has closed. The job `record` of the
+mind's process (`bridge/record.mjs`) takes the slots oldest first: it puts each file into the mind
+by a signed upload link (`bridge/upload.mjs`: the links of a slot asked for in one go; the file
+streams from disk, so no byte of it passes through the connection), then appends `record/slot-stored`
 to `/devices/<name>` with the idempotency key `record/slot-stored/<t>`, then deletes the slot from
 the spool. So an event never names a file that is not there. With no network the spool waits (up
 to 5 GB; then the oldest slots go). The event's payload is `{ t, tracks: { <track>: { kind, file,
@@ -381,10 +385,10 @@ and `mac.live.end({ watcher })`. A watch starts only from a page.
 How it is built: `Sources/Live` holds everything that touches WebRTC (LiveKit's build of WebRTC,
 a binary target of `Package.swift`, carried in the bundle's `Contents/Frameworks`). `LivePeer` is
 the sink and one peer connection per watcher; the signalling's rules are `LiveWatchers` in
-`VoiceMeetCore`, tested on their own. `bridge/device-live.mjs` connects to the mind as you,
-subscribes to `device/live-signal`, appends the Mac's signals in order, and asks the facet
-`record` for the ICE servers (STUN alone when it has none). It connects again when its connection
-ends, and once a minute it checks that its subscription still hears (an ephemeral
+`VoiceMeetCore`, tested on their own. The job `live` of the mind's process (`bridge/live.mjs`), on
+its connection as you, subscribes to `device/live-signal`, appends the Mac's signals in order, and
+asks the facet `record` for the ICE servers (STUN alone when it has none). It subscribes again on
+each new connection, and once a minute it checks that its subscription still hears (an ephemeral
 `device/live-ping` that only it hears); watches that run go on through a reconnect, peer to peer.
 
 ## Capture: show an agent what you mean
@@ -452,11 +456,18 @@ path, with two events: `capture/ready` (the words, the marks and the pictures ar
 **The word list.** The capture uses the mind's `words.md`, the one list of dictation and the input
 ("Dictation" below): its terms are listened for, and its wrong forms are written as the terms.
 
-The Mac's key only lends, so the capture goes up as you: `bridge/capture-upload.mjs` uses the
-iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). With no sign-in, or no
-network, the capture stays in `~/Library/Application Support/iterate-mac-app/captures/<id>/` with
-its `transcript.json`, the text on the clipboard names the files there, and the panel says why;
-send it later with `node bridge/capture-upload.mjs <folder> --finish --iterate <iterate.js> --mind <mind>`.
+The Mac's key only lends, so the capture goes up as you: the job `capture` of that mind's process
+(`bridge/capture.mjs`) uses the iterate CLI's own sign-in to it (`iterate login <mind>`, once). A
+capture keeps its mind: when the Mac is lent to another mind before it is sent, it still goes to
+the one it began with. With no sign-in, or no network, the capture stays in
+`~/Library/Application Support/iterate-mac-app/captures/<id>/` with its `transcript.json`, the text
+on the clipboard names the files there, and the panel says why. Send it later with one line on a
+process for that mind:
+
+```sh
+echo '{"job":"capture","capture":"<id>","folder":"<folder>","finish":true}' \
+  | node bridge/mind.mjs <mind> --name <name> --iterate <iterate.js>
+```
 
 ## Input: say or type what you want to a mind
 
@@ -484,8 +495,8 @@ and no list of actions. What happens with your words is the mind's own matter.
   ⌥⇧Space opens it again.
 
 Return closes the bar at once. One input goes at a time: while it goes, the bar shows it and takes
-no new one. The input goes up as you, as a capture does: `bridge/input-send.mjs`
-uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
+no new one. The input goes up as you, as a capture does: the job `input` of that mind's process
+(`bridge/input.mjs`) uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
 (no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
 reason, and Return sends the same input again. The panel's last line says how the last one ended.
 
@@ -551,7 +562,7 @@ write", "hands-free · tap fn to stop").
 - **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
   `words.md`, at the root of its config repo: one list item for each term, and after a colon the
   wrong forms that a transcript showed (`- Templestein: temple stein, temple steen`). The app reads
-  that file as you (`bridge/words-fetch.mjs`, the iterate CLI's sign-in) and keeps a copy in
+  that file as you (the job `words` of the mind's process, `bridge/words.mjs`, the iterate CLI's sign-in) and keeps a copy in
   `~/Library/Application Support/iterate-mac-app/words/<mind>.md`, fetched again when it is older
   than ten minutes. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
   listens for the terms in what you said and puts a term in where the sound fits it; it works
@@ -575,8 +586,10 @@ one segment, with its times from the start.
   Microphone, each asked for by a guide in the panel when you first set a thing to Ask or Shared.
   It answers on a Unix socket in `~/Library/Application Support/voice-meet-mac/`, a folder only you
   can read.
-- **The bridge** (`bridge/mac-endpoint.ts`) is the file that `iterate provide` lends to the mind.
-  It turns each call into one request on that socket.
+- **The bridge** (`bridge/mac-endpoint.ts`) is the file that `iterate provide` lends to the mind,
+  with the Mac's key. It turns each call into one request on that socket.
+- **The mind's process** (`bridge/mind.mjs`) is everything else the app says to a mind, as you.
+  See below.
 - **The installer** (`cli.mjs`) builds and updates, and makes and updates a copy. Its state is in
   `~/Library/Application Support/iterate-mac-app/`; the app's log is in
   `~/Library/Logs/voice-meet-mac/app.log`.
@@ -585,6 +598,43 @@ one segment, with its times from the start.
   account is involved.
 - A command that the mind runs is a child of the app, so it has the app's permissions. Set
   Commands to Shared only for a mind you trust with all of it.
+
+### The mind's process: one connection, as you
+
+Two identities reach a mind from this Mac. The lend, `iterate provide` with the Mac's key, is the
+mind's way in: one process. Everything the app says to the mind goes as you, with the iterate CLI's
+own sign-in, through ONE Node process for that mind, `node bridge/mind.mjs <mind> --name <name>
+--iterate <iterate.js>`, with ONE connection to it (`bridge/mind-connection.mjs`). When the
+connection ends, it connects again: 1 s, then twice as long, at most 60 s; a session whose sign-in
+ended after its 4 hours (the mind closes the socket with 1008) comes back with a renewed one. Every
+job is on it:
+
+| Job       | What it does                                                                 | Swift              | Script          |
+| --------- | ---------------------------------------------------------------------------- | ------------------ | --------------- |
+| `events`  | the events of `/devices/<name>`, and the acts and presence read back          | `DeviceEvents`     | `events.mjs`    |
+| `live`    | the signalling of live                                                       | `DeviceLive`       | `live.mjs`      |
+| `record`  | the record's spool into the mind                                             | `DeviceRecord`     | `record.mjs`    |
+| `capture` | one capture into the mind, by its id                                         | `Capture`          | `capture.mjs`   |
+| `input`   | one input into the mind, by its id                                           | `MindInput`        | `input.mjs`     |
+| `words`   | the mind's `words.md` into the app's copy                                    | `Words`            | `words.mjs`     |
+
+stdin and stdout are JSON lines, each tagged with its job (`{ job, … }`); a line with no job is the
+process's own (`{ connected }`, `{ failed }`). `events`, `live` and `record` run from `{ job, start:
+true }` to `{ job, stop: true }`. A record slot, a capture and an input upload their files in one
+way (`bridge/upload.mjs`): a signed PUT that streams the file from disk and whose answer must name
+the file's size; when the signed route answers 5xx, a file of at most 8 MB goes through the
+connection instead.
+
+In the app, `MindBridge` owns the process: one for a mind, its name and its helpers, which runs
+while someone holds it. The session holds its mind's process while the Mac is lent to it; a capture
+holds its own mind's until it is sent, an input until it went, a word list until it came. So a
+running copy has one such process for the mind it is lent to, and a second one only while a job of
+another mind runs (a capture that began before a switch, an input to another mind, that mind's
+word list). When no one holds it, its stdin closes: the events that wait go, the last byes of live
+and the record's slot, and it exits. A process that ends while it is held starts again after 10 s,
+and its jobs start again. `JSONLineProcess` (in `VoiceMeetCore`) runs it: it cuts stdout into lines
+by bytes before it decodes them, writes stderr into the app's log, and says the end only after the
+last line.
 
 Notes from the first runs (macOS 15.7.4, a MacBook Pro):
 
@@ -609,7 +659,7 @@ view draws as its baseline (`node harness/snapshots.mjs`), and the app runs its 
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
 swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live, the input's draft
-node --test 'bridge/*.test.mjs'  # the bridges' tests: a fake mind that ends sessions (1008) and subscriptions
+node --test 'bridge/*.test.mjs'  # the mind's process and its jobs: a fake mind that ends sessions (1008) and subscriptions
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it
 ```
@@ -617,11 +667,12 @@ npx . init /tmp/mac --no-install   # a copy, without building or installing it
 `swift build --product record-run`, then `.build/debug/record-run --spool /tmp/spool --device test.mac
 --synthetic --seconds 70` records a test picture and a beep each second into a spool, with no
 permission; `--screens --cameras --mics --speakers` record the real sources, which need the app's
-permissions (run it through the app's `run` method). `node bridge/record-upload.mjs /tmp/spool
---name test.mac --iterate <iterate.js> --mind <address>` sends a spool to a mind.
+permissions (run it through the app's `run` method). `{ echo '{"job":"record","start":true,"spool":"/tmp/spool"}'; cat; }
+| node bridge/mind.mjs <address> --name test.mac --iterate <iterate.js>` sends a spool to a mind,
+until Ctrl-D ends its stdin.
 
 `swift build --product live-run` drives live from a terminal with the same libraries and bridge:
-`.build/debug/live-run --device test.mac --node $(which node) --bridge bridge/device-live.mjs --iterate <iterate.js>
+`.build/debug/live-run --device test.mac --node $(which node) --bridge bridge/mind.mjs --iterate <iterate.js>
 --mind <address> --synthetic --seconds 90` answers every watcher of `/devices/test.mac` with the
 test picture and beep (no switch is asked); `--record <spool>` records them too; `--screens
 --cameras --mics` are the real sources (through the app's `run` method), and `--loopback-only
@@ -713,7 +764,9 @@ fails it, antialiasing does not; the pixel differences are reported, and a pictu
 `boot` (the panel opens, the tree has its controls, a segment is pressed), `input-send` (a text
 typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `activity` (a
 command run through the endpoint is `device/act-started` and `device/act-ended` in the fake mind,
-and `ui.state` shows its row once, echoed from the context), `approval` (a
+and `ui.state` shows its row once, echoed from the context), `record-upload` (a slot that waits in
+the home's spool goes to the fake mind, its file before `record/slot-stored`, and leaves the
+spool), `approval` (a
 command on Ask is approved, then denied, through the socket), `mind-switch` (two fake minds: an
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
 device event reaches A after the switch), and the local ones, which need the speech models in

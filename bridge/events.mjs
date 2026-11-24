@@ -1,15 +1,12 @@
-#!/usr/bin/env node
-// device-events.mjs: what this Mac tells its mind about itself, as events on the context
-// /devices/<name> (the same name as the lend, `itx.<name>`).
+// events.mjs: the job `events` of mind.mjs: what this Mac tells its mind about itself, as events
+// on the context /devices/<name> (the same name as the lend, `itx.<name>`).
 //
-//   node device-events.mjs <name> --iterate <iterate.js> --mind <address>
-//
-// The app (Sources/VoiceMeetMac/DeviceEvents.swift) starts it and writes one JSON line for each
-// event on stdin: { type, payload, ephemeral? }. An ephemeral event reaches whoever listens now and
-// is in no log. It connects to the mind as the person (the iterate CLI's own sign-in: the Mac's
-// key lends and does nothing else), connects again when that connection ends
-// (mind-connection.mjs), and appends what came in every fifth of a second, in one call, in order.
-// While the connection is down the events wait; a batch that failed waits again at the front.
+// The app (Sources/VoiceMeetMac/DeviceEvents.swift) sends `{ job: "events", event: { type,
+// payload, ephemeral?, idempotencyKey? } }` for each event. An ephemeral event reaches whoever
+// listens now and is in no log. It goes on the connection of mind.mjs (the person's own sign-in:
+// the Mac's key lends and does nothing else), and what came in is appended every fifth of a
+// second, in one call, in order. While the connection is down the events wait; a batch that failed
+// waits again at the front.
 //
 // It also reads the context back, for the app's activity log: the events of `device/act-started`,
 // `device/act-ended` and `device/presence-changed`, and no other. On each connection it subscribes
@@ -20,15 +17,9 @@
 // 200 it told, so that it tells each once. A connection again reads them again: the app folds an
 // event it has once more into the same row.
 //
-// stdout is JSON lines for the app: { sent }, { failed, dropped? }, { event: { type, payload,
-// offset, createdAt } }, and { connected } from mind-connection.mjs: after `{ connected: true }`
-// the app says its presence again.
-import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { createInterface } from "node:readline";
-import { fileURLToPath, pathToFileURL } from "node:url";
-import { parseArgs } from "node:util";
-import { isConnectionError, lastingConnection } from "./mind-connection.mjs";
+// It says `{ sent }`, `{ failed, dropped? }` and `{ event: { type, payload, offset, createdAt } }`.
+// After the connection's `{ connected: true }` (mind.mjs says it) the app says its presence again.
+import { isConnectionError } from "./mind-connection.mjs";
 
 /** The input events that go first when too many wait: presence and the rest are kept. */
 const isInput = (event) => /^device\/(key-pressed|mouse-|scrolled)/.test(event?.type);
@@ -96,18 +87,13 @@ function readBack(device, say) {
   };
 }
 
-/** The queue and its sender: `add(event)`, `send()` (also every `everyMs`), `end()`. */
-export function deviceEvents({ name, connect, say, sleep, mostWaiting = 2_000, everyMs = 200 }) {
+/** The queue and its sender on `link` (mind.mjs): `add(event)`, `send()` (also every `everyMs`),
+ *  `end()`. */
+export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) {
   let endRead = () => {};
-  const link = lastingConnection({
-    connect,
-    say,
-    sleep,
-    async connected(link) {
-      link.device = link.itx.cd(`/devices/${name}`);
-      endRead();
-      endRead = readBack(link.device, say);
-    },
+  const unhook = link.each(async (connection) => {
+    endRead();
+    endRead = readBack(connection.device, say);
   });
   let waiting = [];
   let sent = 0;
@@ -126,6 +112,7 @@ export function deviceEvents({ name, connect, say, sleep, mostWaiting = 2_000, e
   async function sendOnce() {
     if (waiting.length === 0) return;
     const connection = await link.now();
+    if (waiting.length === 0) return;
     const batch = waiting;
     waiting = [];
     try {
@@ -157,38 +144,17 @@ export function deviceEvents({ name, connect, say, sleep, mostWaiting = 2_000, e
     },
     send,
     waiting: () => waiting,
-    /** What waits goes, for at most `ms`; then the connection ends. */
+    /** What waits goes, for at most `ms`; then the read back ends. */
     async end(ms = 5000) {
       clearInterval(timer);
       const flushed = (async () => {
         while (waiting.length) await send();
       })();
       await Promise.race([flushed.catch(() => {}), new Promise((r) => setTimeout(r, ms).unref())]);
+      // what did not go in time goes nowhere: the process may go on for other jobs
+      waiting = [];
+      unhook();
       endRead();
-      link.stop();
     },
   };
-}
-
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const { positionals, values } = parseArgs({
-    allowPositionals: true,
-    options: { iterate: { type: "string" }, mind: { type: "string" } },
-  });
-  const name = positionals[0];
-  if (!name || !values.iterate || !values.mind)
-    throw new Error("node device-events.mjs <name> --iterate <iterate.js> --mind <address>");
-  const dist = join(dirname(dirname(values.iterate)), "dist");
-  const { addressOf, connectMind } = await import(pathToFileURL(join(dist, "node.mjs")).href);
-  const events = deviceEvents({
-    name,
-    connect: () => connectMind({ address: addressOf(values.mind), signIn: false }),
-    say: (line) => process.stdout.write(`${JSON.stringify(line)}\n`),
-  });
-  for await (const line of createInterface({ input: process.stdin })) {
-    if (line) events.add(JSON.parse(line));
-  }
-  // stdin closed: the app is gone, or it turned the events off
-  await events.end();
-  process.exit(0);
 }

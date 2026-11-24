@@ -32,55 +32,13 @@ final class CapturePill: ObservableObject {
 /// capture's mind), and each final segment, with its times from the capture's start, goes to the
 /// uploader. No sound leaves the Mac for it.
 ///
-/// `bridge/capture-upload.mjs` runs beside the capture from its start: it puts each picture into
-/// the mind as soon as it exists, and the rest at the end, as files under `/captures/<id>/`, and
-/// answers the text that goes to the clipboard.
+/// The job `capture` of the capture's mind's `MindBridge` (`bridge/capture.mjs`) runs beside the
+/// capture from its start: it puts each picture into the mind as soon as it exists, and the rest at
+/// the end, as files under `/captures/<id>/`, and answers the text that goes to the clipboard. The
+/// capture holds that bridge until it is sent, so it ends on its own mind after a switch.
 @available(macOS 15.0, *)
 @MainActor
 final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutputDelegate {
-    /// The uploader beside one capture: lines to its stdin, JSON lines from its stdout.
-    private final class Uploader: @unchecked Sendable {
-        let process = Process()
-        private let input = Pipe()
-        private let lock = NSLock()
-        private var pending = ""
-
-        init?(_ argv: [String], said: @escaping @MainActor ([String: Any]) -> Void, ended: @escaping @MainActor () -> Void) {
-            let output = Pipe()
-            process.executableURL = URL(fileURLWithPath: argv[0])
-            process.arguments = Array(argv.dropFirst())
-            process.standardInput = input
-            process.standardOutput = output
-            process.standardError = FileHandle.nullDevice
-            output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                let text = String(decoding: handle.availableData, as: UTF8.self)
-                DispatchQueue.main.async {
-                    MainActor.assumeIsolated {
-                        guard let self else { return }
-                        var lines = (self.pending + text).components(separatedBy: "\n")
-                        self.pending = lines.removeLast()
-                        for line in lines {
-                            if let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] { said(object) }
-                        }
-                    }
-                }
-            }
-            process.terminationHandler = { _ in
-                output.fileHandleForReading.readabilityHandler = nil
-                // after the last line that the handler above queued
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { MainActor.assumeIsolated { ended() } }
-            }
-            guard (try? process.run()) != nil else { return nil }
-        }
-
-        /// From the main thread, and from the voice's queue.
-        func send(_ line: String) {
-            lock.lock()
-            defer { lock.unlock() }
-            try? input.fileHandleForWriting.write(contentsOf: Data((line + "\n").utf8))
-        }
-    }
-
     /// The voice, while the capture runs: the microphone's sound into the recognizer, with its time
     /// from the capture's start. Used on the voice's queue alone.
     private final class Voice: @unchecked Sendable {
@@ -131,7 +89,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var displayID: CGDirectDisplayID = 0
     private var pictures = 0
     private var lastPictureAt = Date.distantPast
-    private var uploader: Uploader?
+    /// The bridge of the capture's mind, while its job runs.
+    private var bridge: MindBridge?
+    /// The bridge each capture holds, by its id, until its job ends: an earlier capture may still
+    /// be sent while a new one runs.
+    private var holding: [String: MindBridge] = [:]
     private let voice = Voice()
     /// The recognizer of this capture's voice, and how many of its segments the uploader has.
     private var recognizer: SpeechRecognizer?
@@ -375,7 +337,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             (try? picture.data.write(to: folder.appendingPathComponent(file))) != nil
         else { return }
         observe("picture", at: t, ["file": file, "reason": reason, "pixelWidth": picture.width, "pixelHeight": picture.height])
-        uploader?.send("put \(file)")
+        upload(["put": file])
         if let panel { cut(panel, from: image, picture: file) }
     }
 
@@ -422,7 +384,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             entry["on"] = "“\(words)”"
         }
         panels.append(entry)
-        uploader?.send("put \(file)")
+        upload(["put": file])
     }
 
     /// All the numbered pictures on one: an agent reads it first. Two in a row, each 780 pixels wide.
@@ -453,7 +415,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         guard let sheet = context.makeImage(), let jpeg = Snapshot.jpeg(of: CIImage(cgImage: sheet), maxWidth: 2_000),
             (try? jpeg.data.write(to: folder.appendingPathComponent("sheet.jpg"))) != nil
         else { return }
-        uploader?.send("put sheet.jpg")
+        upload(["put": "sheet.jpg"])
     }
 
     /// A click in another app (a global monitor sees no click in this app's own windows).
@@ -512,7 +474,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             await takePicture("pictures/\(String(format: "%02d", pictures)).jpg", "end", of: id, panel: whole)
             writeSheet()
             // The text is on the clipboard now: nothing below is waited for.
-            if (try? writeManifest(durationMs: durationMs)) != nil { uploader?.send("copy") }
+            if (try? writeManifest(durationMs: durationMs)) != nil { upload(["copy": true]) }
         }
         timer?.invalidate()
         timer = nil
@@ -537,8 +499,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         }
         stream = nil
         guard send else {
-            uploader?.send("discard")
-            uploader = nil
+            upload(["discard": true])
+            bridge = nil
             try? FileManager.default.removeItem(at: folder)
             log.info("capture \(id): discarded by the person")
             return say("Discarded", for: 2)
@@ -549,12 +511,12 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         } catch {
             return fail("The capture was not written: \(AppLog.describe(error))")
         }
-        guard let uploader else {
+        guard bridge != nil else {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(folder.path, forType: .string)
             return fail("No mind is set up. The capture is in \(folder.path)", keep: true)
         }
-        uploader.send("finish")
+        upload(["finish": true])
     }
 
     private func movieIsWhole() {
@@ -627,23 +589,33 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys]).write(to: folder.appendingPathComponent("capture.json"))
     }
 
-    /// The uploader starts with the capture: it connects to the mind and gets its upload links
-    /// while the person talks.
+    /// The job starts with the capture: on its mind's connection it gets the upload links while the
+    /// person talks.
     private func startUploader() {
         copiedAt = nil
-        guard let pinned else { return uploader = nil }
+        guard let pinned else { return bridge = nil }
+        let bridge = MindBridge.of(pinned)
         let capture = id
-        uploader = Uploader(
-            [
-                pinned.helpers.node, pinned.helpers.captureUpload, folder.path, "--iterate", pinned.helpers.iterateBin, "--mind", pinned.mind,
-                "--heard-by", speech().id,
-            ],
-            said: { [weak self] line in if self?.id == capture { self?.uploaderSaid(line) } },
-            ended: { [weak self] in
-                guard let self, self.id == capture, self.uploader != nil else { return }
-                self.uploader = nil
-                self.fail("Not sent: the uploader ended. The capture is in \(self.folder.path)", keep: true)
-            })
+        holding[capture] = bridge
+        self.bridge = bridge
+        bridge.on("capture") { [weak self, weak bridge] line in
+            guard let self, let bridge else { return }
+            self.uploaderSaid(line, from: bridge)
+        }
+        bridge.hold("capture \(capture)")
+        upload(["folder": folder.path, "heardBy": speech().id])
+    }
+
+    /// One step of this capture's job.
+    private func upload(_ fields: [String: Any]) {
+        var line = fields
+        line["capture"] = id
+        bridge?.send("capture", line)
+    }
+
+    /// A capture's job ended, or its process did: its bridge is let go.
+    private func letGo(_ capture: String) {
+        holding.removeValue(forKey: capture)?.release("capture \(capture)")
     }
 
     /// The recognizer of the capture's voice, from its start: the chosen model, with the word list
@@ -672,7 +644,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         switch event {
         case .segment(let segment):
             guard !isVoiceDone else { return }
-            uploader?.send(segment.uploaderLine)
+            upload(["segment": segment.transcriptEntry])
             segmentsSent += 1
         case .partial(let said):
             // what was just heard, while the capture runs: the sign that the microphone hears the person
@@ -698,8 +670,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             let segments = await recognizer.finish()
             guard self.id == capture else { return }
             self.isVoiceDone = true
-            for segment in segments.dropFirst(self.segmentsSent) { self.uploader?.send(segment.uploaderLine) }
-            self.uploader?.send("heard")
+            for segment in segments.dropFirst(self.segmentsSent) { self.upload(["segment": segment.transcriptEntry]) }
+            self.upload(["heard": true])
         }
     }
 
@@ -709,7 +681,18 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     }
 
     /// `copy` is the text for the clipboard: with the mind's paths, or this Mac's with `failed`.
-    private func uploaderSaid(_ line: [String: Any]) {
+    private func uploaderSaid(_ line: [String: Any], from bridge: MindBridge) {
+        if line["exited"] != nil {
+            // every capture on that process ends; the one that runs now says so
+            for (capture, held) in holding where held === bridge { letGo(capture) }
+            guard self.bridge === bridge else { return }
+            self.bridge = nil
+            return fail("Not sent: the uploader ended. The capture is in \(folder.path)", keep: true)
+        }
+        guard let capture = line["capture"] as? String else { return }
+        if line["done"] != nil || line["failed"] != nil || line["discarded"] != nil { letGo(capture) }
+        // a line of an earlier capture changes nothing here
+        guard capture == id, self.bridge === bridge else { return }
         let mind = pinned?.mind ?? "the mind"
         if let progress = line["progress"] as? Double, pill.progress != nil { pill.progress = progress }
         if let text = line["copy"] as? String, copiedAt == nil || copiedAt == NSPasteboard.general.changeCount {
@@ -722,10 +705,10 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             }
         }
         if let reason = line["failed"] as? String {
-            uploader = nil
+            self.bridge = nil
             fail("Not sent to \(mind): \(reason.prefix(200)). The capture is in \(folder.path)", keep: true)
         } else if line["done"] != nil {
-            uploader = nil
+            self.bridge = nil
             log.info("capture \(id): sent to \(mind) as /captures/\(id)/")
             // The folder stays: an agent on this Mac reads the pictures from it.
             lastLine = "Sent to \(mind) at \(Lend.clock(Date())), and copied"

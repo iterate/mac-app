@@ -40,6 +40,8 @@ final class AppModel {
     private var microphoneHolders = 0
     private var isListening = false
     private var session: MindSession?
+    /// The session's bridge, held while the session lasts.
+    private var bridge: MindBridge?
     /// False while the mind refuses this Mac's key: the lend's calls are refused.
     private var isAuthorized = true
 
@@ -88,20 +90,25 @@ final class AppModel {
 
     /// Another mind session, or none, or another authorization (`Lend.sessionChanged`). A refusal
     /// of this Mac's key ends every approval and refuses every call of the lend; the session's work
-    /// goes on. Another session: the old one's approvals end, and its publisher, bridge, recorder
-    /// and uploader stop, all before any of them starts for the new one.
+    /// goes on. Another session: the old one's approvals end, and its events, live, recorder and
+    /// upload stop, all before any of them starts for the new one. The session holds its mind's
+    /// bridge (`MindBridge`): the old one's process ends once no capture or input of it is left.
     func use(_ session: MindSession?, isAuthorized: Bool) {
         self.isAuthorized = isAuthorized
         if !isAuthorized { approval.refuse() }
         guard session != self.session else { return }
         self.session = session
+        let old = bridge
+        bridge = session.map(MindBridge.of)
+        bridge?.hold("session")
         approval.use(session)
-        deviceEvents.use(session)
-        live.use(session)
-        record.use(session)
+        deviceEvents.use(session, bridge: bridge)
+        live.use(session, bridge: bridge)
+        record.use(session, bridge: bridge)
         acts.use(session)
+        // one hold for each name: the same bridge again keeps it
+        if old !== bridge { old?.release("session") }
         deviceEvents.tick()
-        live.tick()
         record.tick()
     }
 
@@ -112,6 +119,8 @@ final class AppModel {
         deviceEvents.stop()
         deviceWindow.stop()
         record.stop()
+        // its stdin closes: the events that wait go, and the record's slot
+        bridge?.release("session")
         audioOwner.stop()
         speaker.stop()
         banners.stop()

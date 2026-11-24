@@ -11,12 +11,13 @@ import VoiceMeetCore
 /// presence); microphones and speakers go on.
 ///
 /// The recorder writes 30-second files into a spool on this Mac
-/// (`~/Library/Application Support/iterate-mac-app/record/<mind>/`); `bridge/record-upload.mjs`
-/// puts them into the mind's files under `/devices/<name>/record/` and appends one
-/// `record/slot-stored` for each slot to `/devices/<name>`, as the person (the CLI's own sign-in).
+/// (`~/Library/Application Support/iterate-mac-app/record/<mind>/`); the job `record` of the
+/// session's `MindBridge` (`bridge/record.mjs`) puts them into the mind's files under
+/// `/devices/<name>/record/` and appends one `record/slot-stored` for each slot to
+/// `/devices/<name>`, as the person (the CLI's own sign-in), for as long as the session lasts.
 ///
 /// It records for one mind session (`MindSession`): `use` stops the old session's recorder and
-/// uploader at once. A reconnect keeps the session, and a spool keeps its slots for its mind.
+/// upload at once. A reconnect keeps the session, and a spool keeps its slots for its mind.
 @MainActor
 final class DeviceRecord: ObservableObject {
     /// One switch of the panel: its source, its permission, its words.
@@ -67,12 +68,10 @@ final class DeviceRecord: ObservableObject {
     private var running: Set<RecordSource> = []
     private var watching: Set<RecordSource> = []
     private var paused = false
-    private var uploader: Process?
-    private var uploaderInput: FileHandle?
-    private var uploaderEndedAt = Date.distantPast
+    /// The session's bridge, whose job `record` uploads the spool.
+    private var bridge: MindBridge?
     private var uploadFailure: String?
     private var waiting = 0
-    private var pending = ""
     private var timer: Timer?
 
     func isOn(_ source: RecordSource) -> Bool { on.contains(source) }
@@ -106,25 +105,38 @@ final class DeviceRecord: ObservableObject {
         tick()
     }
 
-    /// At quit: the last files are written and sealed; the uploader sends them now or at the next start.
+    /// At quit: the last files are written and sealed; the job sends them now or at the next start.
     func stop() {
         timer?.invalidate()
         if let recorder { lifecycle.sync { recorder.stop() } }
         recorder = nil
-        try? uploaderInput?.close()
     }
 
     static func spool(for mind: String) -> URL {
         AppEnvironment.current.folder.appendingPathComponent("record").appendingPathComponent(mind)
     }
 
-    /// Another session, or none: the old one's recorder and uploader stop now (the recorder seals
-    /// its last files into the old mind's spool). Nothing starts here: the next `tick` does.
-    func use(_ session: MindSession?) {
+    /// Another session and its bridge, or none: the old one's recorder and upload stop now (the
+    /// recorder seals its last files into the old mind's spool, and the job ends the slot it is on),
+    /// and the new one's upload starts. The next `tick` starts the recorder.
+    func use(_ session: MindSession?, bridge: MindBridge?) {
         stopRecorder()
-        endUploader()
+        self.bridge?.send("record", ["stop": true])
         uploadFailure = nil
         self.session = session
+        self.bridge = bridge
+        guard let session, let bridge else { return }
+        bridge.on("record") { [weak self, weak bridge] line in
+            guard let self, let bridge, self.bridge === bridge else { return }
+            self.said(line)
+        }
+        startUpload()
+        log.info("session \(session.generation): uploads \(Self.spool(for: session.mind).path) to \(session.mind) at \(session.path)")
+    }
+
+    private func startUpload() {
+        guard let session else { return }
+        bridge?.send("record", ["start": true, "spool": Self.spool(for: session.mind).path])
     }
 
     private func stopRecorder() {
@@ -169,11 +181,6 @@ final class DeviceRecord: ObservableObject {
             }
         }
         let waiting = session.map { Self.waiting(in: Self.spool(for: $0.mind)) } ?? 0
-        if let session, !running.isEmpty || waiting > 0 {
-            if uploader == nil, Date().timeIntervalSince(uploaderEndedAt) > 10 { startUploader(session) }
-        } else {
-            endUploader()
-        }
         showState(waiting: waiting, isLent: session != nil)
     }
 
@@ -203,75 +210,24 @@ final class DeviceRecord: ObservableObject {
         if markChanges { onChange() }
     }
 
-    /// The slots in the spool that wait for the uploader.
+    /// The slots in the spool that wait for the upload.
     private static func waiting(in spool: URL) -> Int {
         let names = (try? FileManager.default.contentsOfDirectory(atPath: spool.appendingPathComponent("slots").path)) ?? []
         return names.filter { $0.hasSuffix(".json") }.count
     }
 
-    // MARK: - The uploader
+    // MARK: - The upload
 
-    private func startUploader(_ session: MindSession) {
-        let process = Process()
-        let stdin = Pipe(), stdout = Pipe()
-        process.executableURL = URL(fileURLWithPath: session.helpers.node)
-        process.arguments = [
-            session.helpers.recordUpload, Self.spool(for: session.mind).path, "--name", session.name, "--iterate", session.helpers.iterateBin,
-            "--mind", session.mind,
-        ]
-        process.standardInput = stdin
-        process.standardOutput = stdout
-        process.standardError = FileHandle.nullDevice
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    // a line of an ended uploader, or of another session, changes nothing
-                    guard let self, self.uploader === process else { return }
-                    self.uploaderSaid(text)
-                }
-            }
+    private func said(_ said: [String: Any]) {
+        if said["uploaded"] != nil { uploadFailure = nil }
+        if let why = said["failed"] as? String, said["job"] != nil {
+            if uploadFailure != why { log.error("upload: \(why)") }
+            uploadFailure = String(why.prefix(80))
         }
-        process.terminationHandler = { [weak self] ended in
-            stdout.fileHandleForReading.readabilityHandler = nil
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self, self.uploader === ended else { return }
-                    self.log.info("uploader ended (status \(ended.terminationStatus))")
-                    (self.uploader, self.uploaderInput, self.uploaderEndedAt) = (nil, nil, Date())
-                }
-            }
-        }
-        guard (try? process.run()) != nil else {
-            uploadFailure = "the uploader did not start"
-            uploaderEndedAt = Date()
-            return
-        }
-        uploader = process
-        uploaderInput = stdin.fileHandleForWriting
-        log.info("session \(session.generation): uploader: \(Self.spool(for: session.mind).path) to \(session.mind) at \(session.path)")
-    }
-
-    /// Its stdin closes: it ends the slot it is on, then exits.
-    private func endUploader() {
-        guard uploader != nil else { return }
-        try? uploaderInput?.close()
-        // a new one waits: the old one may still be on its last slot
-        (uploaderInput, uploader, uploaderEndedAt, pending) = (nil, nil, Date(), "")
-    }
-
-    private func uploaderSaid(_ text: String) {
-        var lines = (pending + text).components(separatedBy: "\n")
-        pending = lines.removeLast()
-        for line in lines {
-            guard let said = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
-            if said["uploaded"] != nil { uploadFailure = nil }
-            if let why = said["failed"] as? String {
-                if uploadFailure != why { log.error("upload: \(why)") }
-                uploadFailure = String(why.prefix(80))
-            }
-            if let slot = said["dropped"], let why = said["why"] as? String { log.error("upload: slot \(slot) dropped: \(why)") }
-        }
+        if let slot = said["dropped"], let why = said["why"] as? String { log.error("upload: slot \(slot) dropped: \(why)") }
+        if let why = said["fallback"] as? String { log.info("upload: \(why)") }
+        // a new process: the upload starts again
+        if said["started"] != nil { startUpload() }
     }
 }
 

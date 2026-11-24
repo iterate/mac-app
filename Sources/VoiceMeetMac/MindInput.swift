@@ -156,8 +156,8 @@ final class VoiceLevel: ObservableObject {
 /// keyboard, and its button turns it off. A dictation that starts meanwhile ends the bar's
 /// listening: its last words are written into the bar.
 ///
-/// The bar closes at once. `bridge/input-send.mjs` puts the files into that mind's files and
-/// appends one event, `device/input-submitted`, to `/devices/<name>`, as the person (the iterate
+/// The bar closes at once. The job `input` of that mind's `MindBridge` (`bridge/input.mjs`) puts
+/// the files into that mind's files and appends one event, `device/input-submitted`, to `/devices/<name>`, as the person (the iterate
 /// CLI's own sign-in). The app knows no agent and no backend: what a mind does with an input is the
 /// mind's config. An input that did not go comes back: the bar opens again with the text, the
 /// files and the reason, and Return sends the same input again.
@@ -192,8 +192,8 @@ final class MindInput: SpeechClient {
     /// What waits for the listening's last words (Return sends after them).
     private var afterLastWords: [() -> Void] = []
     var isListening: Bool { session.isListening(for: self) }
-    /// What the sender printed after its last whole line.
-    private var pending = ""
+    /// The bridge each input that is being sent holds, by its id.
+    private var sending: [String: MindBridge] = [:]
 
     init(session: SpeechSession) {
         self.session = session
@@ -374,41 +374,24 @@ final class MindInput: SpeechClient {
         guard let input = model.draft.submit(at: Date()) else { return }
         let id = model.draft.id
         let folder = Self.folder.appendingPathComponent(id)
-        let process = Process()
-        let output = Pipe()
-        process.executableURL = URL(fileURLWithPath: opened.helpers.node)
-        process.arguments = [opened.helpers.inputSend, folder.path, "--name", mind.name, "--iterate", opened.helpers.iterateBin, "--mind", mind.mind]
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = output
-        process.standardError = FileHandle.nullDevice
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let text = String(decoding: handle.availableData, as: UTF8.self)
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.senderWrote(text, of: id) } }
-        }
-        process.terminationHandler = { [weak self] ended in
-            output.fileHandleForReading.readabilityHandler = nil
-            let rest = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            let status = ended.terminationStatus
-            // after the last line that the handler above queued
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                MainActor.assumeIsolated {
-                    self?.senderWrote(rest, of: id)
-                    self?.senderEnded(status, of: id)
-                }
-            }
-        }
         sendingTo = mind.mind
-        pending = ""
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             try input.write(to: folder.appendingPathComponent("input.json"))
-            try process.run()
         } catch {
-            output.fileHandleForReading.readabilityHandler = nil
-            let reason = "The sender did not start: \(AppLog.describe(error))"
+            let reason = "The input was not written: \(AppLog.describe(error))"
             model.draft.senderDidNotStart(reason)
             return settle(.failed(reason), of: id)
         }
+        // the mind's bridge, held until the input went or failed
+        let bridge = MindBridge.of(mind: mind.mind, name: mind.name, helpers: opened.helpers)
+        sending[id] = bridge
+        bridge.on("input") { [weak self, weak bridge] line in
+            guard let self, let bridge else { return }
+            self.bridgeSaid(line, from: bridge)
+        }
+        bridge.hold("input \(id)")
+        bridge.send("input", ["input": id, "folder": folder.path])
         // The log holds counts, never the words.
         log.info("input \(id): \(characters) characters and \(files) files go to \(mind.mind) as \(mind.name)")
         close()
@@ -429,14 +412,27 @@ final class MindInput: SpeechClient {
         ]
     }
 
-    private func senderWrote(_ text: String, of id: String) {
-        guard id == model.draft.id else { return }
-        var lines = (pending + text).components(separatedBy: "\n")
-        pending = lines.removeLast()
-        for line in lines {
-            guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { continue }
-            settle(model.draft.senderSaid(object, next: MindInputModel.newId()), of: id)
+    /// A line of the job `input`: an input's progress or end, or the end of the process.
+    private func bridgeSaid(_ line: [String: Any], from bridge: MindBridge) {
+        if let status = line["exited"] as? Int {
+            for (id, held) in sending where held === bridge {
+                letGo(id)
+                senderEnded(Int32(status), of: id)
+            }
+            return
         }
+        guard let id = line["input"] as? String, sending[id] === bridge else { return }
+        if line["done"] != nil || line["failed"] != nil { letGo(id) }
+        senderSaid(line, of: id)
+    }
+
+    private func letGo(_ id: String) {
+        sending.removeValue(forKey: id)?.release("input \(id)")
+    }
+
+    private func senderSaid(_ line: [String: Any], of id: String) {
+        guard id == model.draft.id else { return }
+        settle(model.draft.senderSaid(line, next: MindInputModel.newId()), of: id)
     }
 
     private func senderEnded(_ status: Int32, of id: String) {

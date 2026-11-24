@@ -46,7 +46,7 @@ public struct RecordOptions: Sendable {
 /// Records the sources that are switched on into the spool: one file per track per 30-second slot,
 /// a picture per video file, and for each slot ONE file `slots/<t>.json`, the payload of the event
 /// `record/slot-stored`, once every track of the slot has closed. The uploader
-/// (`bridge/record-upload.mjs`) takes it from there.
+/// (the job `record` of `bridge/mind.mjs`) takes it from there.
 ///
 /// Who owns what: `lock` guards `sources`, `tracks` and `paused`. `slots` (a queue) owns the open
 /// slots and every write to the spool, in this order: the media file, its picture, the slot's

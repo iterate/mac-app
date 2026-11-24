@@ -2,10 +2,23 @@
 // fail to connect, subscriptions that end with no word, appends that fail. Each appended event gets
 // an offset and a time; `readEvents` reads the kept ones of a path, a page at a time, and each
 // read is in `reads` as `{ after, events }`.
+//
+// Its files: `itx.r2.presign` answers a link to a server of its own on 127.0.0.1 (started at the
+// first link), whose PUT stores the bytes and answers `{ size }`, or the status `failSignedPuts`;
+// `itx.r2.put` stores bytes through the connection. Each file is in `files` by its key, as
+// `{ bytes, contentType, via }`, and `stored(key, file)` hears it. `order` has "file <key>" and
+// "event <type>" in the order they came. Its config repo is `repo`: `{ tip, files, reads }`.
+import { createServer } from "node:http";
+
 export const SIGN_IN_ENDED = "1008 the sign-in for this session ended: authenticate again";
 
-export function fakeMind() {
+export function fakeMind({ stored = () => {} } = {}) {
+  let server;
   const mind = {
+    files: new Map(),
+    failSignedPuts: undefined,
+    order: [],
+    repo: { tip: async () => "abc", files: {}, reads: [] },
     connections: [],
     subscriptions: [],
     appended: [],
@@ -21,6 +34,28 @@ export function fakeMind() {
     return new Promise((resolve) => setImmediate(resolve));
   };
   mind.now = () => mind.clock;
+  const store = (key, bytes, contentType, via) => {
+    const file = { bytes, contentType, via };
+    mind.files.set(key, file);
+    mind.order.push(`file ${key}`);
+    stored(key, file);
+  };
+  /** The signed links' server: a PUT of /<key> stores its body. */
+  const serve = () =>
+    (server ??= new Promise((resolve) => {
+      const http = createServer((request, answer) => {
+        const chunks = [];
+        request.on("data", (chunk) => chunks.push(chunk));
+        request.on("end", () => {
+          if (mind.failSignedPuts) return answer.writeHead(mind.failSignedPuts, { connection: "close" }).end("error code: 1101");
+          const bytes = Buffer.concat(chunks);
+          store(decodeURIComponent(request.url.slice(1)), bytes, request.headers["content-type"], "signed");
+          answer.writeHead(200, { "content-type": "application/json", connection: "close" }).end(JSON.stringify({ size: bytes.length }));
+        });
+      });
+      http.unref();
+      http.listen(0, "127.0.0.1", () => resolve(`http://127.0.0.1:${http.address().port}`));
+    }));
   mind.deliver = (events, from) => {
     for (const s of mind.subscriptions)
       if (s.alive && s.connection.isOpen && (!from || s.connection === from))
@@ -45,7 +80,40 @@ export function fakeMind() {
         close({ code: 3000, reason: "disposed" });
       },
     };
+    const open = () => {
+      if (!connection.isOpen) throw new Error(`Peer closed WebSocket: ${SIGN_IN_ENDED}`);
+    };
     connection.itx = {
+      r2: {
+        async presign({ key }) {
+          open();
+          return { url: `${await serve()}/${encodeURIComponent(key)}` };
+        },
+        async put(key, bytes, options) {
+          open();
+          store(key, Buffer.from(bytes), options?.httpMetadata?.contentType, "connection");
+          return { size: bytes.length };
+        },
+        async head(key) {
+          open();
+          return mind.files.has(key) ? { size: mind.files.get(key).bytes.length } : null;
+        },
+        async delete(keys) {
+          open();
+          for (const key of keys) mind.files.delete(key);
+        },
+      },
+      repos: {
+        get: (path) => ({
+          tip: async () => (open(), mind.repo.reads.push(path), mind.repo.tip()),
+          async readFile(file, options) {
+            mind.repo.reads.push([file, options?.commitOid]);
+            if (!(file in mind.repo.files)) throw new Error("no such file");
+            return mind.repo.files[file];
+          },
+        }),
+      },
+      ai: { run: async () => Promise.reject(new Error("no model in the fake mind")) },
       cd: (path) => ({
         path,
         async append(...events) {
@@ -62,6 +130,7 @@ export function fakeMind() {
             createdAt: new Date(Date.UTC(2026, 10, 24, 14) + mind.offset * 1000).toISOString(),
           }));
           mind.appended.push(...stored);
+          for (const event of stored) mind.order.push(`event ${event.type}`);
           mind.deliver(stored, connection);
           return stored;
         },
@@ -92,6 +161,15 @@ export async function until(check, turns = 500) {
   for (let i = 0; i < turns; i++) {
     if (check()) return;
     await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`never true: ${check}`);
+}
+
+/** Waits, 10 ms at a time, until `check()` is true; throws after `ms`. */
+export async function eventually(check, ms = 5000) {
+  for (const deadline = Date.now() + ms; Date.now() < deadline; ) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error(`never true: ${check}`);
 }
