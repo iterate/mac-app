@@ -468,7 +468,11 @@ async function setup({ values }, { interactive }) {
   let state = {
     ...saved,
     login: loginAnswer,
-    spec: copy ?? (saved.spec && !interactive && !saved.copy ? saved.spec : specOfThisRun()),
+    // a run from a folder (a clone) makes that folder the source; an npm run with no questions
+    // keeps the saved source, so a trial build stays a trial build
+    spec:
+      copy ??
+      (specOfThisRun() !== here && saved.spec && !interactive && !saved.copy ? saved.spec : specOfThisRun()),
     copy,
     node: process.execPath,
     bridge: join(paths.source, "bridge/mac-endpoint.ts"),
