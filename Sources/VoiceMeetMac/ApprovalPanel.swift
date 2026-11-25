@@ -31,8 +31,10 @@ final class ApprovalWindow {
         let origin = NSPoint(x: visible.midX - size.width / 2, y: visible.minY + visible.height * 0.62 - size.height / 2)
         panel.setFrame(NSRect(origin: origin, size: size), display: true)
         // over every window, and the keys go to it, while the app in front stays the active one
-        panel.orderFrontRegardless()
-        panel.makeKey()
+        OffScreen.orderFront(panel) {
+            panel.orderFrontRegardless()
+            panel.makeKey()
+        }
     }
 
     func close() {

@@ -28,9 +28,44 @@ final class DictationPillModel: ObservableObject {
     @Published var locked = false
     @Published var clock = Clock.none
     @Published var level: Float = 0
-    @Published var text = ""
+    /// The text that is written: the terms alone.
+    @Published private(set) var text = ""
+    /// What the pill shows of it: its end, with each correction of the word list as the heard
+    /// words struck through and the term after them. Made once for each new text, not when it draws.
+    @Published private(set) var shown = AttributedString()
     /// Settings › Dictation, "Show the words in one row": off, the pill has the level bars and the time alone.
     @Published var showsWords = true
+
+    /// The most characters the pill shows: the end of the text is plenty for one row.
+    static let shownLength = 200
+
+    /// A new text, as it was heard and with its corrections.
+    func show(_ heard: HeardText) {
+        text = heard.text
+        shown = Self.shown(heard)
+    }
+
+    /// The heard text with each correction struck through in the second colour, a space, and
+    /// the term in the first: its last `shownLength` characters.
+    static func shown(_ heard: HeardText) -> AttributedString {
+        var shown = AttributedString()
+        var at = heard.heard.startIndex
+        for correction in heard.corrections {
+            shown += AttributedString(heard.heard[at..<correction.range.lowerBound])
+            var struck = AttributedString(correction.heard)
+            struck.foregroundColor = Theme.t2
+            struck.strikethroughStyle = Text.LineStyle(pattern: .solid, color: Theme.t2)
+            shown += struck
+            // a whole space (a thin one let the struck line run into the term), then the term, in the
+            // text's own colour
+            shown += AttributedString(" " + correction.term)
+            at = correction.range.upperBound
+        }
+        shown += AttributedString(heard.heard[at...])
+        let count = shown.characters.count
+        guard count > shownLength else { return shown }
+        return AttributedString(shown[shown.characters.index(shown.startIndex, offsetBy: count - shownLength)...])
+    }
 }
 
 /// DICTATION: talk in any app, and what you said is written where the cursor is (README,
@@ -134,7 +169,9 @@ final class Dictation: SpeechClient {
             guard Choices.shared.dictationOnFn || key.state != .idle else { return }
             fnChanged(down: down, at: time)
         case .escape: escape()
-        case .otherKey: act(key.otherKey())
+        case .otherKey:
+            if key.wantsOtherKeys { log.info("fn with another key: a combination, the dictation ends") }
+            act(key.otherKey())
         }
     }
 
@@ -213,7 +250,7 @@ final class Dictation: SpeechClient {
     // MARK: - The listening
 
     private func start() {
-        pill.text = ""
+        pill.show(.empty)
         pill.level = 0
         pill.locked = false
         pill.showsWords = Choices.shared.pillShowsWords
@@ -252,7 +289,8 @@ final class Dictation: SpeechClient {
             guard pill.phase != .writing else { return }
             if case .loading(let part) = phase { pill.phase = .loading(part) } else { pill.phase = .listening }
         case .text(let text):
-            pill.text = text
+            // the session's text is the repaired one; it keeps what was heard beside it
+            pill.show(session.heard(for: self) ?? HeardText(text, words: .empty))
         case .level(let level):
             pill.level = level
         case .failed(let reason):
@@ -373,7 +411,7 @@ final class Dictation: SpeechClient {
         if let visible = screen?.visibleFrame {
             panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 90))
         }
-        panel.orderFrontRegardless()
+        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
     }
 
     private func hidePill(after seconds: Double) {
@@ -461,7 +499,7 @@ struct DictationPill: View {
                     Text("Listening").foregroundStyle(Theme.t3)
                     Spacer(minLength: 0)
                 } else {
-                    DictationWords(text: model.text)
+                    DictationWords(shown: model.shown)
                 }
                 if model.locked {
                     Image(systemName: "lock.fill")
@@ -476,7 +514,7 @@ struct DictationPill: View {
                     Text("Writing").foregroundStyle(Theme.t3)
                     Spacer(minLength: 0)
                 } else {
-                    DictationWords(text: model.text)
+                    DictationWords(shown: model.shown)
                 }
             case .failed(let reason):
                 Circle().fill(Theme.live).frame(width: 9, height: 9)
@@ -497,15 +535,15 @@ struct DictationPill: View {
 /// The words on one line, set against the right edge and clipped at the left with a fade: the
 /// newest words stay in sight. A value: SwiftUI skips it when only the level changed.
 private struct DictationWords: View, Equatable {
-    let text: String
+    /// The end of the text, with its corrections (`DictationPillModel.shown`).
+    let shown: AttributedString
 
     var body: some View {
         // the free width, whatever the text's: the text hangs out of it at the left and is clipped
         Color.clear
             .frame(maxWidth: .infinity, maxHeight: 22)
             .overlay(alignment: .trailing) {
-                // the end of the text is plenty for one row
-                Text(text.count <= 200 ? text : String(text.suffix(200)))
+                Text(shown)
                     .foregroundStyle(Theme.t1)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
@@ -547,18 +585,21 @@ private struct DictationClock: View, Equatable {
 
 extension Dictation {
     /// Draws the pill in its states, light and dark: PNG files in `folder` (`--render-input`).
+    /// "corrected" has a correction of the word list: the heard "b-link" struck through, then "Beelink".
     static func render(to folder: URL) -> Bool {
         var drawn = true
+        let words = WordList(markdown: "- Beelink: b-link, be link, bee link, b link\n")
         let states: [(String, DictationPillModel.Phase, String, Bool, TimeInterval)] = [
             ("loading", .loading(0.42), "", false, 0),
             ("listening", .listening, "Open the roadmap on Misha’s computer and tell him why. The two files are what I mean, and the second one is the newer", false, 7),
+            ("corrected", .listening, "Restart the bridge on the b-link box, then tell me when it is live", false, 12),
             ("locked", .listening, "so the panel opens on the mind and the lend first, then what I do myself, and only then the switches", true, 252),
             ("failed", .failed("On the clipboard: press ⌘V"), "", false, 0),
         ]
         for (name, phase, text, locked, seconds) in states {
             let model = DictationPillModel()
             model.phase = phase
-            model.text = text
+            model.show(HeardText(text, words: words))
             model.locked = locked
             model.clock = phase == .listening ? .fixed(seconds) : .none
             model.level = 1

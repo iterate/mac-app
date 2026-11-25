@@ -271,7 +271,7 @@ final class BannerWindow {
         start.origin.x = screen.frame.maxX + 8
         panel.setFrame(start, display: false)
         panel.alphaValue = 1
-        panel.orderFrontRegardless()
+        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.28
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)

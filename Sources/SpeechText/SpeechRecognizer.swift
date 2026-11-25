@@ -5,7 +5,8 @@ import VoiceMeetCore
 /// one source (the microphone, the audio fixture, or a capture's pushed buffers) and a word list
 /// that stays as it was at the start, and it writes:
 ///
-/// - `partial`: everything said so far, with the stretch that goes on, twice a second;
+/// - `partial`: everything said so far, with the stretch that goes on, twice a second, as heard and
+///   with the word list's corrections (`HeardText`);
 /// - `segment`: a stretch that ended at a pause (`SpeechStretch`), final, with its times in seconds
 ///   from the recognizer's first sample.
 ///
@@ -16,7 +17,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
         case loading(SpeechLoad)
         /// The model is ready: what was said since the start comes as text now.
         case ready
-        case partial(String)
+        case partial(HeardText)
         case segment(SpeechSegment)
         /// A line for the log: counts and times, never the words.
         case note(String)
@@ -159,27 +160,29 @@ public final class SpeechRecognizer: @unchecked Sendable {
 
         let rate = Double(SpeechStretch.rate)
         var segments: [SpeechSegment] = []
-        var said = ""
+        var said = HeardText.empty
         var stretch = SpeechStretch()
         /// The index of the stretch's first sample.
         var stretchStart = 0
         var passes = 0
-        /// A stretch as text: final, a segment with its times.
-        func segment(_ count: Int) async -> SpeechSegment? {
+        /// A stretch as text: final, a segment with its times, and the text as heard.
+        func segment(_ count: Int) async -> (SpeechSegment, HeardText)? {
             let samples = Array(stretch.samples.prefix(count))
             guard let heard = try? await engine.hear(samples, final: true) else { return nil }
-            let text = words.repair(heard.text.trimmingCharacters(in: .whitespacesAndNewlines))
+            let corrected = HeardText(heard.text, words: words)
+            let text = corrected.text
             guard !text.isEmpty else { return nil }
             let offset = Double(stretchStart) / rate
             let timed = heard.words.map { SpeechSegment.Word(start: offset + $0.start, end: offset + $0.end, text: $0.text) }
             // the words' own times, where the model gave them: the stretch starts before the voice
-            return SpeechSegment(
+            let segment = SpeechSegment(
                 start: timed.first?.start ?? offset, end: timed.last?.end ?? offset + Double(count) / rate, text: text, words: timed)
+            return (segment, corrected)
         }
         func ended(_ count: Int) async {
-            if let done = await segment(count) {
+            if let (done, corrected) = await segment(count) {
                 segments.append(done)
-                said = Spoken.join(said, done.text)
+                said = HeardText.join(said, corrected)
                 heard(.segment(done))
             }
             stretch.removeFirst(count)
@@ -195,7 +198,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
             stretch.append(samples)
             if isEnded {
                 if !stretch.samples.isEmpty { await ended(stretch.samples.count) }
-                heard(.note("heard \(String(format: "%.1f", Double(first + samples.count) / rate)) s as \(segments.count) segments, \(Spoken.wordCount(said)) words, in \(passes + 1) passes"))
+                heard(.note("heard \(String(format: "%.1f", Double(first + samples.count) / rate)) s as \(segments.count) segments, \(Spoken.wordCount(said.text)) words, in \(passes + 1) passes"))
                 return segments
             }
             if !samples.isEmpty {
@@ -204,7 +207,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
                     await ended(end)
                     heard(.partial(said))
                 } else if stretch.seconds >= 0.4, let partial = try? await engine.hear(stretch.samples, final: false) {
-                    heard(.partial(Spoken.join(said, words.repair(partial.text.trimmingCharacters(in: .whitespacesAndNewlines)))))
+                    heard(.partial(HeardText.join(said, HeardText(partial.text, words: words))))
                 }
             }
             try? await Task.sleep(nanoseconds: 400_000_000)

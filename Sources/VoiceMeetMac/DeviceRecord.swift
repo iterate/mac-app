@@ -298,12 +298,12 @@ struct RecordSection: View {
         let windowHeld = window.readsWindowText && missing.contains(.accessibility)
         VStack(alignment: .leading, spacing: 7) {
             SectionTitle(title: "Record into the mind") { state }
-            HStack(spacing: 6) {
+            HStack(spacing: Theme.Metric.recordChipGap) {
                 ForEach(DeviceRecord.switches) { item in
                     chip(item.title, symbol: item.symbol, id: "record.\(item.source.rawValue)", isOn: record.isOn(item.source),
                          isHeld: held.contains { $0.source == item.source }) { record.set(item.source, $0) }
                 }
-                chip("Window text", symbol: "text.viewfinder", id: "record.windowText", isOn: window.readsWindowText, isHeld: windowHeld) {
+                chip("Window text", symbol: "text.alignleft", id: "record.windowText", isOn: window.readsWindowText, isHeld: windowHeld) {
                     window.readsWindowText = $0
                 }
                 .help("On a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s. Never of a password manager.")
@@ -352,10 +352,24 @@ struct RecordSection: View {
         Button {
             set(!isOn)
         } label: {
-            VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 13, weight: .regular))
-                Text(title).font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.85)
+            // the mock: a 15 pt icon 3 over the name on one line (line height 1.3), the two centred
+            // in the 46 pt tile. The name is a point under the mock's 11, so SF takes Inter's width
+            // and keeps 6 pt of air at each side; a name still too long tightens, then shrinks to 90 %
+            VStack(spacing: Theme.Metric.recordChipIconGap) {
+                // a symbol at 11 pt fills the square as the mock's line drawings do (about 13 pt)
+                Image(systemName: symbol)
+                    .symbolRenderingMode(.monochrome)
+                    .font(.system(size: 11, weight: .regular))
+                    .frame(width: Theme.Metric.recordChipIcon, height: Theme.Metric.recordChipIcon)
+                Text(title)
+                    .font(.system(size: Theme.Size.recordChipLabel))
+                    .lineLimit(1)
+                    .allowsTightening(true)
+                    .minimumScaleFactor(0.9)
+                    .frame(height: (Theme.Size.caption * 1.3).rounded())
+                    .padding(.horizontal, Theme.Metric.recordChipInset)
             }
+            .frame(maxWidth: .infinity)
         }
         .buttonStyle(TileStyle(tint: isHeld ? .held : isOn ? .on : nil))
         .accessibilityIdentifier(id)

@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The panel under the mark (`MenuBarPanel`).
     private let panelWindow = MenuBarPanel()
     private var statusItem: NSStatusItem?
+    /// The mark: the status item's button, or a test copy's own (`OffScreen.markButton`).
+    private var markButton: NSStatusBarButton?
     private var recordDot: RecordDotView?
     /// What the mark shows now: it is written again only when it changes.
     private var shownMark: MenuBarMark?
@@ -68,14 +70,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         if environment.controlSocket != nil { ControlSocket.makeAccessibilityElements() }
 
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePanel)
+        // a test copy's mark is in a window of its own, off the menu bar (`OffScreen`)
+        if OffScreen.isOn {
+            markButton = OffScreen.markButton()
+            // a plain button is its own accessibility element
+            markButton?.setAccessibilityIdentifier("statusItem")
+        } else {
+            let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            self.statusItem = statusItem
+            markButton = statusItem.button
+        }
+        markButton?.target = self
+        markButton?.action = #selector(togglePanel)
         // the button's cell is its accessibility element
-        statusItem.button?.cell?.setAccessibilityIdentifier("statusItem")
-        self.statusItem = statusItem
+        markButton?.cell?.setAccessibilityIdentifier("statusItem")
         let markSize = environment.hasOwnHome ? IterateIcon.testImage(MenuBarMark(ink: .live, dot: .none)).size : IterateIcon.plain.size
-        if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: markSize) }
+        if let markButton { recordDot = RecordDotView.attach(to: markButton, imageSize: markSize) }
         // after the mark: the first lines look for the cameras, which can take a moment
         logRunStart()
 
@@ -254,7 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let capture = Capture()
         capture.onChange = { [weak self] in self?.stateDidChange() }
         capture.allow = { [weak self] permission in self?.guide(permission) }
-        capture.speech = { [weak self] in self?.speechChoice.chosen ?? .default }
+        // a capture hears with a local model, also when dictation runs at OpenAI
+        capture.speech = { [weak self] in self?.speechChoice.local ?? .default }
         capture.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
@@ -278,7 +289,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fn and ⌥⇧D dictate into the app in front, with the word list of the mind this Mac is lent to
     /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
     private func startDictation() {
-        speech.model = { [weak self] in self?.speechChoice.chosen ?? .default }
+        speech.model = { [weak self] in
+            // the key may have come (cli.mjs) or gone: the next listening knows
+            self?.speechChoice.refreshKey()
+            return self?.speechChoice.chosen ?? .default
+        }
+        // GPT Live Transcribe at OpenAI, with Parakeet v3 behind it (README, "Dictation")
+        let openAIKey = speechChoice.openAIKey
+        speech.online = { model, words, heard in
+            OnlineSpeech.recognizer(model, words: words, key: { openAIKey?.read() }, heard: heard)
+        }
         speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
         let speechLog = AppLog("speech")
         speech.log = { speechLog.info($0) }
@@ -309,13 +329,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         register(.dictation, "dictation", "held, dictates; tapped, stays on", pressed: { [weak self] in self?.dictation.shortcutPressed() }, released: { [weak self] in self?.dictation.shortcutReleased() })
     }
 
-    /// The chosen speech model, loaded in the background a moment after the start when its files
-    /// are on this Mac: the first dictation is then at once, not after Core ML prepared the model
-    /// for the Neural Engine (24.8 s, seen on 24 Nov 2026). A home of its own loads it only for an
-    /// audio fixture; a drawing never gets here.
+    /// The chosen local speech model, loaded in the background a moment after the start when its
+    /// files are on this Mac: the first dictation is then at once, not after Core ML prepared the
+    /// model for the Neural Engine (24.8 s, seen on 24 Nov 2026). With dictation at OpenAI it is
+    /// the model of captures and the one that hears when OpenAI fails. A home of its own loads it
+    /// only for an audio fixture; a drawing never gets here.
     private func preloadSpeech() {
         guard !environment.hasOwnHome || environmentFixture != nil else { return }
-        let model = speechChoice.chosen
+        let model = speechChoice.local
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log] in
             guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
             Task { @MainActor in
@@ -711,7 +732,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// red dot at its lower right, filled while it records, a ring while it is paused, and does not
     /// change the ink (`MenuBarMark`).
     private func updateStatusButton() {
-        guard let button = statusItem?.button else { return }
+        guard let button = markButton else { return }
         let use = MenuBarMark.inUse(lastUse: model.lastUse?.at, now: Date())
         // one look again, at the end of the red: a newer use moves it, and none is left behind
         useEnds?.cancel()
@@ -746,7 +767,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel() {
-        guard let button = statusItem?.button else { return }
+        guard let button = markButton else { return }
         if panelWindow.isShown {
             panelWindow.performClose(nil)
         } else {
@@ -754,7 +775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lend.panelOpened()
             stateDidChange()
             refreshPanel()
-            NSApp.activate(ignoringOtherApps: true)
+            OffScreen.activate()
             panelWindow.show(under: button)
         }
     }
@@ -883,7 +904,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Not Now")
-        NSApp.activate(ignoringOtherApps: true)
+        OffScreen.activate()
         guard alert.runModal() == .alertFirstButtonReturn else {
             return log.info("the guide for \(permission.title): the person chose Not Now")
         }

@@ -103,7 +103,8 @@ final class ControlSocket {
         case "ui.state":
             var answer = state()
             answer["windows"] = NSApp.windows.filter(\.isVisible).map { window -> [String: Any] in
-                ["kind": String(describing: type(of: window)), "title": window.title, "key": window.isKeyWindow, "frame": Self.rect(window.frame)]
+                // the app's key window: a banner's panel says it is key to draw as one, and is not
+                ["kind": String(describing: type(of: window)), "title": window.title, "key": window === NSApp.keyWindow, "frame": Self.rect(window.frame)]
             }
             answer["approval"] = approval.waiting.map { ["question": $0.question.words, "mind": $0.question.mind ?? NSNull()] as [String: Any] } ?? NSNull()
             var perf = Perf.figures().dictionary

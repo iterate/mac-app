@@ -203,6 +203,9 @@ public struct KeyTapRule: Equatable, Sendable {
 
     /// A key went down. `swallow`: the key goes to no app.
     public mutating func keyDown(code: Int64) -> (heard: Heard?, swallow: Bool) {
+        // macOS sends the 🌐 key as a key press too, when a short tap of it ends and fn is still
+        // down: that is fn itself, not fn's combination, or every tap would be thrown away
+        if Self.fnCodes.contains(code) { return (nil, false) }
         if code == Self.escapeCode, escape { return (.escape, swallowsEscape) }
         return (fnDown ? .otherKey : nil, false)
     }

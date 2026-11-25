@@ -3,45 +3,85 @@ import Foundation
 import VoiceMeetCore
 
 /// ONE SPEECH MODEL that the app can use (README, "Dictation"): the list of them is `all`, which
-/// the panel's picker and `harness/speech-bench` show. Every model here runs on this Mac through
-/// FluidAudio as Core ML: no sound and no text leaves it. Each one shares Parakeet v3's tokenizer,
-/// so the small CTC model that hears the word list's terms rescores the text of all of them; then
-/// the list repairs the wrong forms.
+/// Settings › Dictation shows. The local ones (`local`, which `harness/speech-bench` runs too) run
+/// on this Mac through FluidAudio as Core ML: no sound and no text leaves it. Each one shares
+/// Parakeet v3's tokenizer, so the small CTC model that hears the word list's terms rescores the
+/// text of all of them; then the list repairs the wrong forms. One model runs at OpenAI
+/// (`gptLiveTranscribe`, `OpenAIStream`): the sound goes there, and a local model hears it when
+/// OpenAI fails.
 public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
+    /// Where a model runs.
+    public enum Runs: Equatable, Hashable, Sendable {
+        case onThisMac(AsrModelVersion)
+        /// OpenAI's realtime transcription, with the OpenAI key of this Mac (`OpenAIKey`).
+        case openAI
+    }
+
     public let id: String
     public let name: String
-    /// The download, in MB.
+    /// The download, in MB: 0 for a model that runs online.
     public let megabytes: Int
     public let license: String
-    /// How it runs: "Core ML (FluidAudio)" for each model here. Another runtime (MLX) needs an
-    /// engine of its own behind `SpeechEngine`.
+    /// How it runs: "Core ML (FluidAudio)" for each local model here. Another runtime (MLX) needs
+    /// an engine of its own behind `SpeechEngine`.
     public let runtime: String
-    public let version: AsrModelVersion
+    public let runs: Runs
+
+    public var isLocal: Bool { runs != .openAI }
 
     public static let parakeetV3 = SpeechModel(
         id: "parakeet-v3", name: "Parakeet TDT 0.6B v3", megabytes: 480, license: "CC BY 4.0", runtime: "Core ML (FluidAudio)",
-        version: .v3)
+        runs: .onThisMac(.v3))
     public static let parakeetUltra = SpeechModel(
         id: "parakeet-ultra", name: "Parakeet Ultra", megabytes: 632, license: "CC BY 4.0", runtime: "Core ML (FluidAudio)",
-        version: .ultra)
-    /// The models the app offers. Tried and left out (speech-bench, 24 Nov 2026): Fluid Speech Pro
+        runs: .onThisMac(.ultra))
+    /// `gpt-live-transcribe` with delay `low`, which writes the words while the sound streams in.
+    /// On the owner's own voice (speech-bench, 25 Nov 2026) it had half the word errors of
+    /// Parakeet v3 (WER 10.3 against 21.8) and got 130 of 146 terms. $0.017 a minute of sound.
+    public static let gptLiveTranscribe = SpeechModel(
+        id: "gpt-live-transcribe", name: "GPT Live Transcribe", megabytes: 0, license: "OpenAI", runtime: "OpenAI realtime (WebSocket)",
+        runs: .openAI)
+    /// The local models. Tried and left out (speech-bench, 24 Nov 2026): Fluid Speech Pro
     /// (`FluidVoice-Labs/fluid-speech-pro-coreml`): FluidAudio 0.18.4 cuts its text short; through
     /// its fork (altic-dev/FluidAudio) it reads right, but it got 67 of 146 terms on the synthetic
     /// set where v3 got 124. Phonon-2.5 English (Core ML) got 60.
-    public static let all = [parakeetV3, parakeetUltra]
+    public static let local = [parakeetV3, parakeetUltra]
+    /// The models the app offers.
+    public static let all = local + [gptLiveTranscribe]
 
-    /// The model of a stored choice; the default for none, or for an id the list does not have.
-    public static func chosen(_ id: String?) -> SpeechModel {
-        all.first { $0.id == id } ?? .default
+    /// The model of a stored choice. With no choice (or an id the list does not have) it is
+    /// `gptLiveTranscribe` when this Mac has an OpenAI key, else `default`. A choice of an online
+    /// model with no key is `default` too.
+    public static func chosen(_ id: String?, hasKey: Bool = false) -> SpeechModel {
+        if let model = all.first(where: { $0.id == id }), model.isLocal || hasKey { return model }
+        return hasKey ? gptLiveTranscribe : .default
     }
 
-    /// The model the app uses until the person chooses another (README, "Dictation": the bench's
-    /// result on the owner's own voice decided it).
+    /// The local model the app uses until the person chooses another, and the one that hears
+    /// when OpenAI fails (README, "Dictation": the bench's result on the owner's own voice decided
+    /// it among the local models).
     public static let `default` = parakeetV3
 
-    /// Whether its files are on this Mac, so that a load downloads nothing.
+    /// The size, licence and runtime, in a few words for the list in Settings.
+    public var detail: String {
+        isLocal ? "\(megabytes) MB · \(license)" : "OpenAI, $1/hour of talking, the sound leaves this Mac"
+    }
+
+    /// Whether its files are on this Mac, so that a load downloads nothing. An online model has
+    /// no files: always true.
     public var isOnDisk: Bool {
-        AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: version), version: version)
+        guard case .onThisMac(let version) = runs else { return true }
+        return AsrModels.modelsExist(at: AsrModels.defaultCacheDirectory(for: version), version: version)
+    }
+}
+
+/// A model that runs online has no load and no `SpeechEngine`: its recognizer is a
+/// `StreamRecognizer`.
+public enum SpeechModelError: Error, LocalizedError {
+    case online(String)
+    public var errorDescription: String? {
+        if case .online(let id) = self { return "\(id) runs online: it has no files to load" }
+        return nil
     }
 }
 
@@ -107,6 +147,7 @@ public actor SpeechModels {
     /// other. For the picker, and for a load at the app's start.
     @discardableResult
     public func load(_ model: SpeechModel, progress: @escaping @Sendable (SpeechLoad) -> Void = { _ in }) async throws -> Loaded {
+        guard case .onThisMac(let version) = model.runs else { throw SpeechModelError.online(model.id) }
         if let loading, loading.id == model.id {
             // a load that goes on (the one at the app's start): this caller waits for it too
             if ready != model.id { progress(.loading) }
@@ -123,7 +164,7 @@ public actor SpeechModels {
             if case .downloading = step.phase { progress(.downloading(step.fractionCompleted * share)) } else if case .compiling = step.phase { progress(.loading) }
         }
         let task = Task<Loaded, Error> {
-            let speech = try await AsrModels.downloadAndLoad(version: model.version, progressHandler: report)
+            let speech = try await AsrModels.downloadAndLoad(version: version, progressHandler: report)
             let ctc = try? await CtcModels.downloadAndLoad(progressHandler: { step in
                 if !terms, case .downloading = step.phase { progress(.downloading(share + step.fractionCompleted * (1 - share))) }
             })
@@ -144,7 +185,7 @@ public actor SpeechModels {
     /// Loads `model` when its files are on this Mac, at a low priority: the first use is then
     /// at once (README, "Dictation"). Downloads nothing.
     public nonisolated func preload(_ model: SpeechModel) -> Task<Double?, Never>? {
-        guard model.isOnDisk else { return nil }
+        guard model.isLocal, model.isOnDisk else { return nil }
         return Task.detached(priority: .background) {
             let started = Date()
             guard (try? await self.load(model)) != nil else { return nil }

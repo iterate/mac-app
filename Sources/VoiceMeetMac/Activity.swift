@@ -117,7 +117,7 @@ private final class ActivityPillWindow {
         let panel = self.panel ?? makePanel(frame)
         self.panel = panel
         panel.setFrame(frame, display: true)
-        panel.orderFrontRegardless()
+        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
         hide?.cancel()
         // while an act runs the pill stays
         guard running.isEmpty else { return }

@@ -243,4 +243,31 @@ final class KeyTapRuleTests: XCTestCase {
         XCTAssertFalse(rule.wantsKeyDowns)
         XCTAssertNil(rule.resumed(fn: false), "nothing changed")
     }
+
+    /// The owner's log (25 Nov): each tap of a double tap was "cancelled with no sign" as it ended.
+    /// macOS sends the 🌐 key's own key press (179) when a short tap ends, while fn is still down.
+    func testTheGlobeKeysOwnPressAtTheEndOfATapIsNotACombination() {
+        var rule = KeyTapRule()
+        var queued: [KeyTapRule.Heard] = []
+        let at = Date(timeIntervalSince1970: 0)
+        for _ in 0..<2 {
+            queued += [rule.flagsChanged(code: 63, fn: true)].compactMap { $0 }
+            let globe = rule.keyDown(code: 179)
+            XCTAssertNil(globe.heard)
+            XCTAssertFalse(globe.swallow)
+            XCTAssertNil(rule.keyDown(code: 63).heard)
+            queued += [rule.flagsChanged(code: 63, fn: false)].compactMap { $0 }
+        }
+        XCTAssertEqual(queued, [.fn(down: true), .fn(down: false), .fn(down: true), .fn(down: false)])
+
+        var key = DictationKey()
+        let times = [0.0, 0.08, 0.15, 0.24].map { at.addingTimeInterval($0) }
+        var acts: [DictationKey.Act] = []
+        for (heard, time) in zip(queued, times) {
+            guard case .fn(let down) = heard else { continue }
+            acts.append(down ? key.down(at: time) : key.up(at: time))
+        }
+        XCTAssertEqual(acts, [.start, .wait(until: at.addingTimeInterval(DictationKey.window)), .lock, .nothing])
+        XCTAssertTrue(key.isLocked)
+    }
 }

@@ -2,7 +2,7 @@
 // run.mjs: the app, started and driven with no hand, in a home of its own (README, "Testing with
 // no hand").
 //
-//   node harness/run.mjs <scenario|ci|all> [--app .build/debug/VoiceMeetMac] [--keep]
+//   node harness/run.mjs <scenario|ci|all> [--app .build/debug/VoiceMeetMac] [--keep] [--on-screen]
 //
 // It builds nothing: it runs the app that `swift build` made. Each scenario makes a new home in the
 // temporary folder, starts the app there with `--home <home>`, drives the control socket
@@ -13,7 +13,12 @@
 // the exit is 1 when one failed. `ci` is every scenario not marked local; `all` is every one.
 // `--keep` keeps each home, with the app's log in <home>/logs/app.log. Every copy it started is
 // killed when it ends: after a scenario, after a failure, an exception, Ctrl-C or SIGTERM.
-import { execFileSync, spawn } from "node:child_process";
+// A copy shows nothing to the person at the Mac (Sources/VoiceMeetMac/OffScreen.swift): while a
+// scenario runs, the window server's list is read every 200 ms (harness/on-screen.js), and the
+// scenario fails when a window of a copy shows on a display, a copy is the active app, or
+// `ui.state` has a window of it that is key. `--on-screen` starts the copies with that flag: they
+// show themselves as the installed app does, and each scenario fails on what it showed.
+import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -97,6 +102,11 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
  * and `seed` the events its context `/devices/<NAME>` holds before the app connects (as an earlier
  * run of the app left them).
  */
+/** The word list of the speech fixtures: the owner's forms of Beelink (25 November 2026) among them. */
+const WORDS = "- Herdr: herder, hurdur, her dr\n- Beelink: b-link, be link, bee link, b link\n- Doppler: dopler\n";
+/** A heard form of Beelink, with any separator (`WordList.separators`). */
+const WRONG_BEELINK = /(?<![\p{L}\p{N}])(?:b|be|bee)[\s\-\u2010-\u2015\u2212_]+link(?![\p{L}\p{N}])/iu;
+
 function withMind(home, minds = [{ mind: MIND, name: NAME }], { words, seed } = {}) {
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
@@ -172,9 +182,43 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   });
 }
 
+/** Arguments of every copy: `--on-screen` when the harness has it. */
+const copyArgs = [];
+
+/** What the person at the Mac saw of the copies while the scenario ran: one line each. */
+let sightings = [];
+const seen = new Set();
+
+function saw(what) {
+  if (seen.has(what)) return;
+  seen.add(what);
+  sightings.push(what);
+}
+
+/** Reads the window server's list every 200 ms until `stop()`, for the copies that run. */
+function watchScreens() {
+  let stopped = false;
+  const look = () => {
+    const pids = [...running].map((child) => child.pid).filter(Boolean);
+    if (stopped) return;
+    if (!pids.length) return void setTimeout(look, 200);
+    execFile("/usr/bin/osascript", ["-l", "JavaScript", join(root, "harness/on-screen.js"), ...pids.map(String)], { timeout: 10000 }, (error, stdout) => {
+      if (!error) {
+        const { windows, front } = JSON.parse(stdout);
+        for (const w of windows)
+          saw(`window ${w.number} "${w.name}" (layer ${w.layer}, alpha ${w.alpha}) at ${w.frame.X},${w.frame.Y} ${w.frame.Width}×${w.frame.Height}`);
+        if (front) saw(`the copy (pid ${front}) is the active app`);
+      }
+      if (!stopped) setTimeout(look, 200);
+    });
+  };
+  look();
+  return () => (stopped = true);
+}
+
 /** The app in `home`, until `quit`. */
 async function start(app, home, env = {}, args = []) {
-  const child = spawn(app, ["--home", home, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "ignore"] });
+  const child = spawn(app, ["--home", home, ...copyArgs, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "ignore"] });
   running.add(child);
   const ended = new Promise((resolve) => child.on("exit", resolve)).then(() => running.delete(child));
   const control = (method, parameters) => ask(join(home, "control.sock"), method, parameters);
@@ -193,7 +237,12 @@ async function start(app, home, env = {}, args = []) {
     await quit();
     throw error;
   }
-  return { control, endpoint, quit, pid: child.pid, state: () => control("ui.state") };
+  const state = async () => {
+    const answer = await control("ui.state");
+    for (const window of answer.windows ?? []) if (window.key) saw(`its ${window.kind} "${window.title}" is key`);
+    return answer;
+  };
+  return { control, endpoint, quit, pid: child.pid, state };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -760,7 +809,7 @@ const scenarios = {
   "dictation-fixture": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio (about 480 MB) and `say`",
     async run({ app, home }) {
-      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
+      withMind(home, undefined, { words: WORDS });
       const sentence = "Herdr runs on the Beelink with Doppler";
       const fixture = join(home, "fixture.aiff");
       // `say -o` writes a file and plays nothing
@@ -780,6 +829,8 @@ const scenarios = {
         await run.control("dictation.stop");
         const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
+        // the written text has the terms alone: no heard form of the list, with any separator
+        if (WRONG_BEELINK.test(said)) throw new Error(`"${said}" has a heard form of Beelink`);
         // Core ML compiles the model for the Neural Engine once for each build of the app (its
         // cache, ~/Library/Caches/<bundle or process>/com.apple.e5rt.e5bundlecache, is the
         // build's): the first run after a build waits 12 to 24 s for the model, every later
@@ -799,7 +850,7 @@ const scenarios = {
   "dictation-fn": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
     async run({ app, home }) {
-      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
+      withMind(home, undefined, { words: WORDS });
       const fixture = join(home, "fixture.aiff");
       execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler"]);
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
@@ -879,7 +930,7 @@ const scenarios = {
       const fixture = join(home, "fixture.aiff");
       execFileSync("say", ["-o", fixture, "[[slnc 2000]] Herdr runs on the Beelink with Doppler"]);
       const words = join(home, "words.md");
-      writeFileSync(words, "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
+      writeFileSync(words, WORDS);
       const lines = execFileSync(bench, ["--model", "parakeet-v3", "--words", words, fixture], { encoding: "utf8", timeout: 300_000, stdio: ["ignore", "pipe", "ignore"] })
         .trim()
         .split("\n")
@@ -887,6 +938,7 @@ const scenarios = {
       const segments = lines.at(-1).segments ?? [];
       const text = segments.map((segment) => segment.text).join(" ");
       for (const term of ["Herdr", "Beelink", "Doppler"]) if (!text.includes(term)) throw new Error(`"${text}" has no ${term}`);
+      if (WRONG_BEELINK.test(text)) throw new Error(`"${text}" has a heard form of Beelink`);
       // the words start after the silence, on the capture's clock
       if (!(segments[0].t >= 1500 && segments[0].t < 3500 && segments.at(-1).to > segments[0].t))
         throw new Error(`the segments' times are ${JSON.stringify(segments.map(({ t, to }) => [t, to]))}`);
@@ -1079,15 +1131,16 @@ const scenarios = {
         [(r) => r.control("approval.answer", { allow: false }), denied],
         [(r) => r.control("ui.press", { id: "approval.once" }), ran],
         [(r) => r.control("ui.press", { id: "approval.deny" }), denied],
-        // the keys of the question's panel: Return approves once, Esc denies. Only while the panel
-        // is key: its keys are SwiftUI's shortcuts, and no window is key while the screen is locked
+        // the keys of the question's panel: Return approves once, Esc denies. A test copy's panel
+        // is never key (OffScreen.swift): `ui.key` gives them to the front window, whose SwiftUI
+        // shortcuts take them (`by: "window"`). Else the socket answers, and the result says so.
         [(r) => byKey(r, "return", true), ran],
         [(r) => byKey(r, "escape", false), denied],
       ];
       let keysSkipped = false;
       const byKey = async (r, key, allow) => {
-        const panel = (await r.state()).windows.find((window) => window.title === "Ask");
-        if (panel?.key) return r.control("ui.key", { key });
+        const pressed = await r.control("ui.key", { key });
+        if (pressed.title === "Ask" && pressed.by === "window") return pressed;
         keysSkipped = true;
         return r.control("approval.answer", { allow });
       };
@@ -1116,7 +1169,7 @@ const scenarios = {
       const acts = (await run.state()).activity.entries;
       // the uses that ran: two by the socket and the buttons, one by Return, two after the time was approved
       if (acts.length !== 5 || acts.some((act) => act.did !== "Ran a command")) throw new Error(`the activity is ${JSON.stringify(acts)}`);
-      if (keysSkipped) return { skipped: "Return and Esc: the question's panel was not key (a locked screen, or another app in front)" };
+      if (keysSkipped) return { skipped: "Return and Esc: the question's panel did not take them through ui.key" };
     } finally {
       await run.quit();
     }
@@ -1196,15 +1249,20 @@ const scenarios = {
 async function main() {
   const { positionals, values } = parseArgs({
     allowPositionals: true,
-    options: { app: { type: "string", default: join(root, ".build/debug/VoiceMeetMac") }, keep: { type: "boolean" } },
+    options: {
+      app: { type: "string", default: join(root, ".build/debug/VoiceMeetMac") },
+      keep: { type: "boolean" },
+      "on-screen": { type: "boolean" },
+    },
   });
+  if (values["on-screen"]) copyArgs.push("--on-screen");
   const wanted = positionals[0];
   const all = Object.entries(scenarios).map(([name, scenario]) =>
     typeof scenario === "function" ? { name, run: scenario } : { name, ...scenario },
   );
   const chosen = wanted === "all" ? all : wanted === "ci" ? all.filter((s) => !s.local) : all.filter((s) => s.name === wanted);
   if (!chosen.length) {
-    console.error(`node harness/run.mjs <${all.map((s) => s.name).join("|")}|ci|all> [--app <path>] [--keep]`);
+    console.error(`node harness/run.mjs <${all.map((s) => s.name).join("|")}|ci|all> [--app <path>] [--keep] [--on-screen]`);
     process.exit(2);
   }
   if (!existsSync(values.app)) throw new Error(`no app at ${values.app}: run swift build first`);
@@ -1214,17 +1272,24 @@ async function main() {
     const home = mkdtempSync(join(tmpdir(), "itx-"));
     const started = Date.now();
     const result = { scenario: scenario.name };
+    sightings = [];
+    seen.clear();
+    const stopWatch = watchScreens();
     try {
       // a scenario may answer its figures (`perf`), or what it could not check here (`skipped`)
       const { skipped, ...figures } = (await scenario.run({ app: values.app, home })) ?? {};
       if (Object.keys(figures).length) result.perf = figures;
       if (skipped) result.skipped = skipped;
+      // the last look of the window server, after the scenario's end
+      await sleep(400);
+      if (sightings.length) throw new Error(`a copy showed itself to the person at the Mac: ${sightings.join("; ")}`);
       result.ok = true;
     } catch (error) {
       failed++;
       result.ok = false;
       result.error = error.message;
     } finally {
+      stopWatch();
       killAll();
     }
     result.seconds = Math.round((Date.now() - started) / 100) / 10;

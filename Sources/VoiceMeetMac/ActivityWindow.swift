@@ -410,8 +410,8 @@ final class ActivityWindow: NSObject, NSWindowDelegate {
             self.window = window
             opened(true)
         }
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        OffScreen.activate()
+        if let window { OffScreen.orderFront(window) { window.makeKeyAndOrderFront(nil) } }
     }
 
     func windowWillClose(_ notification: Notification) {

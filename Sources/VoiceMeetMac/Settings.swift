@@ -594,16 +594,15 @@ private struct DictationPage: View {
                 }
             }
             SettingsGroup(title: "Speech model") {
-                SettingsRow(
-                    title: "Put speech into words",
-                    detail: "\(speech.chosen.name), \(speech.chosen.megabytes) MB, \(speech.isOnDisk(speech.chosen) ? "on this Mac" : "not downloaded"). No sound and no text leaves this Mac.",
-                    isFirst: true
-                ) {
-                    Segments(id: "settings.speechWhere", choices: ["On this Mac"], selection: "On this Mac", choose: { _ in })
+                SettingsRow(title: "Put speech into words", detail: whereDetail, isFirst: true) {
+                    Segments(
+                        id: "settings.speechWhere", choices: ["On this Mac", "OpenAI"], selection: speech.chosen.isLocal ? "On this Mac" : "OpenAI",
+                        choose: { speech.choose($0 == "OpenAI" ? .gptLiveTranscribe : .default) })
                 }
                 ForEach(SpeechModel.all) { model in
                     modelRow(model)
                 }
+                OpenAIKeyRow(speech: speech)
                 if let failure = speech.failure {
                     WarningRow(words: failure)
                 }
@@ -643,6 +642,15 @@ private struct DictationPage: View {
                 .padding(.vertical, 10)
             }
         }
+    }
+
+    /// Where the sound goes, under "Put speech into words".
+    private var whereDetail: String {
+        let model = speech.chosen
+        guard model.isLocal else {
+            return "\(model.name) at OpenAI: the sound leaves this Mac. When OpenAI fails, \(SpeechModel.default.name) hears it here. Captures stay on this Mac."
+        }
+        return "\(model.name), \(model.megabytes) MB, \(speech.isOnDisk(model) ? "on this Mac" : "not downloaded"). No sound and no text leaves this Mac."
     }
 
     /// "fn ×" while fn dictates; "Use fn" when the person removed it.
@@ -686,7 +694,7 @@ private struct DictationPage: View {
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(model.name).font(.system(size: 13)).lineHeight(1.3, size: 13)
-                        Text("\(model.megabytes) MB · \(model.license)").font(.system(size: 11.5)).lineHeight(1.4, size: 11.5).foregroundStyle(Theme.t3)
+                        Text(model.detail).font(.system(size: 11.5)).lineHeight(1.4, size: 11.5).foregroundStyle(Theme.t3)
                     }
                     Spacer(minLength: 8)
                     Text(status(of: model)).font(.system(size: 12)).foregroundStyle(Theme.t2)
@@ -705,7 +713,54 @@ private struct DictationPage: View {
             if case .downloading(let part) = getting.load { return "Downloading: \(Int(part * 100))%" }
             return "Loading…"
         }
+        if !model.isLocal { return speech.hasKey ? "Online" : "Needs a key" }
         return speech.isOnDisk(model) ? "On this Mac" : "Download"
+    }
+}
+
+/// The OpenAI key of GPT Live Transcribe: whether it is set, a secure field to set it, and Remove.
+/// The key goes into the login Keychain (`OpenAIKey`); this view never shows it.
+private struct OpenAIKeyRow: View {
+    @ObservedObject var speech: SpeechChoice
+    @State private var draft = ""
+
+    var body: some View {
+        SettingsRow(
+            title: "OpenAI API key",
+            detail: speech.hasKey
+                ? "Set, in your login Keychain. Dictation and the input bar send their sound with it."
+                : "Not set. With a key, GPT Live Transcribe is the default. It is kept in your login Keychain."
+        ) {
+            if speech.hasKey {
+                HStack(spacing: 8) {
+                    DotLine(words: "Set", color: Theme.ok, text: Theme.okText)
+                    Button("Remove") { speech.removeKey() }.buttonStyle(SettingsLook.button)
+                        .accessibilityIdentifier("settings.openAIKey.remove")
+                }
+            } else {
+                HStack(spacing: 8) {
+                    SecureField("Key", text: $draft, prompt: Text("sk-…"))
+                        .textFieldStyle(.plain)
+                        .font(SettingsLook.mono)
+                        .labelsHidden()
+                        .onSubmit(save)
+                        .padding(.horizontal, 8)
+                        .frame(width: 180, height: 24)
+                        .background(SettingsLook.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(SettingsLook.fieldEdge))
+                        .accessibilityIdentifier("settings.openAIKey")
+                    Button("Set", action: save).buttonStyle(SettingsLook.button)
+                        .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .accessibilityIdentifier("settings.openAIKey.set")
+                }
+            }
+        }
+        .onAppear { speech.refreshKey() }
+    }
+
+    private func save() {
+        speech.setKey(draft)
+        draft = ""
     }
 }
 
@@ -1004,8 +1059,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             window.center()
             self.window = window
         }
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        OffScreen.activate()
+        if let window { OffScreen.orderFront(window) { window.makeKeyAndOrderFront(nil) } }
     }
 
     func close() {

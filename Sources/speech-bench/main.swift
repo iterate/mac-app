@@ -26,8 +26,8 @@ let fast = arguments.contains("--fast")
 arguments.removeAll { $0 == "--fast" }
 let modelId = option("--model")
 let words = option("--words").flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }.map(WordList.init(markdown:)) ?? .empty
-guard let model = SpeechModel.all.first(where: { $0.id == modelId }) else {
-    FileHandle.standardError.write(Data("speech-bench --model <\(SpeechModel.all.map(\.id).joined(separator: "|"))> [--words words.md] [--fast] <file> …\n".utf8))
+guard let model = SpeechModel.local.first(where: { $0.id == modelId }) else {
+    FileHandle.standardError.write(Data("speech-bench --model <\(SpeechModel.local.map(\.id).joined(separator: "|"))> [--words words.md] [--fast] <file> …\n".utf8))
     exit(2)
 }
 
@@ -90,7 +90,7 @@ for path in arguments {
     try file.read(into: buffer)
     let samples = audio.samples(of: buffer)
     let recognizer = SpeechRecognizer(model: model, words: words, engine: { engine }) { event in
-        if case .partial(let text) = event, !text.isEmpty { partials.add(text) }
+        if case .partial(let said) = event, !said.text.isEmpty { partials.add(said.text) }
     }
     partials.reset()
     recognizer.start()

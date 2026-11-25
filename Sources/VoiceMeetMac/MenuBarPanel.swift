@@ -44,7 +44,7 @@ final class MenuBarPanel: NSObject {
             if origin.y + size.height > visible.maxY - Self.gap { origin.y = visible.maxY - Self.gap - size.height }
         }
         window.setFrame(NSRect(origin: origin, size: size), display: true)
-        window.makeKeyAndOrderFront(nil)
+        OffScreen.orderFront(window) { window.makeKeyAndOrderFront(nil) }
         window.invalidateShadow()
         isShown = true
         if closesByItself { watchOutside() }

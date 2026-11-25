@@ -14,6 +14,8 @@
 //       [--mind example.com] --words-expression <text>   the word list's itx expression, for every
 //                                                mind or for one; an empty text removes it
 //   npx @iterate-com/mac-app uninstall           quit the app and remove it, its keys and its state
+//   OPENAI_API_KEY=… npx @iterate-com/mac-app --openai-key-from-env   put the OpenAI key of
+//                                                dictation into the login Keychain (README, "Dictation")
 //
 // Or own the source: copy it, change it, build it from there (an app built from a copy does not
 // update itself; it runs what was built).
@@ -892,8 +894,34 @@ function updateCopy(parsed) {
   process.exitCode = 1;
 }
 
+/** The Keychain service of the OpenAI key: the default home's, or for a copy with a home of its own
+ *  that name with the first 12 hex digits of the SHA-256 of the home's path, so that a test never
+ *  touches the owner's item. The app has the same rule (`OpenAIKey.service`, OpenAIStream.swift). */
+function openAIService() {
+  const base = "com.iterate.mac-app.openai";
+  const own = process.env.ITERATE_MAC_HOME;
+  return own ? `${base}.${createHash("sha256").update(resolve(own)).digest("hex").slice(0, 12)}` : base;
+}
+
+/** OPENAI_API_KEY of this run's environment into the login Keychain, in place of the one before.
+ *  The key goes to `security` on its standard input, never in a process's arguments, and is never
+ *  printed. The installed app is trusted to read it without a question from macOS. */
+function storeOpenAIKey() {
+  const key = process.env.OPENAI_API_KEY?.trim();
+  if (!key) throw new Error("No OPENAI_API_KEY in the environment.");
+  // a key of OpenAI is letters, digits, - and _: nothing in it can change the command below
+  if (!/^[A-Za-z0-9_-]+$/.test(key)) throw new Error("OPENAI_API_KEY has a character that an OpenAI key does not have.");
+  const trusted = process.env.ITERATE_MAC_HOME ? "" : ` -T "${paths.app}"`;
+  const command = `add-generic-password -U -s "${openAIService()}" -a api-key -l "iterate Mac app: OpenAI API key"${trusted} -w ${key}\n`;
+  const result = spawnSync("security", ["-i"], { input: command, encoding: "utf8" });
+  const said = `${result.stdout ?? ""}${result.stderr ?? ""}`.replaceAll(key, "…").replace(/security> ?/g, "").trim();
+  if (result.status !== 0 || said) throw new Error(`The Keychain did not take the key${said ? `: ${said}` : ""}.`);
+  say("OpenAI key stored");
+}
+
 async function uninstall() {
   await quitApp();
+  spawnSync("security", ["delete-generic-password", "-s", openAIService(), "-a", "api-key"], { stdio: "ignore" });
   rmSync(paths.app, { recursive: true, force: true });
   rmSync(home, { recursive: true, force: true });
   say(
@@ -914,12 +942,16 @@ const parsed = parseArgs({
     files: { type: "boolean" },
     "no-install": { type: "boolean" },
     "words-expression": { type: "string" },
+    "openai-key-from-env": { type: "boolean" },
   },
 });
 if (parsed.values["no-login"]) parsed.values.login = false;
-const command = parsed.positionals[0] || "setup";
+const command = parsed.positionals[0] || (parsed.values["openai-key-from-env"] ? "none" : "setup");
 try {
-  if (command === "setup") await setup(parsed, { interactive: process.stdin.isTTY });
+  // the key first, then the command, if one was given
+  if (parsed.values["openai-key-from-env"]) storeOpenAIKey();
+  if (command === "none");
+  else if (command === "setup") await setup(parsed, { interactive: process.stdin.isTTY });
   else if (command === "update" && copyFolder(parsed)) updateCopy(parsed);
   else if (command === "update") await setup(parsed, { interactive: false });
   else if (command === "init") await init(parsed);

@@ -114,6 +114,8 @@ enum Theme {
         /// 0.06 em of the section title.
         static let sectionTracking: CGFloat = 0.66
         static let caption: CGFloat = 11
+        /// The record switches' names: the mock's 11 pt Inter is as wide as 10 pt SF.
+        static let recordChipLabel: CGFloat = 10
         static let control: CGFloat = 12
         static let row: CGFloat = 13
         static let panelTitle: CGFloat = 15
@@ -146,6 +148,12 @@ enum Theme {
         static let segment = CGSize(width: 46, height: 20)
         static let actionButtonHeight: CGFloat = 46
         static let recordChipHeight: CGFloat = 46
+        /// The record's five switches: one row of equal columns, 6 apart; the icon in a 15 pt
+        /// square, 3 over the name; the name at least 6 in from the tile's edge.
+        static let recordChipGap: CGFloat = 6
+        static let recordChipIcon: CGFloat = 15
+        static let recordChipIconGap: CGFloat = 3
+        static let recordChipInset: CGFloat = 6
         static let faceInHeader: CGFloat = 34
         static let thumbnail = CGSize(width: 30, height: 19)
         static let dictationPill = CGSize(width: 460, height: 38)
