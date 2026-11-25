@@ -128,6 +128,11 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
         do {
             let text = words.repair(try await stream.finish().trimmingCharacters(in: .whitespacesAndNewlines))
             heard(.note("\(name): the final came \(seconds(since: ended)) s after the end of \(String(format: "%.1f", duration)) s, \(Spoken.wordCount(text)) words"))
+            if let openAI = stream as? OpenAIStream {
+                // what this dictation costs: OpenAI's own count, against the sound and the socket's age
+                let billed = openAI.billedSeconds.map { "\(Int($0)) s, $\(String(format: "%.4f", $0 / 60 * OpenAIStream.dollarsPerMinute))" } ?? "no usage given"
+                heard(.note("\(name): OpenAI billed \(billed) for \(String(format: "%.1f", duration)) s of sound; the socket was open \(Int(Date().timeIntervalSince(openAI.made))) s"))
+            }
             guard !text.isEmpty else { return [] }
             let segment = SpeechSegment(start: 0, end: duration, text: text)
             heard(.segment(segment))

@@ -80,7 +80,7 @@ private func openAI(deltas: [String], final: String, answersCommit: Bool = true,
             guard answersCommit else { return [] }
             return [
                 ["type": "input_audio_buffer.committed", "item_id": "item_1"],
-                ["type": "conversation.item.input_audio_transcription.completed", "item_id": "item_1", "transcript": final],
+                ["type": "conversation.item.input_audio_transcription.completed", "item_id": "item_1", "transcript": final, "usage": ["type": "duration", "seconds": 4]],
             ]
         default: return []
         }
@@ -206,6 +206,8 @@ final class OpenAIStreamTests: XCTestCase {
         XCTAssertEqual(segments.map(\.text), ["the Beelink is up"])
         XCTAssertEqual(segments.first?.end ?? 0, 1, accuracy: 0.01)
         XCTAssertFalse(heard.notes.contains { $0.contains("failed") }, "\(heard.notes)")
+        // OpenAI's own count of the billed sound is in the log, with its price
+        XCTAssertTrue(heard.notes.contains { $0.contains("OpenAI billed 4 s, $0.0011 for 1.0 s of sound") }, "\(heard.notes)")
     }
 
     func testTheSoundBeforeTheSessionOpensIsKeptAndSentFirst() async throws {

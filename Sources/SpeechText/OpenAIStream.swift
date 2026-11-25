@@ -13,6 +13,8 @@ import os
 /// (`StreamRecognizer`) lets the local model hear the sound. Everything runs on URLSession's
 /// queue: `receive` is a chain of callbacks, with no polling.
 public final class OpenAIStream: SpeechStream, @unchecked Sendable {
+    /// gpt-live-transcribe's price, by audio duration (its model page, 25 Nov 2026).
+    public static let dollarsPerMinute = 0.017
     public struct Setup: Sendable, Equatable {
         public var url = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
         public var model = "gpt-live-transcribe"
@@ -73,6 +75,11 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     private var said = ""
     private var item: String?
     private var finals: [String: String] = [:]
+    /// What OpenAI billed for each item: `usage.seconds` of its `completed` event (the sound,
+    /// rounded up to the second; 25 Nov 2026).
+    private var billed: [String: Double] = [:]
+    /// When the socket was made: a standby may wait minutes, which OpenAI does not bill.
+    public let made = Date()
     private var failure: Failure?
     private var isClosed = false
     private var isCommitted = false
@@ -240,7 +247,11 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
             if !words.trimmingCharacters(in: .whitespaces).isEmpty { text(words) }
         case "conversation.item.input_audio_transcription.completed":
             guard let id = event["item_id"] as? String else { return }
-            lock.withLock { finals[id] = event["transcript"] as? String ?? "" }
+            let usage = event["usage"] as? [String: Any]
+            lock.withLock {
+                finals[id] = event["transcript"] as? String ?? ""
+                if usage?["type"] as? String == "duration", let seconds = usage?["seconds"] as? Double { billed[id] = seconds }
+            }
             answerFinal()
         case "conversation.item.input_audio_transcription.failed", "error":
             fail(.failed("OpenAI: \(message)"))
@@ -248,6 +259,9 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
             break
         }
     }
+
+    /// The seconds OpenAI billed for the committed sound, once its final came; nil when it said none.
+    public var billedSeconds: Double? { lock.withLock { item.flatMap { billed[$0] } } }
 
     /// The final, when it is here and asked for.
     private func answerFinal() {
