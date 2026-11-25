@@ -4,12 +4,14 @@ import SwiftUI
 /// THE SPEECH MODEL of dictation, the input bar and capture: the person's stored choice among
 /// `SpeechModel.all` (README, "Dictation"). A model that is not on this Mac is downloaded first,
 /// with its progress in the panel; it is the model once it loaded. With no stored choice the model
-/// is GPT Live Transcribe when this Mac has an OpenAI key, else Parakeet v3. A capture always uses
-/// a local model (`local`).
+/// is GPT Live Transcribe when OpenAI can be reached (the lent mind mints tokens with its own key,
+/// `MindToken`, or this Mac has a key of its own), else Parakeet v3. A capture always uses a local
+/// model (`local`).
 ///
-/// It also holds whether the OpenAI key is set (`OpenAIKey`, in the login Keychain), and sets and
-/// removes it for Settings › Dictation. The key itself is read only by the online recognizer, at
-/// each start of a listening, off the main thread.
+/// It also holds whether the person's own OpenAI key is set (`OpenAIKey`, in the login Keychain),
+/// and sets and removes it for Settings › Dictation. The key itself is read only by the online
+/// recognizer, at each start of a listening, off the main thread, and only when the lent mind gives
+/// no token.
 @MainActor
 final class SpeechChoice: ObservableObject {
     static let key = "speechModel"
@@ -25,8 +27,13 @@ final class SpeechChoice: ObservableObject {
     var openSettings: () -> Void = {}
     var onChange: () -> Void = {}
 
-    /// Whether this Mac has an OpenAI key. A drawing has none.
+    /// Whether this Mac has an OpenAI key of its own. A drawing has none.
     @Published private(set) var hasKey = false
+    /// The lent mind, when it mints OpenAI tokens with its own key (`MindToken`).
+    @Published private(set) var mintingMind: String?
+
+    /// Whether GPT Live Transcribe can run: through the lent mind, or with this Mac's own key.
+    var isOnline: Bool { mintingMind != nil || hasKey }
 
     private let log = AppLog("speech")
     private var gettingTask: Task<Void, Never>?
@@ -40,7 +47,7 @@ final class SpeechChoice: ObservableObject {
 
     init() {
         let hasKey = openAIKey?.isSet ?? false
-        chosen = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), hasKey: hasKey)
+        chosen = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: hasKey)
         self.hasKey = hasKey
     }
 
@@ -92,11 +99,24 @@ final class SpeechChoice: ObservableObject {
     private func keyIs(_ isSet: Bool) {
         guard isSet != hasKey else { return }
         hasKey = isSet
-        let model = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), hasKey: isSet)
+        follow(why: "your own OpenAI key is \(isSet ? "set" : "gone")")
+    }
+
+    /// The lent mind, and what it can do with OpenAI (`MindToken.onChange`).
+    func mindIs(_ mind: String?, mint: MindMint) {
+        let minting = mint == .yes ? mind : nil
+        guard minting != mintingMind else { return }
+        mintingMind = minting
+        follow(why: minting.map { "\($0) mints OpenAI tokens" } ?? "no lent mind mints OpenAI tokens")
+    }
+
+    /// The default model follows what can reach OpenAI; a stored choice stays.
+    private func follow(why: String) {
+        let model = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: isOnline)
         if model != chosen {
             chosen = model
-            log.info("the speech model is \(model.id): the OpenAI key is \(isSet ? "set" : "gone")")
-            if model.isLocal { SpeechModels.shared.preload(model) }
+            log.info("the speech model is \(model.id): \(why)")
+            if model.isLocal { _ = SpeechModels.shared.preload(model) }
         }
         onChange()
     }
@@ -110,8 +130,8 @@ final class SpeechChoice: ObservableObject {
     func choose(_ model: SpeechModel) {
         guard model != chosen, getting?.id != model.id else { return }
         failure = nil
-        if !model.isLocal, !hasKey {
-            failure = "\(model.name) needs an OpenAI key: set it below."
+        if !model.isLocal, !isOnline {
+            failure = "\(model.name) needs a lent mind with an OpenAI key, or a key of your own: set it below."
             return
         }
         if isOnDisk(model) {
@@ -154,7 +174,7 @@ final class SpeechChoice: ObservableObject {
                 if case .downloading(let part) = getting.load { return ["id": getting.id, "downloading": part] }
                 return ["id": getting.id, "loading": true]
             } ?? NSNull(),
-            "failure": failure ?? NSNull(), "fnLines": fnLines, "openAIKey": hasKey,
+            "failure": failure ?? NSNull(), "fnLines": fnLines, "openAIKey": hasKey, "openAIMind": mintingMind ?? NSNull(),
         ]
     }
 }

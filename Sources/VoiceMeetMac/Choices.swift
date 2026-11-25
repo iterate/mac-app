@@ -13,6 +13,7 @@ import Carbon.HIToolbox
 /// | `dictation.key` | "fn": a hold of fn dictates; "none": fn does nothing (⌥⇧D still works). |
 /// | `dictation.doubleTap` | Two taps of fn keep the dictation on. |
 /// | `dictation.pill` | The dictation pill shows the words; off, the level bars and the time alone. |
+/// | `dictation.sounds` | A gentle sound when a dictation starts, is written and is thrown away (`DictationSound`). |
 /// | `dictation.write` | "cursor": the text is written where the cursor is; "clipboard": it is put on the clipboard only. |
 /// | `update.byItself` | The app updates itself once an hour (only when it is from npm). |
 @MainActor
@@ -36,6 +37,7 @@ final class Choices: ObservableObject {
     @Published var dictationOnFn: Bool { didSet { defaults.set(dictationOnFn ? "fn" : "none", forKey: "dictation.key") } }
     @Published var doubleTap: Bool { didSet { defaults.set(doubleTap, forKey: "dictation.doubleTap") } }
     @Published var pillShowsWords: Bool { didSet { defaults.set(pillShowsWords, forKey: "dictation.pill") } }
+    @Published var sounds: Bool { didSet { defaults.set(sounds, forKey: "dictation.sounds") } }
     @Published var write: Write { didSet { defaults.set(write.rawValue, forKey: "dictation.write") } }
     @Published var updatesByItself: Bool { didSet { defaults.set(updatesByItself, forKey: "update.byItself") } }
 
@@ -47,6 +49,7 @@ final class Choices: ObservableObject {
         dictationOnFn = defaults.string(forKey: "dictation.key") != "none"
         doubleTap = defaults.object(forKey: "dictation.doubleTap") as? Bool ?? true
         pillShowsWords = defaults.object(forKey: "dictation.pill") as? Bool ?? true
+        sounds = defaults.object(forKey: "dictation.sounds") as? Bool ?? true
         write = Write(rawValue: defaults.string(forKey: "dictation.write") ?? "") ?? .cursor
         updatesByItself = defaults.object(forKey: "update.byItself") as? Bool ?? true
     }

@@ -35,6 +35,8 @@ final class AppModel {
     let deviceWindow = DeviceWindow()
     /// Live: a member's page watches this Mac now (`DeviceLive`).
     let live = DeviceLive()
+    /// The lent mind's OpenAI tokens, for dictation (`MindToken`).
+    let mindToken = MindToken()
     private var presenceWatch: AnyCancellable?
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
@@ -114,6 +116,7 @@ final class AppModel {
         deviceEvents.use(session, bridge: bridge)
         record.use(session, bridge: bridge)
         acts.use(session)
+        mindToken.use(session, bridge: bridge)
         // one hold for each name: the same bridge again keeps it
         if old !== bridge { old?.release("session") }
         deviceEvents.tick()
