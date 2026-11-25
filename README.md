@@ -1233,3 +1233,12 @@ files are on this Mac, else Parakeet v3; Ultra chosen through `ui.press` is the 
 and the text has Herdr, Beelink and Doppler; with no Fourier files, in
 `~/Library/Application Support/iterate-speech/oruk-fourier-2b` or `ITERATE_MAC_FOURIER_FOLDER`,
 its result says `skipped`). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.
+
+## Licence
+
+The app is under the Apache License 2.0 ([LICENSE](LICENSE)): use it, change it and ship it, for
+any purpose, commercial too. It includes work derived from [Hex](https://github.com/kitlangton/Hex)
+and [Scrawl](https://github.com/kitlangton/scrawl) by Kit Langton, both MIT; [NOTICE](NOTICE)
+keeps their copyright and permission notices, which every copy must carry. The speech models are
+not in this repository: each Mac downloads its own, under the model's own licence. Oruk Fourier
+2B is CC BY-NC 4.0, non-commercial.
