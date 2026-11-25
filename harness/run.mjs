@@ -218,15 +218,15 @@ function overLimits(figures, limits) {
   return Object.entries(limits).filter(([name, limit]) => (figures[name] ?? figures.counters?.[name] ?? 0) > limit);
 }
 
-/** Where the app's threads spend 3 s (`sample`), for a failed idle check: the call graph, cut. */
-function sampleOf(pid, home) {
+/** Where the app's threads spend `seconds` (`sample`), for a failed idle check: the call graph, cut. */
+function sampleOf(pid, home, seconds) {
   const file = join(home, "idle.sample.txt");
   try {
-    execFileSync("/usr/bin/sample", [String(pid), "3", "-mayDie", "-file", file], { stdio: "ignore", timeout: 30000 });
+    execFileSync("/usr/bin/sample", [String(pid), String(seconds), "-mayDie", "-file", file], { stdio: "ignore", timeout: 60000 });
     const text = readFileSync(file, "utf8");
     const graph = text.slice(text.indexOf("Call graph:"), text.indexOf("Total number in stack"));
     const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-60).join("\n");
-    return `--- sample of the idle app (pid ${pid}) ---\n${graph.split("\n").slice(0, 400).join("\n")}\n--- its log ---\n${log}\n--- end of sample ---\n`;
+    return `--- sample of the idle app (pid ${pid}) ---\n${graph.split("\n").slice(0, 1500).join("\n")}\n--- its log ---\n${log}\n--- end of sample ---\n`;
   } catch (error) {
     return `--- no sample: ${error.message} ---\n`;
   }
@@ -280,7 +280,18 @@ const scenarios = {
           series.push(`${d.cpuMs}ms/${d.interruptWakeups}w${Object.keys(d.counters).length ? " " + JSON.stringify(d.counters) : ""}`);
           step = now;
         }
-        liveSample = sampleOf(run.pid, home);
+        liveSample = sampleOf(run.pid, home, 3);
+        // the cost may be the start's and over by now: a second copy, sampled in the same seconds
+        const second = mkdtempSync(join(tmpdir(), "itx-"));
+        withMind(second, [A, B]);
+        const again = await start(app, second, {}, ["--lend"]);
+        try {
+          await until("the second copy live", 20, async () => (await again.state()).lend.phase === "live");
+          await sleep(4000);
+          liveSample += sampleOf(again.pid, second, 10);
+        } finally {
+          await again.quit();
+        }
       }
 
       // a refused key: provide says so and ends; the next try is in 5 minutes
