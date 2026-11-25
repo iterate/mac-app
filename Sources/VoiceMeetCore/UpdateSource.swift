@@ -37,3 +37,81 @@ public enum UpdateSource: Equatable, Sendable {
         }
     }
 }
+
+/// A version as npm writes it, `1.2.3` or `1.2.3-beta.4`, ordered as semver orders it: a
+/// pre-release is before its release, and its parts are compared as numbers where both are.
+public struct SemanticVersion: Comparable, Sendable {
+    public let core: [Int]
+    public let prerelease: [String]
+
+    /// Nil for a text that is no version (`latest`, empty).
+    public init?(_ text: String) {
+        let withoutBuild = text.split(separator: "+", maxSplits: 1).first.map(String.init) ?? ""
+        let parts = withoutBuild.split(separator: "-", maxSplits: 1).map(String.init)
+        let numbers = (parts.first ?? "").split(separator: ".", omittingEmptySubsequences: false).map { Int($0) }
+        guard numbers.count == 3, numbers.allSatisfy({ $0 != nil }) else { return nil }
+        core = numbers.compactMap { $0 }
+        prerelease = parts.count > 1 ? parts[1].split(separator: ".").map(String.init) : []
+    }
+
+    public static func < (a: SemanticVersion, b: SemanticVersion) -> Bool {
+        if a.core != b.core { return a.core.lexicographicallyPrecedes(b.core) }
+        // a release is after each of its pre-releases
+        if a.prerelease.isEmpty || b.prerelease.isEmpty { return !a.prerelease.isEmpty && b.prerelease.isEmpty }
+        for (x, y) in zip(a.prerelease, b.prerelease) where x != y {
+            switch (Int(x), Int(y)) {
+            case let (x?, y?): return x < y
+            case (_?, nil): return true
+            case (nil, _?): return false
+            case (nil, nil): return x < y
+            }
+        }
+        return a.prerelease.count < b.prerelease.count
+    }
+
+    /// True when npm's `latest` is a newer version than `current`; false when either is no version.
+    public static func isNewer(_ latest: String, than current: String) -> Bool {
+        guard let latest = SemanticVersion(latest), let current = SemanticVersion(current) else { return false }
+        return current < latest
+    }
+}
+
+/// General's version rows in Settings: where the app came from and the last ask of npm.
+public struct UpdateStatus: Equatable, Sendable {
+    public var title: String
+    public var detail: String
+    /// From npm: Update Now and the switch. A trial and a copy are updated by hand.
+    public var updatesItself: Bool
+
+    public init(title: String, detail: String, updatesItself: Bool = false) {
+        (self.title, self.detail, self.updatesItself) = (title, detail, updatesItself)
+    }
+
+    /// The rows for `source` (nil: not set up). `check` is the last ask of npm, with its time of
+    /// day as `clock` writes it; `hasOwnHome` a test copy's, which never updates.
+    public static func of(
+        _ source: UpdateSource?, home: String, hasOwnHome: Bool, updatesByItself: Bool, check: (at: String, latest: String?)?
+    ) -> UpdateStatus {
+        guard let source else { return UpdateStatus(title: "Not set up", detail: "Run npx @iterate-com/mac-app in a terminal.") }
+        switch source {
+        case .copy:
+            return UpdateStatus(title: source.line(home: home), detail: "It runs what was built. Run node cli.mjs update in that folder to build it again.")
+        case .trial(let spec, let version):
+            return UpdateStatus(title: "\(version), a trial", detail: "Updated by hand: npx \(spec) update.")
+        case .registry(let version):
+            let detail: String
+            if hasOwnHome {
+                detail = "A home of its own never updates."
+            } else if let check {
+                if let latest = check.latest, SemanticVersion.isNewer(latest, than: version) {
+                    detail = "Version \(latest) is out. Checked at \(check.at)."
+                } else {
+                    detail = check.latest == nil ? "npm did not answer at \(check.at)." : "Up to date. Checked at \(check.at)."
+                }
+            } else {
+                detail = updatesByItself ? "Not checked yet: the first check is a minute after the start." : "It does not update by itself."
+            }
+            return UpdateStatus(title: "\(version), from npm", detail: detail, updatesItself: true)
+        }
+    }
+}

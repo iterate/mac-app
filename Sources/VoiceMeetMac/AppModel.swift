@@ -199,9 +199,9 @@ final class AppModel {
             return try await act(.camera(device), what: "A still picture of the camera \"\(device.localizedName)\".", doing: "Taking a picture with the camera “\(device.localizedName)”", did: "Took a picture with the camera “\(device.localizedName)”") {
               try await self.withCamera(device.uniqueID) {
                 // The first frames of a camera are dark: it sets its exposure for a moment.
-                try await wait(seconds: 5, for: "the camera's first picture") { owner.snapshot(maxWidth: 16) != nil }
+                try await wait(seconds: 5, for: "the camera's first picture") { owner.hasPicture }
                 try await Task.sleep(nanoseconds: 700_000_000)
-                guard let picture = owner.snapshot(maxWidth: maxWidth) else {
+                guard let picture = await owner.picture(maxWidth: maxWidth) else {
                     throw EndpointRefusal("The camera gave no picture.")
                 }
                 return self.lend(picture, of: "the camera \"\(device.localizedName)\"")
@@ -241,7 +241,7 @@ final class AppModel {
             }
         case "accessibility.frontWindow":
             return try await act(.accessibility, what: "The text and controls of the window in front.", doing: "Reading the text of the window in front", did: "Read the text of the window in front") {
-                try Accessibility.frontWindow(
+                try await Accessibility.readFrontWindow(
                     maxDepth: parameters["maxDepth"] as? Int ?? 12,
                     maxNodes: parameters["maxNodes"] as? Int ?? 1_500
                 )

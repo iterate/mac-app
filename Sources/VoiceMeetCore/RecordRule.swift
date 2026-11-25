@@ -1,3 +1,5 @@
+import Foundation
+
 /// The record's dot on the menu-bar mark, the mark's ink, and the rule by which a caller of the
 /// endpoint may turn a switch of the record on. Pure: the app (`AppDelegate`, `AppModel`) reads
 /// macOS and the person's choices, and asks these.
@@ -70,6 +72,36 @@ public struct MenuBarMark: Equatable, Sendable {
 
     /// One word for the log: "orange", "live+recording".
     public var name: String { dot == .none ? ink.rawValue : "\(ink.rawValue)+\(dot.rawValue)" }
+
+    /// The mark's words, for its tooltip and VoiceOver: what shows, then the record's dot.
+    /// `banner` is the banner's title and whether it is a call's; `isCapturing` the person's own
+    /// capture (⌥⇧S), which `microphoneOrCameraOn` includes.
+    public static func label(
+        banner: (title: String, isCall: Bool)?, inUse: Bool, isCapturing: Bool, microphoneOrCameraOn: Bool, glance: LendGlance,
+        dot: RecordDot, tracks: Int, pausedBecause: String?
+    ) -> String {
+        let lendWords: String
+        switch glance {
+        case .live: lendWords = "iterate: lent"
+        case .connecting: lendWords = "iterate: connecting"
+        case .down: lendWords = "iterate: not lent"
+        }
+        let words =
+            banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
+            ?? (inUse ? "iterate: a mind uses this Mac now"
+                : isCapturing ? "iterate: your capture runs" : microphoneOrCameraOn ? "iterate: microphone or camera on" : lendWords)
+        return [words, dot.words(tracks: tracks, pausedBecause: pausedBecause)].compactMap { $0 }.joined(separator: ", ")
+    }
+
+    /// How long the mark stays red after a use by a mind.
+    public static let inUseSeconds: Double = 3
+
+    /// Whether a use at `lastUse` makes the mark red at `now`, and when it ends: the one moment at
+    /// which the mark is looked at again (nil when it is not red).
+    public static func inUse(lastUse: Date?, now: Date) -> (isInUse: Bool, endsAt: Date?) {
+        guard let lastUse, now.timeIntervalSince(lastUse) < inUseSeconds else { return (false, nil) }
+        return (true, lastUse.addingTimeInterval(inUseSeconds))
+    }
 }
 
 /// A switch of the record that a caller can set: `record.set` on the endpoint.

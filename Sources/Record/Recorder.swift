@@ -76,6 +76,10 @@ public final class Recorder: @unchecked Sendable {
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
     private var activity: NSObjectProtocol?
 
+    /// A slot was sealed: its event file is final (`slots/<t>.json`). Called on the recorder's own
+    /// queue; set it before `start`. The app tells the bridge's record job, which wakes for it.
+    public var onSeal: (@Sendable (Int64) -> Void)?
+
     public init(options: RecordOptions) {
         self.options = options
     }
@@ -298,8 +302,10 @@ public final class Recorder: @unchecked Sendable {
         let from = url("slots/\(slot).open"), to = url("slots/\(slot).json")
         if rename(from.path, to.path) != 0 {
             log("record: slot \(slot): the event file could not be renamed (\(errno)); writing it again")
-            if write("slots/\(slot).json", [Slot.event(t: slot, tracks: tracks)]) { try? FileManager.default.removeItem(at: from) }
+            guard write("slots/\(slot).json", [Slot.event(t: slot, tracks: tracks)]) else { return }
+            try? FileManager.default.removeItem(at: from)
         }
+        onSeal?(slot)
     }
 
     /// About once a second: a slot that ended more than 10 s ago with a track still

@@ -358,6 +358,16 @@ extension LendPhase {
         return nil
     }
 
+    /// When the next try or start is, while the phase counts down to one (reconnecting, stopped,
+    /// refused or incompatible with a start set): the panel's words change each second until then.
+    public var nextStartAt: Date? {
+        switch self {
+        case .reconnecting(_, _, let next, _), .stopped(_, let next): return next
+        case .notAllowed(_, _, let next), .incompatible(_, let next): return next
+        case .idle, .connecting, .live: return nil
+        }
+    }
+
     /// Where a member allows the key, when the CLI printed it.
     public var link: String? {
         if case .notAllowed(_, let link, _) = self { return link }

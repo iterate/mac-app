@@ -30,6 +30,24 @@ public struct Presence: Equatable, Sendable {
         return Presence(idleSeconds: seconds, screenLocked: locked, displayAsleep: asleep)
     }
 
+    /// A person is taken as away after this long with no key, click or move.
+    public static let idleAfterSeconds = 120
+    /// While idle, locked or asleep, a look this often in case no event said the change.
+    public static let fallbackSeconds = 60
+
+    /// "active", "idle", "locked" or "asleep": what a presence event says.
+    public var state: String {
+        screenLocked ? "locked" : displayAsleep ? "asleep" : idleSeconds >= Self.idleAfterSeconds ? "idle" : "active"
+    }
+
+    /// When to look again, in seconds: while active, at the moment the person would turn idle if
+    /// no input came (an input meanwhile moves it on, and the look then sets the next); while idle,
+    /// locked or asleep, an input, an unlock or a wake says the change (`DeviceEvents`), and this
+    /// is the fallback. So an idle Mac wakes the app about once a minute, not each 2 s.
+    public var nextLookSeconds: Int {
+        state == "active" ? max(1, Self.idleAfterSeconds - idleSeconds) : Self.fallbackSeconds
+    }
+
     public var dictionary: [String: Any] {
         ["idleSeconds": idleSeconds, "screenLocked": screenLocked, "displayAsleep": displayAsleep]
     }

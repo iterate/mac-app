@@ -323,4 +323,21 @@ final class LendStateTests: XCTestCase {
             state.words(now: at(6), clock: clock),
             LendWords(title: "Incompatible", detail: "update the CLI", block: "The mind is newer. Update the iterate CLI:", code: LendState.updateCommand, tone: .stopped))
     }
+
+    /// Fable 17: the panel counts down only while a phase has a next start; live and connecting
+    /// have none, so nothing ticks while the lend is up.
+    func testOnlyAWaitCountsDown() {
+        var state = livePhase()
+        XCTAssertNil(state.phase.nextStartAt)
+        _ = state.handle(.stateLine(reconnecting(1, inMs: 4000, "fetch failed")), now: at(10))
+        XCTAssertEqual(state.phase.nextStartAt, at(14))
+        _ = state.handle(.processEnded(status: 1, ranFor: 3), now: at(20))
+        XCTAssertEqual(state.phase.nextStartAt, at(24))
+        _ = state.handle(.timerFired, now: at(24))
+        XCTAssertNil(state.phase.nextStartAt, "connecting again")
+        _ = state.handle(.stateLine(#"{"state":"notAllowed","why":"No member has allowed this key yet.","waiting":false}"#), now: at(25))
+        XCTAssertNil(state.phase.nextStartAt, "refused, while its process runs")
+        _ = state.handle(.processEnded(status: 1, ranFor: 1), now: at(26))
+        XCTAssertEqual(state.phase.nextStartAt, at(26 + TimeInterval(LendState.refusedWaitSeconds)))
+    }
 }

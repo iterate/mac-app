@@ -345,7 +345,7 @@ private struct SettingsSidebar: View {
                 } trailing: {
                     // the lend's state of the active mind alone: the app knows no other's (HANDOFF 8.2)
                     if mind.mind == state.lend.active {
-                        Circle().fill(Self.dot(of: state.lend.phase)).frame(width: 7, height: 7)
+                        Circle().fill(Panel.color(of: state.lend.state.phase)).frame(width: 7, height: 7)
                     }
                 }
             }
@@ -366,15 +366,6 @@ private struct SettingsSidebar: View {
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 12)
-    }
-
-    static func dot(of phase: String) -> Color {
-        switch phase {
-        case "live": .green
-        case "connecting", "reconnecting": .orange
-        case "idle": .secondary
-        default: .red
-        }
     }
 
     private func header(_ title: String) -> some View {
@@ -808,14 +799,14 @@ private struct MindPage: View {
             Text("Not checked").font(.system(size: 12)).foregroundStyle(.secondary)
                 .help("The app knows a key's state only for the mind this Mac is lent to.")
         } else {
-            switch state.lend.phase {
-            case "live": DotLine(words: "Allowed by a member", color: .green, text: Palette.liveText)
-            case "not allowed":
+            switch state.lend.state.phase {
+            case .live: DotLine(words: "Allowed by a member", color: .green, text: Palette.liveText)
+            case .notAllowed:
                 HStack(spacing: 8) {
                     DotLine(words: "Not allowed yet", color: .orange, text: Palette.waitText)
                     if let link = state.lend.link { Button("Open the Link") { actions.lend.open(link) }.buttonStyle(FillButtonStyle()) }
                 }
-            case "connecting": Text("Checked when it connects").font(.system(size: 12)).foregroundStyle(.secondary)
+            case .connecting: Text("Checked when it connects").font(.system(size: 12)).foregroundStyle(.secondary)
             default: Text("Not checked").font(.system(size: 12)).foregroundStyle(.secondary)
             }
         }
@@ -1015,29 +1006,10 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     }
 }
 
-/// A menu-bar app has no menu bar of its own: the window takes the keys of the Edit and the
-/// Window menu itself, so a field pastes and ⌘W closes. The Activity window is one too.
-final class SettingsNSWindow: NSWindow {
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
-        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        if flags == .command || flags == [.command, .shift] {
-            let action: Selector?
-            switch (event.charactersIgnoringModifiers?.lowercased(), flags.contains(.shift)) {
-            case ("w", false): performClose(nil); return true
-            case ("x", false): action = #selector(NSText.cut(_:))
-            case ("c", false): action = #selector(NSText.copy(_:))
-            case ("v", false): action = #selector(NSText.paste(_:))
-            case ("a", false): action = #selector(NSText.selectAll(_:))
-            case ("z", false): action = Selector(("undo:"))
-            case ("z", true): action = Selector(("redo:"))
-            default: action = nil
-            }
-            if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
-        }
-        return super.performKeyEquivalent(with: event)
-    }
-}
+/// The window of Settings and of the Activity window. Its Edit and Window keys (⌘X, ⌘C, ⌘V, ⌘A,
+/// ⌘Z, ⇧⌘Z, ⌘W) come from the app's one main menu (`AppDelegate.installMainMenu`), which a
+/// menu-bar app has though it shows no menu bar.
+final class SettingsNSWindow: NSWindow {}
 
 // MARK: - Drawings
 

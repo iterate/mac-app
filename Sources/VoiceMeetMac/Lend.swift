@@ -102,7 +102,8 @@ final class Lend {
     private enum Stream { case states, human }
     private var wait: DispatchWorkItem?
     private var updateTimer: Timer?
-    private var ticker: Timer?
+    private var firstCheck: DispatchWorkItem?
+    private var updateCheckTask: Task<Void, Never>?
     private var folderWatch: DispatchSourceFileSystemObject?
     private var reloadSoon: DispatchWorkItem?
     private let network = NWPathMonitor()
@@ -124,29 +125,34 @@ final class Lend {
             Task { @MainActor in self?.networkChanged(isUp: isUp) }
         }
         network.start(queue: .main)
-        // the panel's "next try in" counts down
-        let ticker = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                switch self.state.phase {
-                case .reconnecting, .stopped, .notAllowed, .incompatible: self.onChange?()
-                default: break
-                }
-            }
-        }
-        RunLoop.main.add(ticker, forMode: .common)
-        self.ticker = ticker
+        // the panel's "next try in" counts down by itself (`Panel`'s countdown): no timer here
         let timer = Timer(timeInterval: 3600, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkForUpdate() }
         }
+        timer.tolerance = 60
         RunLoop.main.add(timer, forMode: .common)
         updateTimer = timer
-        DispatchQueue.main.asyncAfter(deadline: .now() + 60) { [weak self] in self?.checkForUpdate() }
+        let first = DispatchWorkItem { [weak self] in self?.checkForUpdate() }
+        firstCheck = first
+        DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: first)
     }
 
+    /// At quit: the lend process ends, and every timer, watch and observer that `start` began.
     func stop() {
         send(.stopRequested)
+        network.pathUpdateHandler = nil
         network.cancel()
+        updateTimer?.invalidate()
+        updateTimer = nil
+        firstCheck?.cancel()
+        firstCheck = nil
+        reloadSoon?.cancel()
+        reloadSoon = nil
+        folderWatch?.cancel()
+        folderWatch = nil
+        if let wakeObserver { NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver) }
+        wakeObserver = nil
+        updateCheckTask?.cancel()
     }
 
     /// The owner opened the panel: a lend that waits for its next start starts at once.
@@ -423,14 +429,13 @@ final class Lend {
     /// fixed form in a drawing, as `clock`.
     static var shortClock: (Date) -> String {
         guard AppEnvironment.current.isRendering else { return { $0.formatted(date: .omitted, time: .shortened) } }
-        return { date in
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            formatter.timeZone = TimeZone(identifier: "UTC")
-            formatter.dateFormat = "HH:mm"
-            return formatter.string(from: date)
-        }
+        return { $0.formatted(fixedShortClock) }
     }
+
+    /// The drawings' time of day: "14:01", UTC. Made once: a format style is a value.
+    private static let fixedShortClock = Date.VerbatimFormatStyle(
+        format: "\(hour: .twoDigits(clock: .twentyFourHour, hourCycle: .zeroBased)):\(minute: .twoDigits)",
+        locale: Locale(identifier: "en_US_POSIX"), timeZone: TimeZone(identifier: "UTC")!, calendar: Calendar(identifier: .gregorian))
 
     private static func describe(_ event: LendEvent) -> String {
         switch event {
@@ -454,12 +459,15 @@ final class Lend {
         guard let config, config.source.updatesItself, !AppEnvironment.current.hasOwnHome else { return }
         guard now || Choices.shared.updatesByItself else { return }
         guard let url = URL(string: "https://registry.npmjs.org/@iterate-com/mac-app/latest") else { return }
-        Task { @MainActor in
+        updateCheckTask?.cancel()
+        updateCheckTask = Task { @MainActor in
             let answer = try? await URLSession.shared.data(from: url)
+            guard !Task.isCancelled else { return }
             let latest = answer.flatMap { (try? JSONSerialization.jsonObject(with: $0.0) as? [String: Any])?["version"] as? String }
             updateCheck = (Date(), latest)
             onChange?()
-            guard let latest, latest != config.version else { return }
+            // newer only: an older `latest` (a rollback, a stale answer) is no update
+            guard let latest, SemanticVersion.isNewer(latest, than: config.version) else { return }
             guard now || !isBusy() else { return log.info("version \(latest) is out; the update waits for the capture to end") }
             log.info("version \(latest) is out (this is \(config.version)): updating")
             let npx = URL(fileURLWithPath: config.node).deletingLastPathComponent().appendingPathComponent("npx")

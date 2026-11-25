@@ -47,7 +47,18 @@ enum IterateIcon {
     /// The mark of a test copy (a home of its own, `AppEnvironment`): the mark in grey and an orange
     /// "test" after it, never taken for the installed app's. The mark sits at the image's left, as
     /// tall as the plain one, so the record's dot is where it is on the plain mark.
-    static func testImage(_ mark: MenuBarMark) -> NSImage {
+    @MainActor static func testImage(_ mark: MenuBarMark) -> NSImage {
+        // made once for each look: the mark is set at each change of the app's state
+        let key = "\(mark.ink.rawValue)\(mark.dot != .none)"
+        if let made = testMarks[key] { return made }
+        let made = makeTestImage(mark)
+        testMarks[key] = made
+        return made
+    }
+
+    @MainActor private static var testMarks: [String: NSImage] = [:]
+
+    private static func makeTestImage(_ mark: MenuBarMark) -> NSImage {
         let base = image(mark)
         let words = NSAttributedString(string: "test", attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .heavy), .foregroundColor: NSColor.systemOrange])
         let size = NSSize(width: base.size.width + 2 + ceil(words.size().width), height: base.size.height)
@@ -177,7 +188,7 @@ enum IterateIcon {
                 })
             else { return false }
             // a test copy's mark, as the bar shows it (`testImage`)
-            let test = testImage(MenuBarMark(ink: .live, dot: .none))
+            let test = makeTestImage(MenuBarMark(ink: .live, dot: .none))
             let testCell = NSSize(width: (test.size.width + 16) * zoom, height: cell.height)
             guard
                 write(size: testCell, to: folder.appendingPathComponent("mark-test-\(look).png"), draw: {

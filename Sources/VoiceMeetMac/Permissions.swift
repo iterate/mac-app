@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
+import VoiceMeetCore
 
 /// The four permissions of macOS that the app holds for the mind. The app only reads them and
 /// opens the system's own prompt or settings pane: the person gives each one.
@@ -83,14 +84,20 @@ enum Permission: String, CaseIterable {
     /// A running process keeps its first answer about Screen Recording, so a grant shows only in a
     /// new process. True when the person gave the permission and this process cannot use it yet.
     /// (After Scrawl by Kit Langton, which asks a fresh helper process in the same way.)
-    static var screenRecordingWaitsForRestart: Bool {
+    /// The process is waited for by its end's handler: the caller's thread is never held.
+    static func screenRecordingWaitsForRestart() async -> Bool {
         guard !Permission.screenRecording.isGranted, let executable = Bundle.main.executableURL else { return false }
-        let check = Process()
-        check.executableURL = executable
-        check.arguments = [checkScreenRecordingArgument]
-        guard (try? check.run()) != nil else { return false }
-        check.waitUntilExit()
-        return check.terminationStatus == 0
+        Perf.count("grantProbes")
+        return await withCheckedContinuation { (answer: CheckedContinuation<Bool, Never>) in
+            let check = Process()
+            check.executableURL = executable
+            check.arguments = [checkScreenRecordingArgument]
+            check.standardInput = FileHandle.nullDevice
+            check.standardOutput = FileHandle.nullDevice
+            check.standardError = FileHandle.nullDevice
+            check.terminationHandler = { answer.resume(returning: $0.terminationStatus == 0) }
+            do { try check.run() } catch { answer.resume(returning: false) }
+        }
     }
 
     /// Starts the app again once this process has ended, so there are never two copies.
@@ -192,6 +199,30 @@ struct Shareable: Identifiable, Hashable {
     /// Everything on this Mac now, in the panel's order.
     @MainActor
     static var all: [Shareable] {
-        Screen.displays.map(display) + Camera.devices.map(camera) + [microphone, speaker, banners, accessibility, commands, pages]
+        Screen.displays.map(display) + Cameras.list.map(camera) + [microphone, speaker, banners, accessibility, commands, pages]
+    }
+}
+
+/// This Mac's cameras, found once and again only when one is connected or disconnected: a search
+/// (`AVCaptureDevice.DiscoverySession`) asks the system's camera service each time, and the list
+/// is read at each change of the app's state while the panel shows.
+@MainActor
+enum Cameras {
+    private static var found: [AVCaptureDevice]?
+    private static var observers: [NSObjectProtocol] = []
+
+    static var list: [AVCaptureDevice] {
+        if let found { return found }
+        if observers.isEmpty {
+            for name in [AVCaptureDevice.wasConnectedNotification, AVCaptureDevice.wasDisconnectedNotification] {
+                observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { _ in
+                    MainActor.assumeIsolated { found = nil }
+                })
+            }
+        }
+        Perf.count("cameraSearches")
+        let devices = Camera.devices
+        found = devices
+        return devices
     }
 }

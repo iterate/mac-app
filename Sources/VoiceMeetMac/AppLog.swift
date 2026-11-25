@@ -44,31 +44,50 @@ struct AppLog: Sendable {
 }
 
 /// The one writer of `app.log`. A lock makes it safe from every thread; each line is written at
-/// once, so a crash loses nothing that was logged.
+/// once, so a crash loses nothing that was logged. The file has a bound: past `maxBytes` (at the
+/// start, or while the app runs) it becomes `app.previous.log`, in place of the one before, and a
+/// new `app.log` begins. So the two hold the last 20 to 40 MB.
 private final class LogFile: @unchecked Sendable {
     static let shared = LogFile()
+    static let maxBytes: UInt64 = 20 * 1024 * 1024
 
     private let lock = NSLock()
-    private let handle: FileHandle?
-    private let timestamps: ISO8601DateFormatter
+    private var handle: FileHandle?
+    private var written: UInt64 = 0
+    private let timestamps = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
 
     private init() {
-        timestamps = ISO8601DateFormatter()
-        timestamps.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        try? FileManager.default.createDirectory(at: AppLog.directory, withIntermediateDirectories: true)
+        let size = (try? FileManager.default.attributesOfItem(atPath: AppLog.fileURL.path)[.size] as? NSNumber)?.uint64Value ?? 0
+        if size > Self.maxBytes { Self.setAside() }
+        open()
+    }
+
+    func write(level: String, category: String, message: String) {
+        let line = Data("\(Date().formatted(timestamps)) \(level) [\(category)] \(message)\n".utf8)
+        lock.lock()
+        defer { lock.unlock() }
+        if written + UInt64(line.count) > Self.maxBytes {
+            try? handle?.close()
+            Self.setAside()
+            open()
+        }
+        try? handle?.write(contentsOf: line)
+        written += UInt64(line.count)
+    }
+
+    /// app.log becomes app.previous.log, in place of the one before.
+    private static func setAside() {
+        let previous = AppLog.directory.appendingPathComponent("app.previous.log")
+        _ = Darwin.rename(AppLog.fileURL.path, previous.path)
+    }
+
+    private func open() {
         let manager = FileManager.default
-        try? manager.createDirectory(at: AppLog.directory, withIntermediateDirectories: true)
         if !manager.fileExists(atPath: AppLog.fileURL.path) {
             manager.createFile(atPath: AppLog.fileURL.path, contents: nil)
         }
         handle = try? FileHandle(forWritingTo: AppLog.fileURL)
-        _ = try? handle?.seekToEnd()
-    }
-
-    func write(level: String, category: String, message: String) {
-        // Under the lock: a date formatter may not be used from two threads at once.
-        lock.lock()
-        defer { lock.unlock() }
-        let line = "\(timestamps.string(from: Date())) \(level) [\(category)] \(message)\n"
-        try? handle?.write(contentsOf: Data(line.utf8))
+        written = (try? handle?.seekToEnd()) ?? 0
     }
 }

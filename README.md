@@ -916,11 +916,13 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
+| `ui.state` | `perf` (`Perf`: CPU seconds, `rss` as the physical footprint, wake-ups, open files, threads, `mainStallMaxMs` while its watch runs, and `counters`: `stateChanges`, `statusWrites`, `panelBodies`, `lendTicks`, `presenceLooks`, `recordLooks`, `windowChanges`, `grantProbes`, `cameraSearches`), the lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) or a pop-up button's item (`{"id":"settings.approvalMinutes","label":"1 hour"}`) |
 | `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
 | `ui.scroll {id}` | Scrolls a list to its end (`log.list`), as a person does to read older rows |
+| `ui.key {key, shift?, command?}` | A key as the keyboard sends it (`tab`, `return`, `escape`, or `a`, `c`, `v`, `w`, `x`, `z` with `command`) to the key window, else the frontmost that can be key: its shortcuts, then the main menu's, then its `keyDown` |
+| `perf.reset {watchMain?}` | The counters of `ui.state`'s `perf` start again from zero; `watchMain: true` starts the watch of the main queue's longest delay (it wakes the app 20 times a second, so it is off until asked), `false` stops it |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
 | `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
@@ -929,7 +931,7 @@ connection, as the endpoint's; a mind never reaches it.
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
 `activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `activity.window`, `approval.once`,
-`approval.minutes`, `approval.deny`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
+`approval.minutes`, `approval.deny`, a banner's buttons `banner.button.<n>`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
 `log.filter.<acts|presence|app|window|record|live|inputs|keys>`, `log.search`, `log.list`, `log.row`, `log.context`,
 `log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
 `capture.discard`, `speech.model` (the panel's speech row: it opens Settings › Dictation),
@@ -991,9 +993,22 @@ holds mixed events, "Open in a Window" reads the newest page of every kept type 
 key, scrolls to the end read the pages below to the start, a new act comes in as it happens, and
 the close lets go of the events), `mind-switch` (two fake minds: an
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
-device event reaches A after the switch), and the local ones, which need the speech models in
+device event reaches A after the switch), `banner` (a banner shown 50 ms after the last one's
+button stays on the screen), `keys` (Tab and ⇧Tab in the input bar choose the next and the last
+mind, Esc closes it, ⌘W closes the Add a Mind form through the main menu), `log-bound` (a log of
+25 MB is set aside at the start), and two measurements: `idle` (lent to the fake mind with
+`--lend`, every switch off, the panel closed: 20 s live, then 10 s refused with its next try in
+5 minutes; limits on CPU, wake-ups and counters, and the figures in the result's `perf`) and
+`panel-open` (5 s with the panel open and a countdown: the panel's body is drawn at most once,
+its countdown row each second). The fake iterate CLI answers `provide` with the state in
+`fake-iterate/provide.json`, live by default. The approval scenario presses Return and Esc in the
+question's panel only while it is key (not while the screen is locked); else its result says
+`skipped`. Then the local ones, which need the speech models in
 `~/Library/Application Support/FluidAudio`: `dictation-fixture` (a sentence from `say -o` is
-written with the word list's Herdr, Beelink and Doppler), `dictation-fn` (one tap of fn
+written with the word list's Herdr, Beelink and Doppler; its `perf` has the seconds from the start to the first word and the model's load. Core ML
+compiles the model for the Neural Engine once for each build of the executable, in
+`~/Library/Caches/<bundle id or process name>/com.apple.e5rt.e5bundlecache`: the first run after a
+build waits 12 to 24 s, every later process of that build about 0.2 s), `dictation-fn` (one tap of fn
 listens until its window ends and leaves no line; a hold writes the sentence; a double tap locks
 it until the next press of fn, which writes it; a lock that Esc ends writes nothing), `capture-transcript-fixture` (the
 sentence after 2 s of silence, pushed as a capture's buffers with their times, gives segments with

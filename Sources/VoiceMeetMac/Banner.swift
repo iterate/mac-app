@@ -196,6 +196,8 @@ final class BannerWindow {
     var dismiss: () -> Void = {}
     private var panel: NSPanel?
     private let log = AppLog("banner")
+    /// Goes up with each show: a hide's fade that ends after a newer show leaves it on the screen.
+    private var shows = 0
 
     /// The banner's rounded shape, as the material's mask: it stretches to any size.
     private static let roundedMask: NSImage = {
@@ -219,6 +221,7 @@ final class BannerWindow {
     func show(_ banner: Banner) {
         let panel = self.panel ?? Self.makePanel()
         self.panel = panel
+        shows += 1
         let view = BannerView(banner: banner, press: { [weak self] in self?.press($0) }, dismiss: { [weak self] in self?.dismiss() })
         let size = Self.size(of: view)
         let host = NSHostingView(rootView: view)
@@ -284,11 +287,16 @@ final class BannerWindow {
 
     func hide() {
         guard let panel, panel.isVisible else { return }
+        let hidden = shows
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.18
             panel.animator().alphaValue = 0
-        } completionHandler: { [weak panel] in
-            MainActor.assumeIsolated { panel?.orderOut(nil) }
+        } completionHandler: { [weak self, weak panel] in
+            MainActor.assumeIsolated {
+                // a banner shown during the fade is the one on the screen now
+                guard let self, self.shows == hidden else { return }
+                panel?.orderOut(nil)
+            }
         }
     }
 
@@ -466,6 +474,7 @@ struct BannerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel(button.label)
+        .accessibilityIdentifier("banner.button.\(index)")
         .help(help(button, index))
         .modifier(Shortcut(isDefault: index == banner.defaultButton, isDecline: button.style == .decline))
     }
@@ -480,6 +489,7 @@ struct BannerView: View {
             if let symbol = button.symbol { Label(button.label, systemImage: symbol) } else { Text(button.label) }
         }
         .buttonStyle(SystemLikeButton(isDefault: isDefault))
+        .accessibilityIdentifier("banner.button.\(index)")
         .help(help(button, index))
         .modifier(Shortcut(isDefault: isDefault, isDecline: button.style == .decline))
     }

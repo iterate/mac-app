@@ -17,7 +17,6 @@ final class PanelState: ObservableObject {
     @Published var approvals: [String: Date] = [:]
     /// How many times a mind used each thing since the app started.
     @Published var uses: [String: Int] = [:]
-    @Published var revision = 0
     /// Each display's small picture, the size it is drawn at (60 pixels wide), made off the main thread.
     @Published var displayPictures: [String: CGImage] = [:]
     @Published var didCopy = false
@@ -58,6 +57,8 @@ struct LendView: Equatable {
     var status = ""
     /// The phase as the panel lays it out: `LendState.words`.
     var words = LendWords(title: "Not lent", detail: "no mind is active")
+    /// The phase's name (`LendPhase.name`), for `ui.state` and the views that still compare it;
+    /// a view decides by `state.phase`.
     var phase = "idle"
     /// Where a member allows the key, when the CLI printed one.
     var link: String?
@@ -67,6 +68,17 @@ struct LendView: Equatable {
     /// Where the app came from: its version and whether it updates itself, or the owner's copy it
     /// was built from (`UpdateSource.line`).
     var source: String?
+    /// The lend's state that `status` and `words` were made from: the panel's countdown makes them
+    /// again each second (`at`), while it shows.
+    var state = LendState()
+
+    /// The words at `date`: a countdown's seconds of then.
+    @MainActor func at(_ date: Date) -> LendView {
+        var view = self
+        view.status = state.statusLine(now: date, clock: Lend.clock)
+        view.words = state.words(now: date, clock: Lend.shortClock)
+        return view
+    }
 }
 
 /// What the panel's lend section does.
@@ -126,6 +138,7 @@ struct Panel: View {
     }
 
     var body: some View {
+        let _ = Perf.count("panelBodies")
         let lend = state.lend
         VStack(alignment: .leading, spacing: 0) {
             if let banner = state.banner {
@@ -171,12 +184,25 @@ struct Panel: View {
 
     /// The mind this Mac is lent to (`MindSwitcher`) with the phase at its right, and under it the
     /// phase's block while the lend is held up.
+    @ViewBuilder
     private var lendSection: some View {
         let lend = state.lend
-        return VStack(alignment: .leading, spacing: 8) {
+        // a wait counts down: its row alone is drawn again each second, and only while it shows
+        if let next = lend.state.phase.nextStartAt, next > Date(), !AppEnvironment.current.isRendering {
+            TimelineView(.periodic(from: Date(), by: 1)) { context in
+                let _ = Perf.count("lendTicks")
+                lendRows(lend.at(context.date))
+            }
+        } else {
+            lendRows(lend)
+        }
+    }
+
+    private func lendRows(_ lend: LendView) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
             MindSwitcher(
-                lend: lend, isOpen: $state.isSwitcherOpen, actions: lendActions, dot: Self.color(of: lend.phase),
-                phaseColor: Self.textColor(of: lend.phase))
+                lend: lend, isOpen: $state.isSwitcherOpen, actions: lendActions, dot: Self.color(of: lend.state.phase),
+                phaseColor: Self.textColor(of: lend.state.phase))
             if lend.active != nil, let block = lend.words.block {
                 phaseBlock(block, lend: lend).padding(.horizontal, 6)
             }
@@ -208,7 +234,7 @@ struct Panel: View {
                     .textSelection(.enabled)
             }
             HStack(spacing: 8) {
-                if lend.phase == "incompatible" {
+                if case .incompatible = lend.state.phase {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(LendState.updateCommand, forType: .string)
@@ -236,22 +262,22 @@ struct Panel: View {
     }
 
     /// The dot on the mind's face.
-    private static func color(of phase: String) -> Color {
+    static func color(of phase: LendPhase) -> Color {
         switch phase {
-        case "live": return .green
-        case "connecting", "reconnecting": return .orange
-        case "idle": return .secondary
-        default: return .red
+        case .live: return .green
+        case .connecting, .reconnecting: return .orange
+        case .idle: return .secondary
+        case .stopped, .notAllowed, .incompatible: return .red
         }
     }
 
     /// The phase's name at the right of the row.
-    private static func textColor(of phase: String) -> Color {
+    private static func textColor(of phase: LendPhase) -> Color {
         switch phase {
-        case "live": return Palette.liveText
-        case "connecting", "reconnecting": return Palette.waitText
-        case "idle": return .secondary
-        default: return Palette.redText
+        case .live: return Palette.liveText
+        case .connecting, .reconnecting: return Palette.waitText
+        case .idle: return .secondary
+        case .stopped, .notAllowed, .incompatible: return Palette.redText
         }
     }
 
@@ -767,6 +793,7 @@ extension Panel {
         view.phase = lend.phase.name
         view.link = lend.phase.link
         view.source = Rendering.source
+        view.state = lend
         return view
     }
 }

@@ -69,4 +69,30 @@ final class RecordRuleTests: XCTestCase {
         XCTAssertEqual(UseGate.decide(sharing: "shared", permitted: true, approved: false), .go)
         XCTAssertEqual(UseGate.decide(sharing: "shared", permitted: false, approved: false), .notPermitted)
     }
+
+    // MARK: - The mark's words and its red
+
+    func testTheMarksWords() {
+        let label = { (banner: (String, Bool)?, inUse: Bool, capturing: Bool, on: Bool, glance: LendGlance, dot: RecordDot) in
+            MenuBarMark.label(
+                banner: banner.map { (title: $0.0, isCall: $0.1) }, inUse: inUse, isCapturing: capturing, microphoneOrCameraOn: on, glance: glance,
+                dot: dot, tracks: 4, pausedBecause: "locked")
+        }
+        XCTAssertEqual(label(nil, false, false, false, .live, .none), "iterate: lent")
+        XCTAssertEqual(label(nil, false, false, false, .connecting, .none), "iterate: connecting")
+        XCTAssertEqual(label(nil, false, false, false, .down, .recording), "iterate: not lent, recording 4 tracks")
+        XCTAssertEqual(label(("Misha", true), true, true, true, .live, .paused), "iterate: Misha calls, recording paused: locked")
+        XCTAssertEqual(label(("Build done", false), false, false, false, .live, .none), "iterate: Build done")
+        XCTAssertEqual(label(nil, true, true, true, .live, .none), "iterate: a mind uses this Mac now")
+        XCTAssertEqual(label(nil, false, true, true, .live, .none), "iterate: your capture runs")
+        XCTAssertEqual(label(nil, false, false, true, .live, .none), "iterate: microphone or camera on")
+    }
+
+    /// Fable 9: a use makes the mark red until 3 s after it, and that end is the one look again.
+    func testTheRedOfAUseEndsOnce() {
+        let use = Date(timeIntervalSince1970: 1_000)
+        XCTAssertTrue(MenuBarMark.inUse(lastUse: use, now: use.addingTimeInterval(1)) == (true, use.addingTimeInterval(3)))
+        XCTAssertTrue(MenuBarMark.inUse(lastUse: use, now: use.addingTimeInterval(3)) == (false, nil))
+        XCTAssertTrue(MenuBarMark.inUse(lastUse: nil, now: use) == (false, nil))
+    }
 }

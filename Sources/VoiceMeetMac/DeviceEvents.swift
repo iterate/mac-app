@@ -23,8 +23,8 @@ import VoiceMeetCore
 /// the Mac's own key lends and does nothing else.
 @MainActor
 final class DeviceEvents: ObservableObject {
-    /// A person is taken as away after this long with no key, click or move.
-    static let idleAfterSeconds = 120
+    /// A person is taken as away after this long with no key, click or move (`Presence`).
+    static let idleAfterSeconds = Presence.idleAfterSeconds
 
     /// The person's choice: keyboard and mouse events go to the mind.
     @Published var sharesInput = AppEnvironment.current.defaults.bool(forKey: "device.input") {
@@ -66,15 +66,15 @@ final class DeviceEvents: ObservableObject {
     /// The session's bridge, whose job `events` publishes.
     private var bridge: MindBridge?
     private var wasDown = false
-    private var timer: Timer?
+    /// The one next look at the presence (`tick`).
+    private var nextLook: Timer?
+    /// While idle, the monitor of the person's return.
+    private var returnWatch: Any?
     private var monitors: [Any] = []
     private var lastMoveAt = Date.distantPast
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
 
     func start() {
-        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
         // A lock, an unlock, and displays that sleep or wake count at once, not at the next tick:
         // the recorder pauses the screens on this value. Again after half a second, in case the
         // session's dictionary says it a little later than the notification.
@@ -94,8 +94,11 @@ final class DeviceEvents: ObservableObject {
     }
 
     func stop() {
-        timer?.invalidate()
+        nextLook?.invalidate()
+        nextLook = nil
+        endWatchForReturn()
         for (center, observer) in observers { center.removeObserver(observer) }
+        observers = []
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
         endJob()
@@ -123,16 +126,49 @@ final class DeviceEvents: ObservableObject {
 
     // MARK: - Presence
 
+    /// Reads the presence, says it when it changed, and sets the one next look (`Presence.nextLookSeconds`):
+    /// at the moment an active person would turn idle, else an input, an unlock or a wake says the
+    /// change. No look runs while the Mac is lent to no mind.
     func tick() {
-        guard session != nil else { return presence = nil }
+        Perf.count("presenceLooks")
+        nextLook?.invalidate()
+        nextLook = nil
+        guard session != nil else {
+            endWatchForReturn()
+            return presence = nil
+        }
         let now = readPresence()
-        let state = now.screenLocked ? "locked" : now.displayAsleep ? "asleep" : now.idleSeconds >= Self.idleAfterSeconds ? "idle" : "active"
+        let state = now.state
+        let look = Timer(timeInterval: TimeInterval(now.nextLookSeconds), repeats: false) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
+        // a look a little late is the same look: the system joins it with other wake-ups
+        look.tolerance = state == "active" ? 1 : 10
+        RunLoop.main.add(look, forMode: .common)
+        nextLook = look
+        if state == "idle" { watchForReturn() } else { endWatchForReturn() }
         guard state != presence else { return }
         var payload: [String: Any] = ["state": state, "idleSeconds": now.idleSeconds]
         if let presence { payload["was"] = presence }
         presence = state
         publish("device/presence-changed", payload, ephemeral: false)
         log.info("presence: \(state)")
+    }
+
+    /// While idle: the first key, click, move or scroll in any app looks again at once. Keys need
+    /// Accessibility; the mouse needs none.
+    private func watchForReturn() {
+        guard returnWatch == nil else { return }
+        let kinds: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .keyDown, .flagsChanged]
+        returnWatch = NSEvent.addGlobalMonitorForEvents(matching: kinds) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.endWatchForReturn()
+                self?.tick()
+            }
+        }
+    }
+
+    private func endWatchForReturn() {
+        if let returnWatch { NSEvent.removeMonitor(returnWatch) }
+        returnWatch = nil
     }
 
     // MARK: - Keyboard and mouse
@@ -153,6 +189,12 @@ final class DeviceEvents: ObservableObject {
     }
 
     private func saw(_ event: NSEvent) {
+        // a move or a scroll inside 0.1 s of the last one is dropped before anything is read
+        if [.mouseMoved, .leftMouseDragged, .scrollWheel].contains(event.type) {
+            let now = Date()
+            guard now.timeIntervalSince(lastMoveAt) > 0.1 else { return }
+            lastMoveAt = now
+        }
         let ephemeral = !keepsInput
         let point = NSEvent.mouseLocation
         let primary = NSScreen.screens.first?.frame.maxY ?? 0
@@ -176,16 +218,12 @@ final class DeviceEvents: ObservableObject {
             if let app = NSWorkspace.shared.frontmostApplication?.localizedName { payload["app"] = app }
             publish("device/mouse-pressed", payload, ephemeral: ephemeral)
         case .scrollWheel:
-            guard Date().timeIntervalSince(lastMoveAt) > 0.1 else { return }
-            lastMoveAt = Date()
             var payload = place
             payload["dx"] = Int(event.scrollingDeltaX)
             payload["dy"] = Int(event.scrollingDeltaY)
             publish("device/scrolled", payload, ephemeral: ephemeral)
         case .mouseMoved, .leftMouseDragged:
-            // at most ten a second: a mouse reports hundreds
-            guard Date().timeIntervalSince(lastMoveAt) > 0.1 else { return }
-            lastMoveAt = Date()
+            // at most ten a second (above): a mouse reports hundreds
             publish("device/mouse-moved", place, ephemeral: ephemeral)
         default:
             break
