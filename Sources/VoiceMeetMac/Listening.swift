@@ -14,7 +14,8 @@ import VoiceMeetCore
 /// 3. The transcription stream: `heard` takes each partial and segment, of the session and of Always
 ///    listen. A final segment is kept here and goes to the record's `transcript` track.
 /// 4. The features read it: a dictation's text is the words of its stretch between its key's down
-///    and up (`said`), and "write what I just said" (⌥⇧W) is the last finished stretch.
+///    and up (`said`). Each stretch of Always listen goes into the history (`History`), where
+///    "Paste the last transcript" (⌥⇧W) finds the newest of it and of the dictations.
 @MainActor
 final class Listening {
     /// False in a home of its own with no audio fixture: Always listen opens no microphone there.
@@ -36,6 +37,8 @@ final class Listening {
     private var segments = 0
     private var isSpeaking = false
     private var keyListens = false
+    /// The history's entry of the last stretch of Always listen: its next segment replaces it.
+    private var stretchEntry: (stretch: String, entry: TranscriptEntry)?
 
     /// Always listen runs: the microphone is open with no key.
     var isAlwaysListening: Bool { listener != nil }
@@ -45,7 +48,33 @@ final class Listening {
         guard case .segment(let segment) = event else { return }
         transcript.add(segment)
         record(segment.line)
-        if segment.origin == .listen { segments += 1 }
+        if segment.origin == .listen {
+            segments += 1
+            keep(segment)
+        }
+    }
+
+    /// A stretch of Always listen into the history: its first segment makes the entry, each next
+    /// one makes it longer.
+    private func keep(_ segment: TranscriptSegment) {
+        var entry: TranscriptEntry
+        if let last = stretchEntry, last.stretch == segment.stretch {
+            entry = last.entry
+            let start = entry.at - entry.seconds
+            entry.text = Spoken.join(entry.text, segment.text)
+            entry.at = max(entry.at, segment.end)
+            entry.seconds = entry.at - start
+        } else {
+            entry = TranscriptEntry(kind: .stretch, outcome: .heard, at: segment.end, text: segment.text, model: segment.model, seconds: segment.end - segment.start)
+        }
+        guard !entry.text.isEmpty else { return }
+        stretchEntry = (segment.stretch, entry)
+        History.shared.add(entry)
+    }
+
+    /// The model that heard `stretch`, for the history.
+    func model(of stretch: String) -> String? {
+        transcript.segments.last { $0.stretch == stretch }?.model
     }
 
     /// The words of `stretch` said between two Unix times.
@@ -53,8 +82,6 @@ final class Listening {
         transcript.words(from: from, to: to, of: stretch)
     }
 
-    /// The last finished stretch's text, for ⌥⇧W: of Always listen, else of a key's listening.
-    var lastStretch: String? { transcript.lastStretch()?.text }
 
     /// A key's listening started (`true`) or ended: Always listen holds meanwhile.
     func keyListening(_ isOn: Bool) {

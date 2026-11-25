@@ -16,7 +16,7 @@ enum HotKey {
         static let input = Combo(id: 2, key: kVK_Space, modifiers: optionKey | shiftKey)
         /// Dictates into the app in front (`Dictation`).
         static let dictation = Combo(id: 3, key: kVK_ANSI_D, modifiers: optionKey | shiftKey)
-        /// Writes the last finished stretch of speech where the cursor is (`Listening`), unless Settings set another key.
+        /// "Paste the last transcript": the newest entry of the history where the cursor is (`History`), unless Settings set another key.
         static let writeSaid = Combo(id: 4, key: kVK_ANSI_W, modifiers: optionKey | shiftKey)
 
         /// The key in words, as macOS's menus write it: ⌥⇧S, ⌃⌘Space.

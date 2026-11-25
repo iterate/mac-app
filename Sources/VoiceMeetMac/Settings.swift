@@ -460,7 +460,7 @@ private struct GeneralPage: View {
                 SettingsRow(title: "Dictate") {
                     Text(choices.dictationOnFn ? "fn, under Dictation" : "⌥⇧D, under Dictation").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 }
-                SettingsRow(title: "Write what I just said", detail: "The last stretch of speech, where the cursor is.") {
+                SettingsRow(title: "Paste the last transcript", detail: "The newest dictation, or stretch of Always listen, where the cursor is.") {
                     KeyRecorder(id: HotKey.Combo.writeSaid.id, combo: choices.writeSaidKey, problem: state.keyProblems[HotKey.Combo.writeSaid.id], actions: actions)
                         .accessibilityElement(children: .contain)
                         .accessibilityIdentifier("settings.key.writeSaid")
@@ -577,6 +577,9 @@ private struct DictationPage: View {
     @ObservedObject var choices: Choices
     @ObservedObject var speech: SpeechChoice
     let actions: SettingsActions
+    @ObservedObject var history = History.shared
+    /// "Clear History…" was pressed: the row asks once.
+    @State private var isClearing = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -590,7 +593,7 @@ private struct DictationPage: View {
                 }
                 SettingsRow(
                     title: "Always listen",
-                    detail: "The microphone stays open, and this Mac puts each stretch of your speech into words, for \(choices.writeSaidKey?.words ?? "Write what I just said") and the record."
+                    detail: "The microphone stays open, and this Mac puts each stretch of your speech into words, for the history, \(choices.writeSaidKey?.words ?? "Paste the last transcript") and the record."
                 ) {
                     SettingsSwitch(id: "settings.alwaysListen", label: "Always listen", isOn: choices.alwaysListen) { choices.alwaysListen = $0 }
                 }
@@ -648,6 +651,33 @@ private struct DictationPage: View {
                     .accessibilityIdentifier("settings.write")
                 }
             }
+            SettingsGroup(title: "History", note: "Every dictation and stretch of Always listen, to copy or paste again. It stays on this Mac and goes to no mind.") {
+                SettingsRow(title: "Keep a history", detail: "The last 30 days, at most 2,000 transcripts. The Activity window shows it, under Dictations.", isFirst: true) {
+                    SettingsSwitch(id: "settings.keepHistory", label: "Keep a history", isOn: history.keeps) { history.keeps = $0 }
+                }
+                if isClearing {
+                    SettingsRow(title: "Clear the history?", detail: clearDetail) {
+                        HStack(spacing: 6) {
+                            Button("Cancel") { isClearing = false }
+                                .buttonStyle(SettingsLook.button)
+                                .accessibilityIdentifier("settings.clearHistory.cancel")
+                            Button("Clear") {
+                                history.clear()
+                                isClearing = false
+                            }
+                            .buttonStyle(FillButtonStyle(prominent: true, height: 24, padding: 10))
+                            .accessibilityIdentifier("settings.clearHistory.confirm")
+                        }
+                    }
+                } else {
+                    SettingsRow(title: "Clear history", detail: history.history.entries.count == 1 ? "1 transcript" : "\(history.history.entries.count) transcripts") {
+                        Button("Clear History…") { isClearing = true }
+                            .buttonStyle(SettingsLook.button)
+                            .disabled(history.history.entries.isEmpty)
+                            .accessibilityIdentifier("settings.clearHistory")
+                    }
+                }
+            }
             SettingsGroup(title: "Word list") {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -665,6 +695,11 @@ private struct DictationPage: View {
                 .padding(.vertical, 10)
             }
         }
+    }
+
+    private var clearDetail: String {
+        let count = history.history.entries.count
+        return "\(count == 1 ? "The one transcript" : "All \(count) transcripts") go from this Mac. This cannot be undone."
     }
 
     /// Where the sound goes, under "Put speech into words".

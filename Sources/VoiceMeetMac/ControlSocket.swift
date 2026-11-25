@@ -10,7 +10,8 @@ import VoiceMeetCore
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
 /// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
 ///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
-/// - `listen.write`: what ⌥⇧W does: the last finished stretch of speech is written (README, "Listening").
+/// - `listen.write`: what ⌥⇧W, "Paste the last transcript", does: the newest entry of the history
+///   (a dictation, or a stretch of Always listen) is written (README, "Dictation").
 /// - `approval.answer {allow, keep?}`: answers the Ask question that waits, as its panel's buttons
 ///   do, and no Touch ID is asked (`Approval.answersByControl`); `keep` approves for the chosen
 ///   time (`approval.minutes`), as "Approve for 30 Minutes" does.

@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import Record
 import SpeechText
 import SwiftUI
 import VoiceMeetCore
@@ -94,6 +95,8 @@ final class Dictation: SpeechClient {
     var words: () -> WordList = { .empty }
     /// The words of a stretch of the transcription stream between two Unix times (`Listening.said`).
     var said: (_ from: Double, _ to: Double, _ stretch: String) -> String = { _, _, _ in "" }
+    /// The model that heard a stretch of the transcription stream (`Listening.model`).
+    var heardBy: (_ stretch: String) -> String? = { _ in nil }
     /// Opens the guide for a permission of macOS.
     var allow: (Permission) -> Void = { _ in }
     var onChange: () -> Void = {}
@@ -127,9 +130,22 @@ final class Dictation: SpeechClient {
     /// fn down plays the start sound only after this, with fn still held and no other key: a tap
     /// of fn alone and most fn-arrow combinations make no sound. The microphone opens at once.
     static let fnCueDelay: TimeInterval = 0.2
+    /// When this dictation started, for its seconds in the history.
+    private var startedAt: Date?
+    /// The last app in front that is not this one: the Dictations view's Paste goes there.
+    private(set) var otherApp: NSRunningApplication?
+    private var frontWatch: NSObjectProtocol?
 
     init(session: SpeechSession) {
         self.session = session
+        let own = ProcessInfo.processInfo.processIdentifier
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != own { otherApp = front }
+        frontWatch = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication, app.processIdentifier != own else { return }
+            MainActor.assumeIsolated { self?.otherApp = app }
+        }
     }
 
     // MARK: - The keys
@@ -269,6 +285,7 @@ final class Dictation: SpeechClient {
         pill.phase = .listening
         switch session.start(self, words: words()) {
         case nil:
+            startedAt = Date()
             pill.clock = .since(Date())
             showPill()
             // after the microphone opened: the sound never holds it up
@@ -331,13 +348,17 @@ final class Dictation: SpeechClient {
             pill.level = level
         case .failed(let reason):
             ended()
+            // what it heard so far is kept, to get it back
+            if !pill.text.isEmpty { keep(pill.text, .failed) }
             end("Not written at \(Lend.clock(Date())): \(reason)", failed: reason)
         case .ended(let text):
             // after this dictation's own end, or when the input bar started to listen. A new
             // dictation may run already (fn went down again before the last words came): the key
             // is that one's, and only a listening taken by the input bar leaves it to be reset.
             if !isRunning { ended() }
-            write(spoken(text))
+            let said = spoken(text)
+            keep(said, said.isEmpty ? .heardNothing : .written)
+            write(said)
         }
     }
 
@@ -354,13 +375,66 @@ final class Dictation: SpeechClient {
         return fromStream
     }
 
-    /// ⌥⇧W, "write what I just said": the last finished stretch of the transcription stream, where
-    /// the cursor is, though no key was held while it was said. Nothing while a dictation runs.
-    func writeSaid(_ text: String?) {
-        guard !isRunning else { return log.info("write what I just said: a dictation runs; nothing is written") }
-        guard let text, !text.isEmpty else { return end("Nothing heard to write at \(Lend.clock(Date()))", failed: nil) }
-        log.info("write what I just said: the last stretch, \(Spoken.wordCount(text)) words")
-        write(text)
+    /// ⌥⇧W, "Paste the last transcript": the newest entry of the history (a dictation's text, or
+    /// a stretch of Always listen, whichever ended last), where the cursor is. Nothing while a
+    /// dictation runs.
+    func pasteLast(_ entry: TranscriptEntry?) {
+        guard !isRunning else { return log.info("paste the last transcript: a dictation runs; nothing is written") }
+        guard let entry, !entry.text.isEmpty else { return end("No transcript to paste at \(Lend.clock(Date()))", failed: nil) }
+        log.info("paste the last transcript: the newest \(entry.kind.rawValue), \(entry.words) words")
+        write(entry.text)
+    }
+
+    /// The Dictations view's Paste: `text` where the cursor is in the app that was in front before
+    /// the window (`otherApp`). That app comes to the front first; ⌘V goes once it is there.
+    func paste(_ text: String) {
+        guard !isRunning else { return log.info("paste from the history: a dictation runs; nothing is written") }
+        guard !text.isEmpty else { return }
+        log.info("paste from the history: \(Spoken.wordCount(text)) words into \(otherApp?.localizedName ?? "the app in front")")
+        guard !AppEnvironment.current.hasOwnHome, let app = otherApp, !app.isTerminated else { return write(text) }
+        app.activate()
+        let deadline = Date().addingTimeInterval(1.5)
+        func whenInFront() {
+            guard NSWorkspace.shared.frontmostApplication != app, Date() < deadline else { return write(text) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { MainActor.assumeIsolated { whenInFront() } }
+        }
+        whenInFront()
+    }
+
+    /// The history's entry of this dictation (`History`): its text, the app and the window it went
+    /// into, the model, its seconds. The window's title is read off the main thread, and never of
+    /// an app that `ExcludeList` names; the entry is kept at once, and again with the title.
+    private func keep(_ text: String, _ outcome: TranscriptEntry.Outcome, stretch: String? = nil) {
+        let now = Date()
+        var seconds = startedAt.map { now.timeIntervalSince($0) } ?? 0
+        var model = stretch.flatMap(heardBy)
+        if let ending = session.ending {
+            seconds = ending.end - ending.start
+            model = heardBy(ending.stretch)
+        }
+        let front = NSWorkspace.shared.frontmostApplication
+        let entry = TranscriptEntry(
+            kind: .dictation, outcome: outcome, at: now.timeIntervalSince1970, text: text, app: front?.localizedName, bundle: front?.bundleIdentifier,
+            model: model, seconds: max(0, seconds))
+        History.shared.add(entry)
+        guard let front, !ExcludeList().excludes(front.bundleIdentifier), front.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+            Permission.accessibility.isGranted
+        else { return }
+        let pid = front.processIdentifier
+        DispatchQueue.global(qos: .utility).async {
+            let element = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(element, 0.3)
+            guard let window = Accessibility.attribute(element, kAXFocusedWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID(),
+                let title = Accessibility.attribute(window as! AXUIElement, kAXTitleAttribute) as? String, !title.isEmpty
+            else { return }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    var titled = entry
+                    titled.window = title
+                    History.shared.add(titled)
+                }
+            }
+        }
     }
 
     private func finish() {
@@ -374,10 +448,14 @@ final class Dictation: SpeechClient {
     /// Throws the sound away. `quietly`: no line in the panel (fn was a modifier, or one tap alone).
     private func cancel(quietly: Bool) {
         guard isRunning else { return ended() }
+        let stretch = session.stretch(for: self)?.id
         session.cancel(self)
         ended()
         if !quietly, cued { DictationSound.shared.play(.cancelled) }
-        guard quietly else { return end("Cancelled at \(Lend.clock(Date()))", failed: nil) }
+        guard quietly else {
+            keep(pill.text, .cancelled, stretch: stretch)
+            return end("Cancelled at \(Lend.clock(Date()))", failed: nil)
+        }
         log.info("cancelled with no sign")
         hidePill(after: 0)
         onChange()

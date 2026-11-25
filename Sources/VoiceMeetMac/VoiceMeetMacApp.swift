@@ -65,7 +65,7 @@ enum VoiceMeetMacApp {
         if let flag = CommandLine.arguments.firstIndex(of: "--render-approval"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(ApprovalWindow.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
         }
-        // The Activity window with every event, light and dark: `--render-log <folder>`.
+        // The Activity window with every event, and its Dictations mode, light and dark: `--render-log <folder>`.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-log"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(ActivityWindowView.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
         }

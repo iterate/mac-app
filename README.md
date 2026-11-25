@@ -156,15 +156,16 @@ wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the 
 - **General**: open at login (config.json's `login`), show each act on the screen (the same tick
   as on the Activity page), how long an approval lasts (5, 15, 30, 60 or 120 minutes; the Ask
   question's second button says it: "Approve for 30 Minutes"), the keys of capture and the input
-  and of "write what I just said" (⌥⇧W) (a click records a new one, with ⌘, ⌥ or ⌃; × removes
+  and of "Paste the last transcript" (⌥⇧W) (a click records a new one, with ⌘, ⌥ or ⌃; × removes
   it; a key that macOS refuses says so and the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
   a trial and a copy are updated by hand), and **Copy Prompt**.
 - **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on,
   Always listen (off unless set; "Listening"), the orange row when macOS acts on 🌐 too, the speech model and its list, "OpenAI through <mind>:
   the mind's key" when sockets open through the lent mind, your own OpenAI key (optional; set or removed;
   it is never shown), whether the pill shows the
-  words, where the text goes (where the cursor is, or on the clipboard only), and the default
-  expression of the word list (below).
+  words, where the text goes (where the cursor is, or on the clipboard only), the history ("Keep
+  a history", and **Clear History…**, which asks once in the page itself; "Dictation" below), and
+  the default expression of the word list (below).
 
 **Minds** has a page for each mind this Mac knows: **Lend to This Mind** (or "Lent now"), this
 Mac's name there (a new name needs a new key: the app asks, then runs the CLI's `add`), the key's
@@ -180,7 +181,7 @@ when it ended and the CLI renews it at its next connection; "Not signed in" with
 The app writes config.json only through `cli.mjs` (`set`, `add`; `use` and `remove` as the panel
 does), and `cli.mjs` keeps every key it does not know, at the top and in each mind. The choices
 of this Mac are in the app's defaults: `approval.minutes`, `key.capture`, `key.input`, `key.writeSaid`, `listen.always`,
-`dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.sounds`, `dictation.write`, `update.byItself`.
+`dictation.history`, `dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.sounds`, `dictation.write`, `update.byItself`.
 `--render-settings <folder>` draws the pages (General, Dictation, a mind lent with the default
 list, a mind whose own expression fails), light and dark.
 
@@ -345,7 +346,8 @@ key) and reads the newest 100 events; a scroll to the end of the list reads the 
 5,000 offsets scanned for a page), until the window holds 500. A new event over that pushes the
 oldest out. A string of an event is cut at 2,000 characters for the window (the mind keeps it
 whole). Closing the window ends the subscription and lets go of the events.
-`--render-log <folder>` draws the window with sample events.
+Its third mode, **Dictations**, is the history of transcripts on this Mac ("Dictation").
+`--render-log <folder>` draws the window with sample events, and its Dictations mode.
 
 ## What the Mac tells its mind: `/devices/<name>`
 
@@ -838,6 +840,37 @@ with a lock while it stays on and the time since the start.
 - **Sounds.** A soft rising tone when listening starts (fn held 0.2 s, the double tap's lock, ⌥⇧D, the Dictate button, the input bar's microphone), a softer falling one when the text is written, and a low one for Esc: sines made in `SoundCue`, under 150 ms, at a tenth of full scale; the microphone opens first, and Parakeet v3 wrote the same words with the tone over the first word. Settings › Dictation, "Sounds" (`dictation.sounds`), turns them off; a home of its own and a drawing never make one (`ui.state`'s `sounds.silenced` counts them).
 - **Permissions.** The microphone, at the first use. The line under the panel's three buttons
   says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
+- **The history, and "Paste the last transcript".** Every finished dictation goes into a history
+  on this Mac: its text as it was written (with the word list's corrections), the time, the app
+  it went into (its name and bundle id) and the window's title (read off the main thread, and
+  never of an app that `ExcludeList` names, the password managers), the model, its words and
+  seconds, and how it ended: written, heard no words, or cancelled with Esc (its text is kept:
+  that is when you want it back). With Always listen, each stretch goes in too, as "Always
+  listen". The history is `dictation-history.jsonl` in the app's home (a copy with `--home` keeps
+  its own): one JSON line an entry, at most 2,000 entries of the last 30 days, the oldest dropped
+  first, written on a queue of its own (`History`, and `TranscriptHistory` in `VoiceMeetCore`). A
+  file that cannot be read starts empty, with one line in `app.log`, and its bytes stay beside it
+  as `dictation-history.broken.jsonl`. It stays on this Mac and is no event to a mind: the
+  record's `transcript` track already is, when you share the microphone. Settings › Dictation,
+  **Keep a history** (`dictation.history`, on unless set), turns it off: then a transcript is
+  kept in memory alone, for ⌥⇧W, and nothing is written. **Clear History…** asks once, in the
+  page, then empties the file.
+
+  **⌥⇧W, "Paste the last transcript"** (Settings › General sets another key, or none;
+  `listen.write` on the control socket) writes the newest entry of the history where the cursor
+  is: a dictation's text, or with Always listen the newest stretch, whichever ended last. It reads
+  the history, so it works after a restart too: when the text went into the wrong field, or
+  nowhere. The panel's **Dictate** button has it in its menu (Control-click): **Paste Last
+  Transcript** and **Show Dictations**.
+
+  **The Dictations view** is the Activity window's third mode, **Dictations**, beside Acts and
+  Every event: newest first, each row its time, the app's icon and name, the text in two lines
+  (all of it when chosen), and **Copy** and **Paste**. Paste writes it where the cursor is in the
+  app that was in front before the window: that app comes to the front, then ⌘V. The search
+  keeps the rows with every word of it. At the right are the chosen transcript's fields and its
+  whole text. The list is lazy: only the rows on the screen are made. It is a mode of the
+  Activity window, not a window of its own, because that window already has the switch, the
+  search and the pane at the right that it needs.
 
 With a local model, while you talk, the text is written again from the stretch of speech that is
 going: twice a second with Parakeet; with Oruk Fourier, which has no partial text of its own and
@@ -858,7 +891,7 @@ the microphone. Each layer has its events, and the layer above reads them.
 | 1. The microphone stream | `MicStream`: the one owner of the input device (an `AVAudioEngine` tap, or the audio fixture) | `frame`: 16 kHz mono samples and the wall time of the first one; the device's own buffers and their host time; `failed` | `SpeechSession` (dictation, the input bar), Always listen, the record's `mic-0` |
 | 2. Speech detection | `SpeechGate` on Silero VAD | `speech started` (its time), `speech ended` (its start and end) | Always listen |
 | 3. The transcription stream | A transcriber for each stretch of speech | `partial` (ephemeral: the stretch's words so far, as heard and with the word list's corrections); `segment` (final: the text, the heard words, the corrections, the start and end, the model, the stretch and what heard it) | The pill and the input bar (the partials of their own stretch); `Listening` (the segments: the transcript in memory and the record's `transcript` track) |
-| 4. The features | Dictation, the input bar, "write what I just said", Always listen | | The person |
+| 4. The features | Dictation, the input bar, the history and "Paste the last transcript", Always listen | | The person |
 
 - **The stream** (`Sources/SpeechText/MicStream.swift`) runs while anyone reads it, and only then.
   The first reader starts the device, the last one stops it. A change of device (headphones in,
@@ -893,9 +926,10 @@ the microphone. Each layer has its events, and the layer above reads them.
   listen is on; with neither, no text goes into the record.
 - **The features read the stream.** The pill and the input bar show their stretch's partials. A
   dictation writes the words of its stretch between its key's down and up, taken from the stream;
-  the sound is kept from fn down, as before. **"Write what I just said"** (⌥⇧W; Settings › General
-  sets another key, or none; `listen.write` on the control socket) writes the last finished
-  stretch where the cursor is: with Always listen, also what you said with no key held.
+  the sound is kept from fn down, as before. Each finished stretch of Always listen goes into the
+  history ("Dictation"), and **"Paste the last transcript"** (⌥⇧W; `listen.write` on the control
+  socket) writes its newest entry where the cursor is: with Always listen, also what you said with
+  no key held.
 - **Always listen** (Settings › Dictation; `listen.always` in the defaults) is OFF unless you turn
   it on. On, the microphone stays open with no key, each stretch of speech is put into words on
   this Mac, and the segments go into the record. The mark (or the mind's face) in the menu bar has a
@@ -1152,7 +1186,7 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | `perf` (`Perf`: CPU seconds, `rss` as the physical footprint, wake-ups, open files, threads, `mainStallMaxMs` while its watch runs, and `counters`: `stateChanges`, `statusWrites`, `panelBodies`, `lendTicks`, `presenceLooks`, `recordLooks`, `windowChanges`, `grantProbes`, `cameraSearches`), the lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the listening layers (`listening`), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
+| `ui.state` | `perf` (`Perf`: CPU seconds, `rss` as the physical footprint, wake-ups, open files, threads, `mainStallMaxMs` while its watch runs, and `counters`: `stateChanges`, `statusWrites`, `panelBodies`, `lendTicks`, `presenceLooks`, `recordLooks`, `windowChanges`, `grantProbes`, `cameraSearches`), the lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the listening layers (`listening`), the history (`history`: whether it is kept and read, its entries, the newest one's text, kind, outcome and app), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left, its `mode`, and in the Dictations mode the texts it lists, `dictations`), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) or a pop-up button's item (`{"id":"settings.approvalMinutes","label":"1 hour"}`) |
 | `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
@@ -1162,19 +1196,21 @@ connection, as the endpoint's; a mind never reaches it.
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
 | `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
-| `listen.write` | ⌥⇧W: the last finished stretch of speech is written ("Listening") |
+| `listen.write` | ⌥⇧W, "Paste the last transcript": the newest entry of the history is written ("Dictation") |
 | `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for `approval.minutes` (30 unless set). While the socket is open, the question's panel shows and its buttons answer too (`ui.press` on `approval.once`, `approval.minutes`, `approval.deny`), and no Touch ID is asked |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
 `activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `activity.window`, `approval.once`,
-`approval.minutes`, `approval.deny`, a banner's buttons `banner.button.<n>`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
+`approval.minutes`, `approval.deny`, a banner's buttons `banner.button.<n>`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`, `Dictations`),
 `log.filter.<acts|presence|app|window|record|live|inputs|keys>`, `log.search`, `log.list`, `log.row`, `log.context`,
-`log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `input.copyFix`, `capture.send`,
+`log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `dictations.list`, `dictations.row`,
+`dictations.copy`, `dictations.paste` (a row's), `dictations.chosen.copy`, `dictations.chosen.paste`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `input.copyFix`, `capture.send`,
 `capture.discard`, `speech.model.<id>` (a model in the list of Settings › Dictation), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
 `settings.showsPill`, `settings.approvalMinutes`, `settings.key.capture`, `settings.key.input`,
-`settings.doubleTap`, `settings.dictationKey`, `settings.alwaysListen`, `settings.key.writeSaid`, `settings.pillWords`, `settings.write`, `settings.speechWhere`,
+`settings.doubleTap`, `settings.dictationKey`, `settings.alwaysListen`, `settings.key.writeSaid`, `settings.pillWords`, `settings.keepHistory`, `settings.clearHistory`,
+`settings.clearHistory.confirm`, `settings.clearHistory.cancel`, `settings.write`, `settings.speechWhere`,
 `settings.openAIKey` (and `.set`, `.remove`),
 `settings.wordsExpression`, `settings.mind.name`, `settings.mind.wordsSource`,
 `settings.mind.expression` (and `.save`), `settings.mind.fetch`, `settings.mind.use`, `settings.mind.remove`. The tree is read in the app's own process and needs no permission of macOS; to
