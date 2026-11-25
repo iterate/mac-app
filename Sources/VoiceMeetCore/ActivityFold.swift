@@ -120,7 +120,8 @@ public struct ActivityFold: Equatable, Sendable {
         /// This app made the act in this session: only such an act can still run. An act in the
         /// context with no end was cut short (the app ended while it ran).
         public var isMadeHere: Bool
-        var startIsInMind: Bool
+        /// The context echoed the start: until then the act is this app's alone.
+        public internal(set) var startIsInMind: Bool
         var endIsInMind: Bool
 
         public var id: String { act }

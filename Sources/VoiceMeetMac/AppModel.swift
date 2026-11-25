@@ -246,7 +246,10 @@ final class AppModel {
             let stdin = Data(base64Encoded: parameters["stdinBase64"] as? String ?? "") ?? Data()
             let input = String(data: stdin, encoding: .utf8) ?? ""
             let shown = argv.joined(separator: " ").prefix(300) + (input.isEmpty ? "" : "\n\nWith this input:\n" + input.prefix(700))
-            return try await act(.commands, what: "Run this command with this app's permissions:\n\n\(shown)", doing: "Running a command", did: "Ran a command", detail: Self.oneLine(argv.joined(separator: " "))) {
+            return try await act(
+                .commands, what: "A command runs with this app’s permissions for the screen, the camera, the microphone and Accessibility.",
+                asks: String(shown), doing: "Running a command", did: "Ran a command", detail: Self.oneLine(argv.joined(separator: " "))
+            ) {
                 self.log.info("endpoint: runs \(argv.joined(separator: " ").prefix(300))")
                 return try await Commands.run(argv, stdin: stdin, timeout: parameters["timeoutSeconds"] as? Double ?? 120)
             }
@@ -264,7 +267,7 @@ final class AppModel {
 
     /// Refuses a thing that is off or not permitted, asks the person first when its choice is
     /// "Ask", then counts the use, so that the menu bar and the panel show it.
-    private func use(_ thing: Shareable, what: String) async throws {
+    private func use(_ thing: Shareable, what: String, asks detail: String? = nil) async throws {
         switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: approval.isApproved(thing) != nil) {
         case .off:
             throw EndpointRefusal("The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
@@ -273,7 +276,7 @@ final class AppModel {
                 "macOS has not given this app \(thing.power.permission?.title ?? "a permission"). The Mac's owner gives it from the iterate panel, at \(thing.title)."
             )
         case .ask:
-            try await approval.ask(for: thing, what: what)
+            try await approval.ask(for: thing, what: what, detail: detail)
         case .go:
             break
         }
@@ -397,9 +400,11 @@ final class AppModel {
     /// pill on the screen and in the panel's list, from its start to its end. A refusal before
     /// the act (the thing is off, the person said no) is no act.
     private func act(
-        _ thing: Shareable, what: String, doing: String, did: String, detail: String? = nil, _ body: () async throws -> [String: Any]
+        _ thing: Shareable, what: String, asks: String? = nil, doing: String, did: String, detail: String? = nil,
+        _ body: () async throws -> [String: Any]
     ) async throws -> [String: Any] {
-        try await use(thing, what: what)
+        // what the question shows in monospace: the command and its input, else the act's detail
+        try await use(thing, what: what, asks: asks ?? detail)
         let id = acts.began(thing, doing: doing, did: did, detail: detail)
         do {
             let answer = try await body()

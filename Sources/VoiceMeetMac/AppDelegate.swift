@@ -46,6 +46,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private lazy var settings = SettingsWindow { [unowned self] in
         AnyView(SettingsView(state: settingsState, choices: choices, speech: speechChoice, words: words, actions: settingsActions()))
     }
+    /// The Activity window: every event of the device's context, read only while it is open.
+    private let contextLog = ContextLog()
+    private lazy var activityWindow = ActivityWindow { [unowned self] in
+        AnyView(ActivityWindowView(acts: model.acts, log: contextLog, state: panelState, actions: activityWindowActions()))
+    }
     /// The word-list expressions of the config last seen: a change fetches the lists again.
     private var seenExpressions: [String: String] = [:]
     /// config.json's `login` as the login item was last set to it.
@@ -101,7 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             ),
             cameraLayer: { [weak self] id in self?.model.cameraPreviewLayer(for: id) ?? CALayer() },
             bigPicture: { [weak self] thing in await self?.bigPicture(of: thing) },
-            openSettings: { [weak self] in self?.openSettings(.general) }
+            openSettings: { [weak self] in self?.openSettings(.general) },
+            openActivityWindow: { [weak self] in self?.openActivityWindow() }
         )
         if #unavailable(macOS 15.0) { panelState.canCapture = false }
         pageWatch = panelState.$isActivityOpen.removeDuplicates().dropFirst().sink { [weak self] isOpen in
@@ -123,6 +129,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.record.onChange = { [weak self] in self?.stateDidChange() }
         model.banners.onChange = { [weak self] in self?.stateDidChange() }
         model.start()
+        model.deviceEvents.heardLog = { [weak self] line in self?.contextLog.heard(line) }
+        contextLog.readOlder = { [weak self] before in self?.model.deviceEvents.readOlder(before: before) }
+        contextLog.startOf = { [weak self] act in
+            self?.model.acts.rows.first { $0.act == act }.map { ($0.thing, $0.detail, $0.startedAt) }
+        }
+        activityWindow.opened = { [weak self] isOpen in
+            self?.model.deviceEvents.readLog(isOpen)
+            self?.log.info("the Activity window \(isOpen ? "opens: the log of every event is read" : "closes: the log's read ends")")
+        }
         lend.isBusy = { [weak self] in
             (self?.model.microphone.isRunning ?? false) || (self?.model.isAnyCameraRunning ?? false) || (self?.isCapturing ?? false)
                 || (self?.dictation.isRunning ?? false) || (self?.input.isListening ?? false)
@@ -357,6 +372,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 },
             ],
             "settings": ["visible": settings.isVisible, "page": settingsState.page.name],
+            "log": [
+                "visible": activityWindow.isVisible, "read": contextLog.window.isRead, "held": contextLog.window.events.count,
+                "hasOlder": contextLog.window.hasOlder, "failure": contextLog.failure ?? NSNull(),
+                "types": contextLog.window.events.prefix(50).map(\.type), "shown": contextLog.shown.count,
+            ] as [String: Any],
             "choices": [
                 "approvalMinutes": choices.approvalMinutes, "captureKey": choices.captureKey?.words ?? NSNull(),
                 "inputKey": choices.inputKey?.words ?? NSNull(), "dictationOnFn": choices.dictationOnFn, "doubleTap": choices.doubleTap,
@@ -481,6 +501,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
         }
         if let login = lend.config?.login, appliedLogin != nil, login != appliedLogin { openAtLogin() }
+    }
+
+    // MARK: - The Activity window
+
+    private func openActivityWindow() {
+        popover.performClose(nil)
+        refreshPanel()
+        activityWindow.show()
+    }
+
+    private func activityWindowActions() -> ActivityWindowActions {
+        ActivityWindowActions(
+            choose: { [weak self] thing, choice in
+                guard let self else { return }
+                thing.sharing = choice
+                self.panelState.sharing[thing.id] = choice
+                self.choiceChanged()
+            },
+            endApproval: { [weak self] thing in
+                self?.model.approval.end(thing)
+                self?.refreshPanel()
+            },
+            copy: { json in
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(json, forType: .string)
+            })
     }
 
     // MARK: - Settings

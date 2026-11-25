@@ -1,7 +1,8 @@
 // A fake mind for the bridges' tests: connections that end as the mind ends them (1008), that
 // fail to connect, subscriptions that end with no word, appends that fail. Each appended event gets
 // an offset and a time; `readEvents` reads the kept ones of a path, a page at a time, and each
-// read is in `reads` as `{ after, events }`.
+// read is in `reads` as `{ after, events }`. A subscription to "*" gets every kept event, as the
+// mind's does (no ephemeral one).
 //
 // Its files: `itx.r2.presign` answers a link to a server of its own on 127.0.0.1 (started at the
 // first link), whose PUT stores the bytes and answers `{ size }`, or the status `failSignedPuts`;
@@ -59,7 +60,7 @@ export function fakeMind({ stored = () => {} } = {}) {
   mind.deliver = (events, from) => {
     for (const s of mind.subscriptions)
       if (s.alive && s.connection.isOpen && (!from || s.connection === from))
-        s.target(events.filter((event) => s.consumes.includes(event.type)));
+        s.target(events.filter((event) => s.consumes.includes(event.type) || (s.consumes.includes("*") && !event.ephemeral)));
   };
   mind.connect = async () => {
     if (mind.refuseConnects > 0) {

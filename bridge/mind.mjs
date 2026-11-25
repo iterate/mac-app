@@ -79,6 +79,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
         return track(running?.end());
       }
       if (job === "events" && line.event) return running?.add(line.event);
+      if (job === "events" && line.log) return running?.log(line);
       if (job === "live") return track(running?.take(line));
       return;
     }

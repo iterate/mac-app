@@ -176,7 +176,7 @@ enum Rendering {
 
     /// Every view, light and dark, into `folder` (`--render-all <folder>`): the panel in each phase
     /// of the lend, the mind switcher, the activity, the forms, the input bar, the dictation pill,
-    /// the banners, the menu-bar marks and the Settings window's pages.
+    /// the banners, the menu-bar marks, the Settings window's pages, the Ask question and the Activity window.
     static func renderAll(to folder: URL) -> Bool {
         var drawn = true
         for phase in Panel.renderPhases {
@@ -190,6 +190,8 @@ enum Rendering {
         drawn = Dictation.render(to: folder) && drawn
         drawn = IterateIcon.render(to: folder) && drawn
         drawn = SettingsView.render(to: folder) && drawn
+        drawn = ApprovalWindow.render(to: folder) && drawn
+        drawn = ActivityWindowView.render(to: folder) && drawn
         for (dark, tone) in [(false, "light"), (true, "dark")] {
             let add = AddMindForm(profiles: ["example.com", "example.org"], name: "jane.mac", add: { _, _ in }, cancel: {})
             drawn = FormWindow.render(add, to: folder.appendingPathComponent("add-mind-\(tone).png"), dark: dark) && drawn

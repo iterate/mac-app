@@ -58,6 +58,8 @@ enum Palette {
     /// The selected Off segment: a neutral knob, as a native segmented control draws it.
     static let knob = pair(light: .white, dark: NSColor(white: 1, alpha: 0.16))
     static let knobShadow = pair(light: NSColor(white: 0, alpha: 0.14), dark: .clear)
+    /// The ground of a block of monospace: what a mind asks, an event's text.
+    static let codeFill = pair(light: NSColor(white: 0, alpha: 0.035), dark: NSColor(white: 0, alpha: 0.32))
 }
 
 /// A section's title in small capitals, and what goes at its right.
@@ -110,6 +112,8 @@ struct SharingControl: View {
     let title: String
     let selection: Sharing
     let choose: (Sharing) -> Void
+    /// The group's identifier: `sharing.<thing>` unless another view names it (the Activity window).
+    var identifier: String?
 
     var body: some View {
         HStack(spacing: 2) {
@@ -137,7 +141,7 @@ struct SharingControl: View {
         .accessibilityElement(children: .contain)
         .accessibilityLabel(title)
         .accessibilityValue(selection.title)
-        .accessibilityIdentifier("sharing.\(id)")
+        .accessibilityIdentifier(identifier ?? "sharing.\(id)")
     }
 
     private func weight(_ choice: Sharing, _ isSelected: Bool) -> Font.Weight {

@@ -19,6 +19,17 @@
 //
 // It says `{ sent }`, `{ failed, dropped? }` and `{ event: { type, payload, offset, createdAt } }`.
 // After the connection's `{ connected: true }` (mind.mjs says it) the app says its presence again.
+//
+// THE LOG OF EVERY EVENT, for the app's Activity window, only while that window is open: the app
+// says `{ job: "events", log: "start" }`, then `{ log: "older", before: <offset> }` as the person
+// scrolls back, and `{ log: "stop" }` when the window closes. On "start", and again on each new
+// connection while it is open, the job says `{ log: { reset: true } }`, subscribes to every kept
+// type ("*": the mind sends no ephemeral event to such a row), and says the newest page. A page is
+// `{ log: { page: [event, …] newest first, before, more } }`: at most 100 events, from at most
+// 5,000 offsets scanned backwards; `before` is the offset to ask from next, `more` whether the log
+// goes on below it. Each new event is `{ log: { event } }`. An event's strings are cut at 2,000
+// characters and its lists at 100 items (a window's text is up to 20,000): the window shows them,
+// and the mind keeps them whole. The job holds no event of the log: the app holds at most 500.
 import { isConnectionError } from "./mind-connection.mjs";
 
 /** The input events that go first when too many wait: presence and the rest are kept. */
@@ -87,13 +98,101 @@ function readBack(device, say) {
   };
 }
 
+/** The log's read for the window: events a page, offsets scanned for one page at most, and the
+ *  bounds of one event's strings and lists. */
+export const LOG_PAGE = 100;
+const LOG_MOST_SCANNED = 5_000;
+const TEXT_MOST = 2_000;
+const LIST_MOST = 100;
+
+/** A copy of a payload with its long strings and lists cut. */
+function bounded(value, depth = 0) {
+  if (typeof value === "string") return value.length > TEXT_MOST ? `${value.slice(0, TEXT_MOST)}…` : value;
+  if (value === null || typeof value !== "object") return value;
+  if (depth > 6) return "…";
+  if (Array.isArray(value)) return value.slice(0, LIST_MOST).map((item) => bounded(item, depth + 1));
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, bounded(item, depth + 1)]));
+}
+
+const logged = ({ type, payload, offset, createdAt }) => ({ type, payload: bounded(JSON.parse(JSON.stringify(payload ?? {}))), offset, createdAt });
+
+/**
+ * Every kept event of the context, for the window: the subscription's new ones as `{ log: { event }
+ * }`, and pages read backwards on request. `older(before)` says the page below `before`; the
+ * answer's `end()` ends it.
+ */
+function readLog(device, say) {
+  let ended = false;
+  let subscription;
+  let floor = 0;
+  const ready = (async () => {
+    subscription = await device.subscribe({
+      consumes: ["*"],
+      target: (batch) => {
+        if (ended) return;
+        for (const event of batch ?? []) if (typeof event?.offset === "number" && !event.ephemeral) say({ log: { event: logged(event) } });
+      },
+    });
+    if (ended) return subscription[Symbol.dispose]();
+    const probe = await device.readEvents(Number.MAX_SAFE_INTEGER, 1);
+    floor = Math.max(0, (probe.versionStartedAtOffset ?? 1) - 1);
+    return probe.scannedThroughOffset;
+  })();
+
+  async function older(before) {
+    const head = await ready;
+    if (ended) return;
+    let to = Math.min((before ?? head + 1) - 1, head);
+    let found = [];
+    let scanned = 0;
+    while (to > floor && found.length < LOG_PAGE && scanned < LOG_MOST_SCANNED && !ended) {
+      const from = Math.max(floor, to - PAGE);
+      const window = [];
+      // a page is cut by count and by bytes, and ephemeral events leave gaps: read on to `to`
+      for (let after = from; after < to; ) {
+        const page = await device.readEvents(after, to - after);
+        for (const event of page.events ?? []) if (typeof event?.offset === "number" && event.offset <= to && !event.ephemeral) window.push(logged(event));
+        if (page.atHead || page.scannedThroughOffset <= after) break;
+        after = page.scannedThroughOffset;
+      }
+      scanned += to - from;
+      found = [...window, ...found];
+      to = from;
+    }
+    if (ended) return;
+    const page = found.slice(-LOG_PAGE).reverse();
+    const next = found.length > LOG_PAGE ? page.at(-1).offset : to + 1;
+    say({ log: { page, before: next, more: next - 1 > floor } });
+  }
+
+  return {
+    older: (before) => older(before).catch((error) => ended || say({ log: { failed: String(error?.message ?? error).slice(0, 300) } })),
+    end() {
+      ended = true;
+      subscription?.[Symbol.dispose]();
+    },
+  };
+}
+
 /** The queue and its sender on `link` (mind.mjs): `add(event)`, `send()` (also every `everyMs`),
- *  `end()`. */
+ *  `log(line)` (the window's read: `{ log: "start" | "older" | "stop", before? }`), `end()`. */
 export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) {
   let endRead = () => {};
+  /** The window's read while it is open, on the connection now. */
+  let logOpen = false;
+  let logRead;
+  let device;
+  const openLog = () => {
+    logRead?.end();
+    say({ log: { reset: true } });
+    logRead = readLog(device, say);
+    logRead.older();
+  };
   const unhook = link.each(async (connection) => {
     endRead();
     endRead = readBack(connection.device, say);
+    device = connection.device;
+    if (logOpen) openLog();
   });
   let waiting = [];
   let sent = 0;
@@ -144,6 +243,18 @@ export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) 
     },
     send,
     waiting: () => waiting,
+    log(line) {
+      if (line.log === "start") {
+        logOpen = true;
+        if (device) openLog();
+      } else if (line.log === "older") {
+        logRead?.older(Number(line.before));
+      } else if (line.log === "stop") {
+        logOpen = false;
+        logRead?.end();
+        logRead = undefined;
+      }
+    },
     /** What waits goes, for at most `ms`; then the read back ends. */
     async end(ms = 5000) {
       clearInterval(timer);
@@ -155,6 +266,7 @@ export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) 
       waiting = [];
       unhook();
       endRead();
+      logRead?.end();
     },
   };
 }

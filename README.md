@@ -184,7 +184,7 @@ Three parts are what a thing lent to a mind from a Mac needs; keep them:
   `description` is the line they read next to the name: keep it under 500 characters, or the mind
   refuses the lend and it never goes live.
 - **The switches**: `Permissions.swift` (Off, Ask, Shared for each thing, and macOS's permissions)
-  and `Approval.swift` (Touch ID for Ask). The panel (`Panel.swift`) shows them, under its mind
+  and `Approval.swift` (the Ask question and Touch ID; its panel is `ApprovalPanel.swift`). The panel (`Panel.swift`) shows them, under its mind
   switcher (`MindSwitcher.swift`). `MindFace.swift` is a mind's name and icon for any view
   (`MindAvatar`, `MindLabel`).
 
@@ -276,6 +276,19 @@ two labels are left (`iterate.com` stays `iterate.com`); a zone of one label is 
 A call for a thing that is Off, or that macOS has not allowed yet, fails with the reason in words
 an agent can pass on. Each use turns the 𝑖 red for 3 seconds.
 
+## Ask: one question for each use
+
+A thing set to **Ask** asks you at each use, in a floating panel of the app in the middle of the
+screen: the face and address of the mind that asks, what it wants ("Iterate wants to run
+commands"), what exactly in monospace (the command and its input), why it is asked, and three
+answers: **Approve Once** (Return), **Approve for 30 Minutes** (the length is Settings › General,
+"An approval can last") and **Deny** (Esc). Its last line counts down the seconds: with no answer
+in 60 s the use is refused. An approval is confirmed with Touch ID (or the Mac's password). The
+panel takes the keys without making the app the active one, so the app in front stays in front;
+Touch ID's own window comes from macOS. One question at a time: a second use waits for the first
+answer, which may cover it. An approval for N minutes holds for the mind it was given to, until
+the mind changes or refuses this Mac's key.
+
 ## What a mind does with the Mac, as you see it
 
 Each act of a mind with this Mac shows twice:
@@ -306,6 +319,18 @@ The pill's × hides it until the next act begins, also while a long act runs on.
 on the screen", on the Activity page, turns the pill off; the list and the red 𝑖 stay.
 An act that was refused (the thing is off, or you said no) is no act and shows in neither.
 `--render-activity <folder>` draws the pill and the page to PNG files, with sample acts.
+
+**Open in a Window**, on the Activity page, shows the context in a window of its own. Its switch
+shows the **Acts** (the panel's rows) or **Every event** the context keeps: every type on
+`/devices/<name>`, newest first, with filters for each kind (keys and mouse are off until you turn
+them on) and a search. At the right are the chosen event's fields, and the Off / Ask / Shared of
+its thing, with **End the Approval** while one holds and **Copy Event**. Every event is read only
+while the window is open: the job `events` subscribes to every kept type ("*", so no ephemeral
+key) and reads the newest 100 events; a scroll to the end of the list reads the 100 below (at most
+5,000 offsets scanned for a page), until the window holds 500. A new event over that pushes the
+oldest out. A string of an event is cut at 2,000 characters for the window (the mind keeps it
+whole). Closing the window ends the subscription and lets go of the events.
+`--render-log <folder>` draws the window with sample events.
 
 ## What the Mac tells its mind: `/devices/<name>`
 
@@ -716,7 +741,7 @@ job is on it:
 
 | Job       | What it does                                                                 | Swift              | Script          |
 | --------- | ---------------------------------------------------------------------------- | ------------------ | --------------- |
-| `events`  | the events of `/devices/<name>`, and the acts and presence read back          | `DeviceEvents`     | `events.mjs`    |
+| `events`  | the events of `/devices/<name>`, the acts and presence read back, and every event while the Activity window is open | `DeviceEvents` | `events.mjs` |
 | `live`    | the signalling of live                                                       | `DeviceLive`       | `live.mjs`      |
 | `record`  | the record's spool into the mind                                             | `DeviceRecord`     | `record.mjs`    |
 | `capture` | one capture into the mind, by its id                                         | `Capture`          | `capture.mjs`   |
@@ -792,8 +817,9 @@ draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearanc
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
 listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
-listening, locked, failed), light and dark, eighteen files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-all <folder>` draws every view, light
-and dark.
+listening, locked, failed), light and dark, eighteen files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-approval <folder>` draws the
+Ask question, and `--render-log <folder>` the Activity window, light and dark, two files each. `--render-all <folder>` draws every
+view, light and dark.
 
 **The speech bench** (local only, never in CI) compares speech-to-text engines on sentences with
 known text: `harness/speech-bench/sentences.md`, 24 sentences as the owner dictates to a coding
@@ -858,18 +884,22 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the banner, the record, the choices, the question that waits |
+| `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) or a pop-up button's item (`{"id":"settings.approvalMinutes","label":"1 hour"}`) |
 | `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
+| `ui.scroll {id}` | Scrolls a list to its end (`log.list`), as a person does to read older rows |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
 | `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
-| `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for `approval.minutes` (30 unless set). While the socket is open, a question shows no alert and asks for no Touch ID |
+| `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for `approval.minutes` (30 unless set). While the socket is open, the question's panel shows and its buttons answer too (`ui.press` on `approval.once`, `approval.minutes`, `approval.deny`), and no Touch ID is asked |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
-`activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
+`activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `activity.window`, `approval.once`,
+`approval.minutes`, `approval.deny`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
+`log.filter.<acts|presence|app|window|record|live|inputs|keys>`, `log.search`, `log.list`, `log.row`, `log.context`,
+`log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
 `capture.discard`, `speech.model` (the panel's speech row: it opens Settings › Dictation),
 `speech.model.<id>` (a model in its list), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
@@ -916,7 +946,11 @@ command run through the endpoint is `device/act-started` and `device/act-ended` 
 and `ui.state` shows its row once, echoed from the context), `record-upload` (a slot that waits in
 the home's spool goes to the fake mind, its file before `record/slot-stored`, and leaves the
 spool), `approval` (a
-command on Ask is approved, then denied, through the socket), `mind-switch` (two fake minds: an
+command on Ask is approved and denied through the socket, then through the question's buttons, and
+"Approve for 30 Minutes" lets the next use run with no question), `log-window` (on a context that
+holds mixed events, "Open in a Window" reads the newest page of every kept type and no ephemeral
+key, scrolls to the end read the pages below to the start, a new act comes in as it happens, and
+the close lets go of the events), `mind-switch` (two fake minds: an
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
 device event reaches A after the switch), and the local ones, which need the speech models in
 `~/Library/Application Support/FluidAudio`: `dictation-fixture` (a sentence from `say -o` is

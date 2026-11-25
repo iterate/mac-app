@@ -179,3 +179,65 @@ test("the backward read ends when it has 50 acts, and tells at most the last 200
   assert.equal(mind.reads.length, 2, "the probe, and one page of 250 acts");
   await events.end();
 });
+
+test("the window's log: on start, every kept type newest first, a page of 100, older pages on request", async () => {
+  const mind = fakeMind();
+  // 250 kept events of mixed types, and ephemeral keys among them that are in no log
+  const mixed = Array.from({ length: 250 }, (_, n) => (n % 2 ? presence(n) : { type: "device/app-focused", payload: { app: "Ghostty", n } }));
+  await earlier(mind, mixed);
+  await earlier(mind, [{ ...key(999), ephemeral: true }]);
+  const { events, said } = start(mind);
+  events.log({ log: "start" });
+  const pages = () => said.filter((line) => line.log?.page);
+  await until(() => pages().length === 1);
+  assert.ok(said.some((line) => line.log?.reset), "a reset first");
+  const first = pages()[0].log;
+  assert.equal(first.page.length, 100);
+  assert.deepEqual(first.page.slice(0, 2).map((e) => e.payload.n), [249, 248]);
+  assert.ok(first.more);
+  assert.ok(first.page.every((e) => e.type !== "device/key-pressed"));
+  events.log({ log: "older", before: first.before });
+  await until(() => pages().length === 2);
+  assert.equal(pages()[1].log.page[0].payload.n, 149);
+  events.log({ log: "older", before: pages()[1].log.before });
+  await until(() => pages().length === 3);
+  const last = pages()[2].log;
+  assert.equal(last.page.length, 50);
+  assert.equal(last.page.at(-1).payload.n, 0);
+  assert.equal(last.more, false);
+  await events.end();
+});
+
+test("the window's log follows new events of every kept type, cuts long text, and stops with the window", async () => {
+  const mind = fakeMind();
+  const { events, said } = start(mind);
+  events.log({ log: "start" });
+  await until(() => said.some((line) => line.log?.page) && mind.subscriptions.some((s) => s.alive && s.consumes.includes("*")));
+  events.add({ type: "device/window-read", payload: { app: "Ghostty", text: "x".repeat(20_000) } });
+  events.add({ type: "device/key-pressed", ephemeral: true, payload: { key: "a" } });
+  await events.send();
+  await until(() => said.some((line) => line.log?.event));
+  const told = said.filter((line) => line.log?.event).map((line) => line.log.event);
+  assert.deepEqual(told.map((e) => e.type), ["device/window-read"]);
+  assert.equal(told[0].payload.text.length, 2_001);
+  events.log({ log: "stop" });
+  assert.equal(mind.subscriptions.filter((s) => s.alive && s.consumes.includes("*")).length, 0);
+  events.add(presence(1));
+  await events.send();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(said.filter((line) => line.log?.event).length, 1);
+  await events.end();
+});
+
+test("a new connection while the window is open reads its log again from a reset", async () => {
+  const mind = fakeMind();
+  await earlier(mind, [presence(1)]);
+  const { events, said } = start(mind);
+  events.log({ log: "start" });
+  await until(() => said.filter((line) => line.log?.page).length === 1);
+  mind.connections.at(-1).end();
+  await until(() => said.filter((line) => line.log?.page).length === 2);
+  assert.equal(said.filter((line) => line.log?.reset).length, 2);
+  assert.equal(mind.subscriptions.filter((s) => s.alive && s.consumes.includes("*")).length, 1);
+  await events.end();
+});

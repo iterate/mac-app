@@ -9,9 +9,9 @@ import AppKit
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
 /// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
 ///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
-/// - `approval.answer {allow, keep?}`: answers the Ask question that waits, in place of the alert
-///   and Touch ID (`Approval.answersByControl`); `keep` approves for the chosen time
-///   (`approval.minutes`), as "Approve for 30 Minutes" does.
+/// - `approval.answer {allow, keep?}`: answers the Ask question that waits, as its panel's buttons
+///   do, and no Touch ID is asked (`Approval.answersByControl`); `keep` approves for the chosen
+///   time (`approval.minutes`), as "Approve for 30 Minutes" does.
 /// - `ui.state`: the lend, the open windows and what each shows, the last acts, the record, the last
 ///   dictation's text.
 /// - `ui.tree`: the accessibility tree of the app's own windows, read in this process (no
@@ -19,6 +19,7 @@ import AppKit
 /// - `ui.press {id, label?}`, `ui.type {id, text, replace?}`: a press of a control, or text typed
 ///   into it (at its end, or in place of its text), by its accessibility identifier (and, for a
 ///   segmented control, the segment's label; for a pop-up button, the item's title).
+/// - `ui.scroll {id}`: scrolls a list to its end, as a person does to read older rows.
 @MainActor
 final class ControlSocket {
     var state: () -> [String: Any] = { [:] }
@@ -77,7 +78,7 @@ final class ControlSocket {
             answer["windows"] = NSApp.windows.filter(\.isVisible).map { window -> [String: Any] in
                 ["kind": String(describing: type(of: window)), "title": window.title, "key": window.isKeyWindow, "frame": Self.rect(window.frame)]
             }
-            answer["approval"] = approval.waiting.map { ["question": $0.question] } ?? NSNull()
+            answer["approval"] = approval.waiting.map { ["question": $0.question.words, "mind": $0.question.mind ?? NSNull()] as [String: Any] } ?? NSNull()
             return answer
         case "ui.tree":
             var budget = parameters["maxNodes"] as? Int ?? 4_000
@@ -99,6 +100,16 @@ final class ControlSocket {
             } else {
                 throw EndpointRefusal("\(Self.name(of: element)) takes no press.")
             }
+        case "ui.scroll":
+            // a scroll of a list to its end, as a person's: a lazy list makes its last rows then
+            let element = try find(parameters)
+            guard let scroll = Self.scrollView(under: element) else { throw EndpointRefusal("\(Self.name(of: element)) does not scroll.") }
+            guard let document = scroll.documentView else { return [:] }
+            let clip = scroll.contentView
+            let end = document.isFlipped ? max(0, document.bounds.height - clip.bounds.height) : 0
+            clip.scroll(to: NSPoint(x: clip.bounds.minX, y: end))
+            scroll.reflectScrolledClipView(clip)
+            return ["height": Double(document.bounds.height)]
         case "ui.type":
             guard let text = parameters["text"] as? String else { throw EndpointRefusal("ui.type needs text.") }
             let element = try find(parameters)
@@ -123,7 +134,7 @@ final class ControlSocket {
             }
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
+                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
         }
         return [:]
     }
@@ -156,6 +167,24 @@ final class ControlSocket {
             if let field = view as? NSTextField, field.isEditable, let window = field.window {
                 let onScreen = window.convertToScreen(field.convert(field.bounds, to: nil))
                 if onScreen.intersects(frame), abs(onScreen.midY - frame.midY) < 8 { return field }
+            }
+            for child in view.subviews { if let found = search(child) { return found } }
+            return nil
+        }
+        for window in NSApp.windows where window.isVisible {
+            if let content = window.contentView, let found = search(content) { return found }
+        }
+        return nil
+    }
+
+    /// The scroll view that an element stands for: the element, or the one of its window at its frame.
+    private static func scrollView(under element: NSObject) -> NSScrollView? {
+        if let scroll = element as? NSScrollView { return scroll }
+        guard let frame = (read(element, "accessibilityFrame") as? NSValue)?.rectValue else { return nil }
+        func search(_ view: NSView) -> NSScrollView? {
+            if let scroll = view as? NSScrollView, let window = scroll.window {
+                let onScreen = window.convertToScreen(scroll.convert(scroll.bounds, to: nil))
+                if abs(onScreen.midX - frame.midX) < 8, abs(onScreen.midY - frame.midY) < 8 { return scroll }
             }
             for child in view.subviews { if let found = search(child) { return found } }
             return nil
