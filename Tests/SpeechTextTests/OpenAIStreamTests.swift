@@ -552,13 +552,15 @@ final class OpenAIKeyTests: XCTestCase {
 
 final class SpeechModelChoiceTests: XCTestCase {
     func testGPTLiveTranscribeIsTheDefaultOnlyWithAKey() {
-        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: false), .parakeetV3)
-        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: true), .gptLiveTranscribe)
+        // what is on this Mac decides the local default (`FourierChoiceTests`): here, nothing
+        let none: (SpeechModel) -> Bool = { _ in false }
+        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: false, isOnDisk: none), .fourier2b)
+        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: true, isOnDisk: none), .gptLiveTranscribe)
         // a stored choice wins; an online one with no key is the local default
-        XCTAssertEqual(SpeechModel.chosen("parakeet-ultra", isOnline: true), .parakeetUltra)
-        XCTAssertEqual(SpeechModel.chosen("gpt-live-transcribe", isOnline: false), .parakeetV3)
-        XCTAssertEqual(SpeechModel.chosen("gone", isOnline: true), .gptLiveTranscribe)
-        XCTAssertEqual(SpeechModel.local.map(\.id), ["parakeet-v3", "parakeet-ultra"], "the bench and captures run only local models")
+        XCTAssertEqual(SpeechModel.chosen("parakeet-ultra", isOnline: true, isOnDisk: none), .parakeetUltra)
+        XCTAssertEqual(SpeechModel.chosen("gpt-live-transcribe", isOnline: false, isOnDisk: none), .fourier2b)
+        XCTAssertEqual(SpeechModel.chosen("gone", isOnline: true, isOnDisk: none), .gptLiveTranscribe)
+        XCTAssertEqual(SpeechModel.local.map(\.id), ["oruk-fourier-2b", "parakeet-v3", "parakeet-ultra"], "the bench and captures run only local models")
     }
 }
 

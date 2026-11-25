@@ -305,7 +305,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.speechChoice.refreshKey()
             return self?.speechChoice.chosen ?? .default
         }
-        // GPT Live Transcribe at OpenAI, with Parakeet v3 behind it, and a socket that waits for
+        // GPT Live Transcribe at OpenAI, with the local model behind it, and a socket that waits for
         // the next dictation (README, "Dictation"). Each socket opens with a token of the lent
         // mind, minted with the mind's own key; else with this Mac's own key.
         let openAIKey = speechChoice.openAIKey
@@ -317,8 +317,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             mint: { try await mindToken.token() },
             key: { openAIKey?.read() },
             log: { speechLog.info($0) })
-        speech.online = { model, words, heard in
-            OnlineSpeech.recognizer(model, words: words, access: access, standby: standby, heard: heard)
+        speech.online = { [weak self] model, words, heard in
+            OnlineSpeech.recognizer(model, words: words, access: access, local: self?.speechChoice.local ?? .default, standby: standby, heard: heard)
         }
         speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
         speech.log = { speechLog.info($0) }
@@ -371,13 +371,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The chosen local speech model, loaded in the background a moment after the start when its
     /// files are on this Mac: the first dictation is then at once, not after Core ML prepared the
-    /// model for the Neural Engine (24.8 s, seen on 24 Nov 2026). With dictation at OpenAI it is
-    /// the model of captures and the one that hears when OpenAI fails. A home of its own loads it
-    /// only for an audio fixture; a drawing never gets here.
+    /// model for the Neural Engine (24.8 s, seen on 24 Nov 2026) or MLX's process read Fourier. With
+    /// dictation at OpenAI it is the model of captures and the one that hears when OpenAI fails. A
+    /// home of its own loads it only for an audio fixture; a drawing never gets here. The installed
+    /// app then gets the default model when it is not on this Mac (`SpeechChoice.getDefault`).
     private func preloadSpeech() {
         guard !environment.hasOwnHome || environmentFixture != nil else { return }
         let model = speechChoice.local
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log, speechChoice] in
+            speechChoice.getDefault()
             guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
             Task { @MainActor in
                 let seconds = await task.value

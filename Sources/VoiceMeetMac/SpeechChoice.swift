@@ -5,8 +5,9 @@ import SwiftUI
 /// `SpeechModel.all` (README, "Dictation"). A model that is not on this Mac is downloaded first,
 /// with its progress in the panel; it is the model once it loaded. With no stored choice the model
 /// is GPT Live Transcribe when OpenAI can be reached (the lent mind mints tokens with its own key,
-/// `MindToken`, or this Mac has a key of its own), else Parakeet v3. A capture always uses a local
-/// model (`local`).
+/// `MindToken`, or this Mac has a key of its own), else Oruk Fourier 2B. A capture always uses a
+/// local model (`local`). While only Parakeet v3 is on this Mac, it stands in for Fourier, and the
+/// installed app gets Fourier in the background (`getDefault`).
 ///
 /// It also holds whether the person's own OpenAI key is set (`OpenAIKey`, in the login Keychain),
 /// and sets and removes it for Settings › Dictation. The key itself is read only by the online
@@ -47,13 +48,25 @@ final class SpeechChoice: ObservableObject {
 
     init() {
         let hasKey = openAIKey?.isSet ?? false
-        chosen = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: hasKey)
+        chosen = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: hasKey, isOnDisk: Self.isOnDisk)
         self.hasKey = hasKey
     }
 
-    /// The local model: the chosen one, or Parakeet v3 when the chosen one runs online. Captures use
-    /// it, and the app loads it at its start.
-    var local: SpeechModel { chosen.isLocal ? chosen : .default }
+    /// The local model: the chosen one, or the default (`SpeechModel.localDefault`) when the chosen
+    /// one runs online. Captures use it, it hears when OpenAI fails, and the app loads it at its
+    /// start.
+    var local: SpeechModel { chosen.isLocal ? chosen : SpeechModel.localDefault(isOnDisk: Self.isOnDisk) }
+
+    /// Gets the default model in the background when it is not on this Mac and no local model is
+    /// chosen: a Mac that had Parakeet v3 gets Oruk Fourier 2B, which is the model once it loaded.
+    /// Its progress is in its row in Settings › Dictation. The installed app alone does it.
+    func getDefault() {
+        let stored = AppEnvironment.current.defaults.string(forKey: Self.key).flatMap { id in SpeechModel.all.first { $0.id == id } }
+        guard !AppEnvironment.current.hasOwnHome, stored?.isLocal != true, !Self.isOnDisk(.default), getting == nil else { return }
+        let model = SpeechModel.default
+        log.info("\(model.id): downloading \(model.megabytes) MB in the background, the default model")
+        get(model) { [weak self] in self?.follow(why: "\(model.id) is on this Mac") }
+    }
 
     /// Reads again whether the key is set (`cli.mjs --openai-key-from-env` may have written it),
     /// off the main thread. The default model follows.
@@ -112,7 +125,7 @@ final class SpeechChoice: ObservableObject {
 
     /// The default model follows what can reach OpenAI; a stored choice stays.
     private func follow(why: String) {
-        let model = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: isOnline)
+        let model = SpeechModel.chosen(AppEnvironment.current.defaults.string(forKey: Self.key), isOnline: isOnline, isOnDisk: Self.isOnDisk)
         if model != chosen {
             chosen = model
             log.info("the speech model is \(model.id): \(why)")
@@ -122,7 +135,9 @@ final class SpeechChoice: ObservableObject {
     }
 
     /// A drawing knows nothing of this Mac: the default model is on it, and no other.
-    func isOnDisk(_ model: SpeechModel) -> Bool {
+    func isOnDisk(_ model: SpeechModel) -> Bool { Self.isOnDisk(model) }
+
+    static func isOnDisk(_ model: SpeechModel) -> Bool {
         AppEnvironment.current.isRendering ? model == .default : model.isOnDisk
     }
 
@@ -130,6 +145,13 @@ final class SpeechChoice: ObservableObject {
     func choose(_ model: SpeechModel) {
         guard model != chosen, getting?.id != model.id else { return }
         failure = nil
+        // another model in place of Fourier while it downloads: the download stops (it goes on
+        // from there at the next try)
+        if getting?.id == SpeechModel.fourier2b.id {
+            getting = nil
+            gettingTask?.cancel()
+            Task { await FourierModel.shared.stopDownload() }
+        }
         if !model.isLocal, !isOnline {
             failure = "\(model.name) needs a lent mind with an OpenAI key, or a key of your own: set it below."
             return
@@ -140,6 +162,11 @@ final class SpeechChoice: ObservableObject {
             return
         }
         log.info("\(model.id): downloading \(model.megabytes) MB")
+        get(model) { [weak self] in self?.use(model) }
+    }
+
+    /// Downloads and loads `model`, with its progress in `getting`; `done` runs when it loaded.
+    private func get(_ model: SpeechModel, done: @escaping @MainActor () -> Void) {
         getting = (model.id, .downloading(0))
         gettingTask?.cancel()
         gettingTask = Task { @MainActor in
@@ -149,7 +176,7 @@ final class SpeechChoice: ObservableObject {
                 }
                 guard getting?.id == model.id else { return }
                 getting = nil
-                use(model)
+                done()
             } catch {
                 guard getting?.id == model.id else { return }
                 getting = nil
