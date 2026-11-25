@@ -2,24 +2,74 @@ import Foundation
 import VoiceMeetCore
 
 /// ORUK FOURIER 2B, held for the app (README, "Dictation"): one Python process (`FourierSidecar`)
-/// that loaded the model once and stays warm, with the files of `FourierRuntime`. Two steps, each
-/// shared by its callers: the download (`prepare`, each caller hears its progress), then the
-/// process's start. A process that ended is started again by the next caller. `letGo` ends the
-/// process when another local model is held (one model is held at a time), but leaves a download
-/// that goes on; `stopDownload` ends that.
+/// that loaded the model, with the files of `FourierRuntime`. Two steps, each shared by its
+/// callers: the download (`prepare`, each caller hears its progress), then the process's start. A
+/// process that ended is started again by the next caller. `letGo` ends the process when another
+/// local model is held (one model is held at a time), but leaves a download that goes on;
+/// `stopDownload` ends that.
+///
+/// The process holds 2.6 GB. It stays while something keeps it warm (`keepWarm`: Always listen, or
+/// Fourier as dictation's own model); else it ends `idleSeconds` after its last pass, and the next
+/// use (a capture, OpenAI's failure) waits for a new load: 0.9 to 2.1 s once its files were read.
 public actor FourierModel {
     public static let shared = FourierModel(runtime: .standard)
+    /// How long an unused process stays when nothing keeps it warm.
+    public static let idleSeconds: TimeInterval = 300
 
     let runtime: FourierRuntime
+    private let idleSeconds: TimeInterval
     private var sidecar: FourierSidecar?
+    private var keepsWarm = false
+    /// The one wait for the end of the idle time: no poll.
+    private var idleEnd: Task<Void, Never>?
+    /// A line for the app's log: the process ended, unused.
+    private var log: @Sendable (String) -> Void = { _ in }
     private var downloading: Task<Void, Error>?
     private var starting: Task<FourierSidecar, Error>?
     private var listeners: [Int: @Sendable (SpeechLoad) -> Void] = [:]
     private var nextListener = 0
     private var latest = 0.0
 
-    public init(runtime: FourierRuntime) {
+    public init(runtime: FourierRuntime, idleSeconds: TimeInterval = FourierModel.idleSeconds) {
         self.runtime = runtime
+        self.idleSeconds = idleSeconds
+    }
+
+    /// Whether the process runs now, loaded.
+    public var isLoaded: Bool { sidecar?.isRunning ?? false }
+
+    public func logs(_ log: @escaping @Sendable (String) -> Void) { self.log = log }
+
+    /// True: a loaded process stays (and none is started here: the next use or a preload starts
+    /// it). False: it ends `idleSeconds` after its last pass.
+    public func keepWarm(_ isOn: Bool) {
+        guard isOn != keepsWarm else { return }
+        keepsWarm = isOn
+        watchIdle()
+    }
+
+    /// Waits for the end of the idle time of the process that runs, unless it is kept warm.
+    private func watchIdle() {
+        idleEnd?.cancel()
+        idleEnd = nil
+        guard !keepsWarm, let sidecar else { return }
+        let wait = max(0.05, idleSeconds - sidecar.idleSeconds)
+        idleEnd = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1e9))
+            guard !Task.isCancelled else { return }
+            await self?.idleEnded()
+        }
+    }
+
+    /// A pass ran meanwhile, or runs now: the wait starts again from its end.
+    private func idleEnded() {
+        idleEnd = nil
+        guard !keepsWarm, let sidecar else { return }
+        if sidecar.isBusy || sidecar.idleSeconds < idleSeconds * 0.99 { return watchIdle() }
+        log("Oruk Fourier: unused for \(Int(idleSeconds)) s, its process ends (the next use loads it again)")
+        // the process ends with the last engine that holds it (`deinit`): a recognizer that
+        // hears now keeps it to its end
+        self.sidecar = nil
     }
 
     /// An engine for `words`: their terms go into the model's prompt.
@@ -43,6 +93,7 @@ public actor FourierModel {
             if starting == task {
                 starting = nil
                 sidecar = ready
+                watchIdle()
             }
             return ready
         } catch {
@@ -82,6 +133,8 @@ public actor FourierModel {
         starting?.cancel()
         starting = nil
         sidecar = nil
+        idleEnd?.cancel()
+        idleEnd = nil
     }
 
     /// A download that goes on stops; what came stays, and the next one goes on from there.
@@ -134,8 +187,14 @@ final class FourierSidecar: @unchecked Sendable {
     /// The end of stderr, for an error.
     private var said = ""
     let started = Date()
+    /// The start or the end of the last pass, or the load.
+    private var lastActive = ProcessInfo.processInfo.systemUptime
 
     var isRunning: Bool { lock.withLock { !hasEnded } }
+    /// A pass runs now.
+    var isBusy: Bool { lock.withLock { !waiting.isEmpty } }
+    /// Seconds since the last pass began or ended.
+    var idleSeconds: TimeInterval { ProcessInfo.processInfo.systemUptime - lock.withLock { lastActive } }
 
     static func start(_ runtime: FourierRuntime) async throws -> FourierSidecar {
         if (try? String(contentsOf: runtime.script, encoding: .utf8)) != FourierScript.source {
@@ -207,6 +266,7 @@ final class FourierSidecar: @unchecked Sendable {
         let audio = samples.withUnsafeBufferPointer { Data(buffer: $0) }.base64EncodedString()
         let id: Int = lock.withLock {
             next += 1
+            lastActive = ProcessInfo.processInfo.systemUptime
             return next
         }
         let line = try JSONSerialization.data(withJSONObject: ["id": id, "audio": audio, "hotwords": hotwords]) + Data([0x0A])
@@ -246,7 +306,10 @@ final class FourierSidecar: @unchecked Sendable {
             continuation?.resume()
             return
         }
-        guard let id = object["id"] as? Int, let continuation = lock.withLock({ waiting.removeValue(forKey: id) }) else { return }
+        guard let id = object["id"] as? Int, let continuation = lock.withLock({ () -> CheckedContinuation<String, Error>? in
+            lastActive = ProcessInfo.processInfo.systemUptime
+            return waiting.removeValue(forKey: id)
+        }) else { return }
         if let text = object["text"] as? String {
             continuation.resume(returning: text.trimmingCharacters(in: .whitespacesAndNewlines))
         } else {

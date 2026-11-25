@@ -1,4 +1,4 @@
-import SpeechText
+@testable import SpeechText
 import VoiceMeetCore
 import XCTest
 
@@ -177,5 +177,63 @@ final class FourierChoiceTests: XCTestCase {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("fourier-\(UUID().uuidString)")
         XCTAssertFalse(FourierRuntime(folder: folder).isReady)
         XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+    }
+
+    /// A ready folder whose "Python" is a shell script that speaks as `fourier.py` does: ready at
+    /// once, and "heard" for each pass. The model's files are sparse, of their sizes.
+    private func fakeRuntime() throws -> FourierRuntime {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("fourier-\(UUID().uuidString)")
+        let runtime = FourierRuntime(folder: folder)
+        let files = FileManager.default
+        try files.createDirectory(at: runtime.model, withIntermediateDirectories: true)
+        for file in FourierRuntime.modelFiles {
+            let url = runtime.model.appendingPathComponent(file.name)
+            files.createFile(atPath: url.path, contents: nil)
+            let handle = try FileHandle(forWritingTo: url)
+            try handle.truncate(atOffset: UInt64(file.bytes))
+            try handle.close()
+        }
+        try files.createDirectory(at: runtime.python.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let script = """
+            #!/bin/sh
+            echo '{"ready": true, "loadSeconds": 0}'
+            while read -r line; do
+              id=$(printf '%s' "$line" | sed -E 's/.*"id":([0-9]+).*/\\1/')
+              echo "{\\"id\\": $id, \\"text\\": \\"heard\\", \\"seconds\\": 0}"
+            done
+            """
+        try script.write(to: runtime.python, atomically: true, encoding: .utf8)
+        try files.setAttributes([.posixPermissions: 0o755], ofItemAtPath: runtime.python.path)
+        try Data(FourierRuntime.fingerprint.utf8).write(to: folder.appendingPathComponent("ready.json"))
+        XCTAssertTrue(runtime.isReady)
+        return runtime
+    }
+
+    /// Unused, the process ends after the idle time; a pass starts the time again; kept warm, it stays.
+    func testAnUnusedProcessEndsAfterItsIdleTimeUnlessItIsKeptWarm() async throws {
+        let model = FourierModel(runtime: try fakeRuntime(), idleSeconds: 0.6)
+        let engine = try await model.engine(words: .empty)
+        let loaded = await model.isLoaded
+        XCTAssertTrue(loaded)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        let text = try await engine.hear(loud(1), final: true).text
+        XCTAssertEqual(text, "heard")
+        // 0.8 s after the load, 0.4 s after the pass: it stays
+        try await Task.sleep(nanoseconds: 400_000_000)
+        var isLoaded = await model.isLoaded
+        XCTAssertTrue(isLoaded, "a pass starts the idle time again")
+        try await Task.sleep(nanoseconds: 600_000_000)
+        isLoaded = await model.isLoaded
+        XCTAssertFalse(isLoaded, "unused for its idle time: let go")
+
+        await model.keepWarm(true)
+        _ = try await model.load()
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        isLoaded = await model.isLoaded
+        XCTAssertTrue(isLoaded, "kept warm: it stays")
+        await model.keepWarm(false)
+        try await Task.sleep(nanoseconds: 1_000_000_000)
+        isLoaded = await model.isLoaded
+        XCTAssertFalse(isLoaded, "no longer warm: it ends after its idle time")
     }
 }

@@ -76,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var seenExpressions: [String: String] = [:]
     /// Drops the OpenAI standby socket when the Mac sleeps (`startDictation`).
     private var standbySleep: NSObjectProtocol?
+    /// Whether Oruk Fourier's process is kept loaded now (`warmSpeech`); nil before the first look.
+    private var speechWarm: Bool?
     /// config.json's `login` as the login item was last set to it.
     private var appliedLogin: Bool?
 
@@ -340,6 +342,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speech.log = { speechLog.info($0) }
         speechChoice.onChange = { [weak self] in
             guard let self else { return }
+            warmSpeech()
             if speechChoice.chosen.isLocal { standby.drop("the speech model is \(speechChoice.chosen.id)") }
             else if !speechChoice.isOnline { standby.drop("no mind with OpenAI and no OpenAI key") }
             stateDidChange()
@@ -387,22 +390,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// The chosen local speech model, loaded in the background a moment after the start when its
-    /// files are on this Mac: the first dictation is then at once, not after Core ML prepared the
-    /// model for the Neural Engine (24.8 s, seen on 24 Nov 2026) or MLX's process read Fourier. With
-    /// dictation at OpenAI it is the model of captures and the one that hears when OpenAI fails. A
-    /// home of its own loads it only for an audio fixture; a drawing never gets here. The installed
-    /// app then gets the default model when it is not on this Mac (`SpeechChoice.getDefault`).
+    /// files are on this Mac and it is kept loaded (`warmSpeech`): the first dictation is then at
+    /// once, not after Core ML prepared the model for the Neural Engine (24.8 s, seen on 24 Nov 2026)
+    /// or MLX's process read Fourier. With dictation at OpenAI, Oruk Fourier (the model of captures
+    /// and the one that hears when OpenAI fails) loads at its first use instead; Parakeet, which
+    /// lives in the app's own process, loads here as before. A home of its own loads it only for an
+    /// audio fixture; a drawing never gets here. The installed app then gets the default model when
+    /// it is not on this Mac (`SpeechChoice.getDefault`).
     private func preloadSpeech() {
         guard !environment.hasOwnHome || environmentFixture != nil else { return }
-        let model = speechChoice.local
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log, speechChoice] in
+        let speechLog = AppLog("speech")
+        Task { await FourierModel.shared.logs { speechLog.info($0) } }
+        warmSpeech()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, log, speechChoice] in
             speechChoice.getDefault()
-            guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
-            Task { @MainActor in
-                let seconds = await task.value
-                log.info(seconds.map { "speech: \(model.id) loaded in the background in \(String(format: "%.1f", $0)) s" } ?? "speech: \(model.id) did not load in the background")
-            }
+            self?.preload(speechChoice.local, log: log)
         }
+    }
+
+    private func preload(_ model: SpeechModel, log: AppLog) {
+        if model.runs == .mlx, speechWarm != true { return log.info("speech: \(model.id) loads at its first use") }
+        guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
+        Task { @MainActor in
+            let seconds = await task.value
+            log.info(seconds.map { "speech: \(model.id) loaded in the background in \(String(format: "%.1f", $0)) s" } ?? "speech: \(model.id) did not load in the background")
+        }
+    }
+
+    /// Oruk Fourier's process holds 2.6 GB. It stays loaded while it hears all the time or is
+    /// dictation's own model: Always listen, or a local model chosen. Else it loads at its first
+    /// use and ends 5 minutes after its last pass (`FourierModel.keepWarm`; README, "Dictation").
+    private func warmSpeech() {
+        let warm = listening.isAlwaysListening || speechChoice.chosen.isLocal
+        guard warm != speechWarm else { return }
+        let isFirst = speechWarm == nil
+        speechWarm = warm
+        Task { await FourierModel.shared.keepWarm(warm) }
+        log.info("speech: the local model \(warm ? "stays loaded" : "loads at its first use and ends 5 minutes after its last")")
+        // a model that is kept loaded from now on loads now, as at the start
+        if warm, !isFirst, !environment.hasOwnHome || environmentFixture != nil { preload(speechChoice.local, log: log) }
     }
 
     /// A key that works in any app. A copy with a home of its own registers none: the keys are the
@@ -484,6 +510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         listening.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         listening.record = { [weak self] line in self?.model.record.transcribed(line) }
         listening.onChange = { [weak self] in
+            self?.warmSpeech()
             self?.model.record.tick()
             self?.stateDidChange()
         }
@@ -516,6 +543,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let url = environment.controlSocket else { return }
         let control = ControlSocket(socketURL: url, approval: model.approval)
         control.state = { [weak self] in self?.controlState() ?? [:] }
+        control.feedInput = { [weak self] event in self?.model.deviceEvents.saw(event) }
         control.start()
         self.control = control
     }

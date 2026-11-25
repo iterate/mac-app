@@ -1,5 +1,4 @@
 import AppKit
-import Carbon
 import SwiftUI
 import VoiceMeetCore
 
@@ -47,8 +46,11 @@ final class DeviceEvents: ObservableObject {
         isDrawing = true
         (self.sharesInput, self.keepsInput) = (sharesInput, keepsInput)
     }
-    /// How many events went to the mind in this run, and the last failure, for the panel.
-    @Published private(set) var sent = 0
+    /// How many events went to the mind in this run, for the help of the panel's title. Not
+    /// published: the bridge says a new count for each batch of keys and moves, and the panel
+    /// (also a closed one) would lay itself out again for each. An open panel reads it when it draws.
+    private(set) var sent = 0
+    /// The last failure, for the panel: set only when it changes.
     @Published private(set) var failure: String?
     /// "active", "idle", "locked" or "asleep": what the last presence event said.
     @Published private(set) var presence: String?
@@ -72,6 +74,8 @@ final class DeviceEvents: ObservableObject {
     /// While idle, the monitor of the person's return.
     private var returnWatch: Any?
     private var monitors: [Any] = []
+    /// The app in front and whether its focus is a password field, kept between keys.
+    private let focus = FocusWatch()
     private var lastMoveAt = Date.distantPast
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
 
@@ -102,6 +106,7 @@ final class DeviceEvents: ObservableObject {
         observers = []
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
+        focus.stop()
         endJob()
     }
 
@@ -179,7 +184,8 @@ final class DeviceEvents: ObservableObject {
     private func watchInput() {
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
-        guard sharesInput else { return }
+        guard sharesInput else { return focus.stop() }
+        focus.start()
         let kinds: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .mouseMoved, .leftMouseDragged]
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: kinds, handler: { [weak self] event in
             MainActor.assumeIsolated { self?.saw(event) }
@@ -189,7 +195,9 @@ final class DeviceEvents: ObservableObject {
         log.info("keyboard and mouse: shared\(Permission.accessibility.isGranted ? "" : ", but macOS has not given Accessibility, so no key arrives")")
     }
 
-    private func saw(_ event: NSEvent) {
+    /// One event of the global monitor; a test copy's `perf.input` gives its own.
+    func saw(_ event: NSEvent) {
+        Perf.count("inputSeen")
         // a move or a scroll inside 0.1 s of the last one is dropped before anything is read
         if [.mouseMoved, .leftMouseDragged, .scrollWheel].contains(event.type) {
             let now = Date()
@@ -204,7 +212,7 @@ final class DeviceEvents: ObservableObject {
         switch event.type {
         case .keyDown:
             // a key typed into a password goes to no mind, not even as a key code (`SecretKeys`)
-            guard !Self.isSecret() else { return }
+            guard !focus.isSecret() else { return }
             var payload: [String: Any] = ["keyCode": Int(event.keyCode), "isRepeat": event.isARepeat]
             if let key = event.charactersIgnoringModifiers, !key.isEmpty { payload["key"] = key }
             if let text = event.characters, !text.isEmpty { payload["text"] = text }
@@ -212,13 +220,13 @@ final class DeviceEvents: ObservableObject {
             let modifiers = [(NSEvent.ModifierFlags.command, "command"), (.option, "option"), (.control, "control"), (.shift, "shift")]
                 .filter { flags.contains($0.0) }.map(\.1)
             if !modifiers.isEmpty { payload["modifiers"] = modifiers }
-            if let app = NSWorkspace.shared.frontmostApplication?.localizedName { payload["app"] = app }
+            if let app = focus.current()?.name { payload["app"] = app }
             publish("device/key-pressed", payload, ephemeral: ephemeral)
         case .leftMouseDown, .rightMouseDown, .otherMouseDown:
             var payload = place
             payload["button"] = event.type == .leftMouseDown ? "left" : event.type == .rightMouseDown ? "right" : "other"
             payload["clicks"] = event.clickCount
-            if let app = NSWorkspace.shared.frontmostApplication?.localizedName { payload["app"] = app }
+            if let app = focus.current()?.name { payload["app"] = app }
             publish("device/mouse-pressed", payload, ephemeral: ephemeral)
         case .scrollWheel:
             var payload = place
@@ -233,32 +241,13 @@ final class DeviceEvents: ObservableObject {
         }
     }
 
-    /// Whether the key now goes into a password: asked again for each key, because the focus can
-    /// move into a password field between two keys.
-    private static func isSecret() -> Bool {
-        let app = NSWorkspace.shared.frontmostApplication
-        var role: String?, subrole: String?
-        if !IsSecureEventInputEnabled(), let pid = app?.processIdentifier {
-            let element = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(element, 0.05)
-            var focused: CFTypeRef?
-            if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-               let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
-                let field = focused as! AXUIElement
-                var value: CFTypeRef?
-                if AXUIElementCopyAttributeValue(field, kAXSubroleAttribute as CFString, &value) == .success { subrole = value as? String }
-                if AXUIElementCopyAttributeValue(field, kAXRoleAttribute as CFString, &value) == .success { role = value as? String }
-            }
-        }
-        return SecretKeys.withholds(secureInput: IsSecureEventInputEnabled(), app: app?.bundleIdentifier, focusedSubrole: subrole, focusedRole: role)
-    }
-
     // MARK: - The events job
 
     /// One event on the device's context. Other parts of the app that tell the mind about the
     /// device publish through here, so that there is one connection and one path. With no
     /// session it goes nowhere; while the connection is down it waits in the bridge.
     func publish(_ type: String, _ payload: [String: Any], ephemeral: Bool, idempotencyKey: String? = nil) {
+        Perf.count("published")
         guard let bridge else { return }
         var event: [String: Any] = ["type": type, "payload": payload]
         if ephemeral { event["ephemeral"] = true }
@@ -287,17 +276,17 @@ final class DeviceEvents: ObservableObject {
         if let event = (said["event"] as? [String: Any]).flatMap(ContextEvent.init(json:)) { heard(event) }
         if let count = said["sent"] as? Int {
             sent = count
-            failure = nil
+            if failure != nil { failure = nil }
         }
-        if let why = said["failed"] as? String, said["job"] != nil {
-            if failure != why { log.error("not published: \(why)") }
+        if let why = said["failed"] as? String, said["job"] != nil, failure != why {
+            log.error("not published: \(why)")
             failure = why
         }
         // the bridge connected again: the mind hears the presence of now, not of before
         if let up = said["connected"] as? Bool {
             if up, wasDown {
                 log.info("connected again")
-                failure = nil
+                if failure != nil { failure = nil }
                 presence = nil
                 tick()
             }
@@ -332,6 +321,7 @@ struct DeviceEventsSection: View {
     let allow: (Permission) -> Void
 
     var body: some View {
+        let _ = Perf.count("eventsSectionBodies")
         VStack(alignment: .leading, spacing: 7) {
             SectionTitle(title: "Events to the mind") {
                 TitleNote("Presence and the app in front: always").help(help)

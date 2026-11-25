@@ -380,7 +380,11 @@ A key event holds the key itself, so what you type goes to the mind, but never a
 (`SecretKeys`). A key goes to no mind, not even as a key code, while macOS's secure input is on
 (a system password prompt, the login window, 1Password's master password), while a password
 manager or a system prompt is in front, or while the focused field is a password field (a
-browser's sign-in form). The keys go again when the focus leaves it. Keyboard and mouse is off
+browser's sign-in form). The keys go again when the focus leaves it. A key asks no other process
+for this when it can be helped (`FocusWatch`): the app in front is kept from one activation to the
+next, and the focused field's kind is read once each time the app says its focus moved (an
+`AXObserver`); the changes it said and the app has not yet given are heard before each key. An app
+that tells no change (or the moment after an activation) is asked at each key, as before. Keyboard and mouse is off
 until you turn it on. Its events are ephemeral: they reach whoever listens at that
 moment and are in no log, unless you tick **Keep these events in the mind's log**. Keys need the
 Accessibility permission of macOS. A presence event is always kept.
@@ -773,9 +777,14 @@ with a lock while it stays on and the time since the start.
   - **Oruk Fourier 2B** (the default) is a fine-tune of Qwen3-ASR, 2.04B parameters, as Oruk's
     MLX 8-bit form (`mlx/8bit`, 2.46 GB). It runs on the GPU through
     [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.6.7, in a Python process of its own that
-    the app starts and keeps warm: it loads the model once, then hears each stretch that the app
-    sends it as JSON lines on its stdin (`Sources/SpeechText/Fourier.swift`). It ends when the app
-    ends or another local model is chosen. The word list's terms go into its prompt. Its files
+    the app starts: it loads the model once, then hears each stretch that the app sends it as JSON
+    lines on its stdin (`Sources/SpeechText/Fourier.swift`). The process holds 2.6 GB, so it stays
+    only while it is needed all the time: with Always listen on, or with a local model chosen for
+    dictation. With GPT Live Transcribe chosen, it starts at its first use (a capture, a failure of
+    OpenAI, which waits for it) and ends 5 minutes after its last pass; the next use starts it
+    again. A start takes 0.9 to 2.1 s once its files were read before (measured three times on
+    25 November 2026, M4 Max, from the start of the process to its "ready"). It also ends when the
+    app ends or another local model is chosen. The word list's terms go into its prompt. Its files
     are in `~/Library/Application Support/iterate-speech/oruk-fourier-2b` (2.85 GB), shared by
     every copy of the app on this Mac (`ITERATE_MAC_FOURIER_FOLDER` names another folder): a
     pinned uv (0.11.28) makes a venv with its own Python 3.12, installs the 47 packages of
@@ -802,9 +811,11 @@ with a lock while it stays on and the time since the start.
     own captures and a fixture of the list's hard terms (`harness/speech-bench`, 24 November 2026).
 - **No wait on first use.** Core ML prepares a model for the Neural Engine at its first load after
   each start of the app (about 25 s on a MacBook Pro); Fourier's process reads its model and makes
-  a warm-up pass (1.0 s once its files were read before). The app loads the chosen local model (with GPT Live Transcribe
-  chosen: the local default, for captures and for a failure of OpenAI) in the background a few
-  seconds after it starts, when its files are on this Mac, so the first dictation is at once. You can talk during a load: the microphone is open and what you say is
+  a warm-up pass (1.0 s once its files were read before). The app loads the chosen local model
+  in the background a few seconds after it starts, when its files are on this Mac, so the first
+  dictation is at once. With GPT Live Transcribe chosen, the local default (for captures and for a
+  failure of OpenAI) loads there too when it is Parakeet; Oruk Fourier loads at its first use, as
+  above. You can talk during a load: the microphone is open and what you say is
   kept (the last 60 s). The pill says "Getting the speech model: N%" only while files download,
   and "Loading the speech model" while they only load.
 - **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
@@ -1192,6 +1203,7 @@ connection, as the endpoint's; a mind never reaches it.
 | `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
 | `ui.scroll {id}` | Scrolls a list to its end (`log.list`), as a person does to read older rows |
 | `ui.key {key, shift?, command?}` | A key as the keyboard sends it (`tab`, `return`, `escape`, or `a`, `c`, `v`, `w`, `x`, `z` with `command`) to the key window, else the frontmost that can be key: its shortcuts, then the main menu's, then its `keyDown` |
+| `perf.input {kind, count, every?}` | `count` keys (`key`), moves (`move`) or scrolls (`scroll`) of another app, one every `every` ms (100), into the path of **Keyboard and mouse** as its monitor gives them: what that path costs, with no key of the person and no move of the pointer. The counters `inputSeen`, `published`, `focusAsks` (a key that asked the app in front for its focus), `focusMoves` and `eventsSectionBodies` (the panel's "Events to the mind" drawn) count it |
 | `perf.reset {watchMain?}` | The counters of `ui.state`'s `perf` start again from zero; `watchMain: true` starts the watch of the main queue's longest delay (it wakes the app 20 times a second, so it is off until asked), `false` stops it |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
