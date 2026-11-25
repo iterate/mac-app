@@ -471,7 +471,7 @@ struct ActivityWindowView: View {
                 modeButton(.every, "Every event")
             }
             .padding(2)
-            .background(Palette.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Theme.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Show")
             .accessibilityIdentifier("log.mode")
@@ -499,8 +499,8 @@ struct ActivityWindowView: View {
                 .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                 .padding(.horizontal, 11)
                 .frame(height: 22)
-                .background(isSelected ? Palette.knob : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                .shadow(color: isSelected ? Palette.knobShadow : .clear, radius: 1, y: 0.5)
+                .background(isSelected ? Theme.knob : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .shadow(color: isSelected ? Theme.knobShadow : .clear, radius: 1, y: 0.5)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -515,10 +515,10 @@ struct ActivityWindowView: View {
         } label: {
             Text(group.title)
                 .font(.system(size: 12))
-                .foregroundStyle(isOn ? Palette.askText : Color.secondary)
+                .foregroundStyle(isOn ? Theme.accentTintText : Color.secondary)
                 .padding(.horizontal, 8)
                 .frame(height: 22)
-                .background(isOn ? Palette.askFill : Color.clear, in: Capsule())
+                .background(isOn ? Theme.accentTint : Color.clear, in: Capsule())
                 .overlay(Capsule().strokeBorder(isOn ? Color.clear : Color.primary.opacity(0.18)))
                 .contentShape(Capsule())
         }
@@ -548,7 +548,7 @@ struct ActivityWindowView: View {
                     Text("Following")
                 }
                 .font(.system(size: 12))
-                .foregroundStyle(Palette.liveText)
+                .foregroundStyle(Theme.okText)
                 .help("New events of this context come into the list as they happen")
             }
         }
@@ -643,20 +643,20 @@ struct ActivityWindowView: View {
                             .fixedSize(horizontal: false, vertical: true)
                             .padding(10)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Palette.codeFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                            .background(Theme.code, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
                     }
                     if line.notInMind {
                         HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "icloud.slash").foregroundStyle(Palette.waitText)
+                            Image(systemName: "icloud.slash").foregroundStyle(Theme.warnText)
                             Text("Not yet in the mind. It waits in the bridge’s queue and goes when the connection is back.")
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                         .font(.system(size: 12.5))
                         .padding(10)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Palette.waitWash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Palette.waitEdge))
+                        .background(Theme.warnWash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.warnEdge))
                     }
                     if let thing = line.thing.flatMap({ id in state.things.first { $0.id == id } }) {
                         thingControl(thing)
@@ -685,7 +685,7 @@ struct ActivityWindowView: View {
                 SharingControl(id: thing.id, title: thing.title, selection: sharing, choose: { actions.choose(thing, $0) }, identifier: "log.sharing")
             }
             if let until = state.approvals[thing.id] {
-                Text("Approved until \(Lend.shortClock(until))").font(.system(size: 12)).foregroundStyle(Palette.accentText)
+                Text("Approved until \(Lend.shortClock(until))").font(.system(size: 12)).foregroundStyle(Theme.accentText)
                 Button("End the Approval") { actions.endApproval(thing) }
                     .accessibilityIdentifier("log.endApproval")
             }
@@ -725,7 +725,7 @@ private struct LogRow: View {
             Image(systemName: line.symbol)
                 .font(.system(size: 12))
                 .frame(width: 20)
-                .foregroundStyle(line.isRed ? Palette.redText : Color.secondary)
+                .foregroundStyle(line.isRed ? Theme.liveText : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
                 Text(line.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
                 if let detail = line.detail {
@@ -739,7 +739,7 @@ private struct LogRow: View {
             .layoutPriority(1)
             Spacer(minLength: 8)
             if line.notInMind {
-                Image(systemName: "icloud.slash").font(.system(size: 11)).foregroundStyle(Palette.waitText)
+                Image(systemName: "icloud.slash").font(.system(size: 11)).foregroundStyle(Theme.warnText)
                     .help("Not yet in the mind: it goes when the connection is back")
             }
             Text(line.type).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)

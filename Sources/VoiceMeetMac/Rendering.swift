@@ -65,21 +65,19 @@ enum Rendering {
                 ])
                 approvals = ["camera.fixture": Rendering.now.addingTimeInterval(30 * 60)]
                 uses = ["accessibility": 12]
-                lastResult = .init(what: "Last capture", line: "Sent to iterate.example.com at 14:01:40, and copied", failed: false)
+                lastResult = .init(what: "Last capture", line: "0:15, in the mind and on the clipboard", failed: false)
             case "blocked":
                 things = Rendering.things([
                     "screen.1": .shared, "accessibility": .shared, "speaker": .shared, "banners": .shared, "commands": .ask,
                 ])
                 missing = [.screenRecording, .accessibility]
-                lastResult = .init(
-                    what: "Last dictation", line: "12 words are on the clipboard (14:01:52): iterate needs Accessibility to write them for you",
-                    failed: true)
+                lastResult = .init(what: "Last dictation", line: "on the clipboard, press ⌘V. Accessibility is not allowed.", failed: true)
             default:
                 things = Rendering.things([
                     "screen.1": .ask, "accessibility": .shared, "speaker": .shared, "banners": .shared, "commands": .ask,
                 ])
                 uses = ["accessibility": 3]
-                lastResult = .init(what: "Last input", line: "Sent to iterate.example.com at 14:01:05", failed: false)
+                lastResult = .init(what: "Last input", line: "sent to Iterate at 14:01", failed: false)
             }
         }
 
@@ -88,7 +86,7 @@ enum Rendering {
             switch phase {
             case "busy":
                 model.live.fixForDrawing([
-                    DeviceLive.Watcher(id: "w1", who: "Misha", tracks: ["screen-0", "mic-0"], since: Rendering.now.addingTimeInterval(-100))
+                    DeviceLive.Watcher(id: "w1", who: "Misha", tracks: ["screen-0", "mic-0"], since: Rendering.now.addingTimeInterval(175))
                 ])
                 model.deviceEvents.fixForDrawing(sharesInput: true, keepsInput: true)
                 model.record.fixForDrawing(on: [.screens, .cameras, .mics, .speakers], line: "Recording 4 tracks · 2 slots waiting", isRecording: true)
@@ -107,13 +105,15 @@ enum Rendering {
         let context = CGContext(
             data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0, space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.setFillColor(CGColor(red: 0.36, green: 0.45, blue: 0.62, alpha: 1))
+        // as the mocks draw it: a grey desktop, its menu bar, a light window and a darker one
+        context.setFillColor(CGColor(gray: 0.27, alpha: 1))
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
-        context.setFillColor(CGColor(gray: 0.92, alpha: 1))
-        context.fill(CGRect(x: 0, y: height - 4, width: width, height: 4))
-        context.fill(CGRect(x: 5, y: 8, width: 30, height: 22))
-        context.setFillColor(CGColor(gray: 0.75, alpha: 1))
-        context.fill(CGRect(x: 38, y: 5, width: 18, height: 16))
+        context.setFillColor(CGColor(gray: 0.5, alpha: 1))
+        context.fill(CGRect(x: 0, y: height - 6, width: width, height: 6))
+        context.setFillColor(CGColor(gray: 0.62, alpha: 1))
+        context.fill(CGRect(x: 6, y: 10, width: 26, height: 18))
+        context.setFillColor(CGColor(gray: 0.48, alpha: 1))
+        context.fill(CGRect(x: 38, y: 8, width: 18, height: 16))
         return context.makeImage()!
     }()
 
@@ -163,10 +163,12 @@ enum Rendering {
             view.layoutSubtreeIfNeeded()
         }
         let size = view.bounds.size
+        // in sRGB, the space of the design's colours: a token's value is the file's value
         guard size.width > 0, size.height > 0,
             let picture = NSBitmapImageRep(
                 bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2), pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
-                samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .calibratedRGB, bytesPerRow: 0, bitsPerPixel: 0)?
+                .retagging(with: .sRGB)
         else { return false }
         picture.size = size
         view.cacheDisplay(in: view.bounds, to: picture)

@@ -209,23 +209,25 @@ struct LiveSection: View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(live.watchers) { watcher in
                 HStack(spacing: 10) {
-                    Image(systemName: "eye.fill").font(.system(size: 14)).frame(width: 22).foregroundStyle(Palette.redText)
+                    Image(systemName: "eye.fill").font(.system(size: 13, weight: .regular)).frame(width: 16).foregroundStyle(Theme.liveText)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("\(watcher.who) is watching live").font(.system(size: 13, weight: .semibold)).lineLimit(1).truncationMode(.middle)
                         Text("\(Self.words(watcher.tracks)) · since \(Lend.shortClock(watcher.since))")
-                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                            .font(.system(size: 12)).foregroundStyle(Theme.t2).lineLimit(1)
                     }
                     Spacer(minLength: 8)
                     Button("End") { live.end(watcher.id, why: "the owner ended it") }
-                        .buttonStyle(FillButtonStyle(prominent: true, height: 26))
+                        .buttonStyle(FillButtonStyle(prominent: true))
                         .help("Ends this watch now")
                 }
-                .padding(.horizontal, 12)
+                .padding(.leading, 12)
+                .padding(.trailing, 10)
                 .padding(.vertical, 9)
-                .background(Palette.redWash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.redEdge))
+                .background(Theme.liveWash, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.liveEdge))
             }
         }
+        .padding(.top, 12)
     }
 
     /// "the screen, the camera, the microphone"

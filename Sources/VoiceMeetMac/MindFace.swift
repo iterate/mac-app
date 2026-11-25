@@ -189,12 +189,15 @@ struct MindAvatar: View {
     let mind: String
     var size: CGFloat = 24
     var badge: Color?
+    /// The ring around the dot: the ground the face is on.
+    var ring: Color = Theme.surface
     @ObservedObject private var faces = MindFaces.shared
 
-    init(mind: String, size: CGFloat = 24, badge: Color? = nil) {
+    init(mind: String, size: CGFloat = 24, badge: Color? = nil, ring: Color = Theme.surface) {
         self.mind = mind
         self.size = size
         self.badge = badge
+        self.ring = ring
     }
 
     var body: some View {
@@ -205,21 +208,22 @@ struct MindAvatar: View {
             } else {
                 Self.colour(of: mind)
                 Text(Self.initial(of: face.title))
-                    .font(.system(size: size * 0.46, weight: .semibold, design: .rounded))
+                    .font(.system(size: size * 0.42, weight: .bold))
                     .foregroundStyle(.white)
             }
         }
         .frame(width: size, height: size)
         .clipShape(Circle())
-        .overlay(Circle().strokeBorder(Color.primary.opacity(0.12), lineWidth: 0.5))
         .overlay(alignment: .bottomTrailing) {
             if let badge {
-                let width = max(8, size * 0.3)
+                // 11 points on a face of 34, 9 on a smaller one, ringed with the ground, 2 points out
+                let width: CGFloat = size >= 30 ? 11 : 9
                 Circle()
                     .fill(badge)
+                    .padding(2)
+                    .background(Circle().fill(ring))
                     .frame(width: width, height: width)
-                    .overlay(Circle().strokeBorder(Color(nsColor: .windowBackgroundColor), lineWidth: max(1.5, width * 0.2)))
-                    .offset(x: width * 0.15, y: width * 0.15)
+                    .offset(x: 2, y: 2)
             }
         }
         .accessibilityLabel(face.title)
@@ -236,36 +240,5 @@ struct MindAvatar: View {
         // FNV-1a: Swift's own hash changes from run to run
         let hash = address.utf8.reduce(UInt32(2_166_136_261)) { ($0 ^ UInt32($1)) &* 16_777_619 }
         return Color(hue: Double(hash % 360) / 360, saturation: 0.55, brightness: 0.72)
-    }
-}
-
-/// A mind as a row: its avatar, its name, and under the name its address and an optional note
-/// (this Mac's name there). `MindAvatar` is the circle alone.
-struct MindLabel: View {
-    let mind: String
-    var size: CGFloat = 24
-    /// Words after the address, such as `itx.jane.mac`.
-    var note: String?
-    /// A dot on the avatar (`MindAvatar.badge`).
-    var badge: Color?
-    /// The name's size; the address is a little smaller.
-    var titleSize: CGFloat = 13
-    @ObservedObject private var faces = MindFaces.shared
-
-    var body: some View {
-        let face = faces.face(of: mind)
-        HStack(spacing: size > 26 ? 11 : 8) {
-            MindAvatar(mind: mind, size: size, badge: badge)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(face.title)
-                    .font(.system(size: titleSize, weight: .semibold))
-                    .lineLimit(1)
-                Text([mind, note].compactMap { $0 }.joined(separator: " · "))
-                    .font(.system(size: titleSize - 2))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
-        }
     }
 }

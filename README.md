@@ -641,7 +641,7 @@ with a lock while it stays on and the time since the start.
   tap hears the modifier keys; the tap for key presses is on only while fn is down or a dictation
   goes, so the rest of the Mac's typing passes no tap of this app. It swallows one key: Esc while
   a dictation stays on, so that Esc does not reach the app in front. Without the permission, ⌥⇧D still works, its first use opens the permission's guide, and
-  the panel's speech row and Settings › Dictation say so. macOS can act on 🌐 too (the emoji
+  Settings › Dictation says so. macOS can act on 🌐 too (the emoji
   picker, or its own dictation): when System Settings › Keyboard › "Press 🌐 key to" is not "Do
   Nothing", Settings › Dictation says to set it, with **Open Keyboard Settings**. The app changes
   no setting. Settings › Dictation can turn fn off (⌥⇧D stays) and the double tap off (a short
@@ -651,7 +651,7 @@ with a lock while it stays on and the time since the start.
   are written where they belonged.
 - **It runs on this Mac.** The speech model runs as Core ML through
   [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. No
-  sound and no text leaves the Mac. Settings › Dictation (the panel's speech row opens it) chooses the model for dictation,
+  sound and no text leaves the Mac. Settings › Dictation (the panel's Settings button opens it) chooses the model for dictation,
   the input and captures; each one shows its size and whether it is on this Mac:
 
   | Model                       | Download | License   | Note                                                     |
@@ -740,7 +740,7 @@ The proposal:
   the final came 0.72 s after the end. The secret is the slowest step, so the app gets the next one
   before the current one expires, not at fn down. The mind also decides who may dictate online.
 - **What changes for the person.** "No sound and no text leaves the Mac" is then not true for a
-  mind with online speech: it must be a choice of the mind, said in the panel's speech section.
+  mind with online speech: it must be a choice of the mind, said in Settings › Dictation.
   At the measured prices, an hour of dictation costs $1.02 (`gpt-live-transcribe`) or $0.27
   (`gpt-transcribe`).
 
@@ -936,8 +936,7 @@ The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copy
 `approval.minutes`, `approval.deny`, a banner's buttons `banner.button.<n>`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
 `log.filter.<acts|presence|app|window|record|live|inputs|keys>`, `log.search`, `log.list`, `log.row`, `log.context`,
 `log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `input.copyFix`, `capture.send`,
-`capture.discard`, `speech.model` (the panel's speech row: it opens Settings › Dictation),
-`speech.model.<id>` (a model in its list), `panel.settings`, and in Settings `settings.page.general`,
+`capture.discard`, `speech.model.<id>` (a model in the list of Settings › Dictation), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
 `settings.showsPill`, `settings.approvalMinutes`, `settings.key.capture`, `settings.key.input`,
 `settings.doubleTap`, `settings.dictationKey`, `settings.pillWords`, `settings.write`,
@@ -973,6 +972,16 @@ most 0.5% of the pixels more than 24 off in a channel) only on the build in
 within 2%, at most 1% of the 16 × 16 blocks more than 24 off in their mean. A missing or moved row
 fails it, antialiasing does not; the pixel differences are reported, and a picture of each is in
 `<out>/diff/` (CI uploads it as the artifact `snapshots`).
+
+**The design.** The views take their colours, sizes and radii from `Theme.swift`, made from
+`design/tokens.json`. `node harness/design-diff.mjs [--only v2-Live,v2-Pills] [--tone dark]`
+measures each drawing against its mock in `design/html`: headless Chrome (its own profile in
+`/tmp`, the mocks' web fonts blocked, so both draw in SF) draws the mock at 2 pixels to a point,
+the script cuts out each panel and pill, puts the app's drawing beside it, and prints the mean
+difference of a channel (`mad`, 0 is the same picture), the same with each band of 16 points where
+it fits best (`banded`: a row the mock lacks moves what is under it), and the difference of size.
+The pictures (`<view>-side.png`, `<view>-diff.png`) and `scores.json` go to
+`~/.cache/mac-app-night/fidelity`. It needs Google Chrome in /Applications and nothing from npm.
 
 **The scenarios.** `node harness/run.mjs <scenario|ci|all>` runs the app that `swift build` made
 (`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:

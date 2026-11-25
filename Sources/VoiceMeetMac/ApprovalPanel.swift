@@ -99,7 +99,7 @@ struct ApprovalView: View {
                     .padding(.horizontal, 11)
                     .padding(.vertical, 9)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(Palette.codeFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(Theme.code, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
             }
             Text(question.note)
@@ -176,7 +176,7 @@ struct ApprovalView: View {
                 .font(.system(size: 13, weight: prominent ? .semibold : .medium))
                 .foregroundStyle(prominent ? Color(nsColor: .windowBackgroundColor) : Color.primary)
                 .frame(maxWidth: .infinity, minHeight: 32)
-                .background(prominent ? Color.primary : Palette.fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(prominent ? Color.primary : Theme.btn, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(configuration.isPressed ? 0.12 : 0)))
                 .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }

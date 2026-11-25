@@ -464,10 +464,12 @@ const scenarios = {
       // the mark says it is a test copy: the owner never quits the installed app for it
       const mark = [...nodes(tree)].find((node) => node.id === "statusItem");
       if (!mark?.label?.startsWith("iterate test copy:")) throw new Error(`the mark's label is ${JSON.stringify(mark?.label)}`);
-      for (const id of ["statusItem", "panel.quit", "panel.copyPrompt", "sharing.commands", "record.screens", "speech.model"])
+      for (const id of ["statusItem", "panel.quit", "panel.copyPrompt", "panel.settings", "sharing.commands", "record.screens"])
         if (!ids.has(id)) throw new Error(`ui.tree has no ${id}`);
-      // the speech model's row opens Settings › Dictation, with every model of the app
-      await run.control("ui.press", { id: "speech.model" });
+      // the panel's Settings button, then Settings › Dictation, with every model of the app
+      await run.control("ui.press", { id: "panel.settings" });
+      await until("the Settings window", 10, async () => (await run.state()).settings.visible);
+      await run.control("ui.press", { id: "settings.page.dictation" });
       await until("the list of speech models", 5, async () => {
         const open = new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id));
         return open.has("speech.model.parakeet-v3") && open.has("speech.model.parakeet-ultra");
@@ -891,7 +893,7 @@ const scenarios = {
     },
   },
 
-  /** The panel's model picker, through ui.press: the choice is stored in the home's defaults. */
+  /** The model picker of Settings › Dictation, through ui.press: the choice is stored in the home's defaults. */
   "speech-model": {
     local: "needs Parakeet v3 and Ultra in ~/Library/Application Support/FluidAudio (else a choice downloads)",
     async run({ app, home }) {
@@ -902,7 +904,9 @@ const scenarios = {
         if (!(await speech()).models.every((model) => model.onDisk)) throw new Error("a model is not on this Mac");
         await run.control("ui.press", { id: "statusItem" });
         await until("the panel", 10, async () => (await run.state()).panel.visible);
-        await run.control("ui.press", { id: "speech.model" });
+        await run.control("ui.press", { id: "panel.settings" });
+        await until("the Settings window", 10, async () => (await run.state()).settings.visible);
+        await run.control("ui.press", { id: "settings.page.dictation" });
         await until("the list", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "speech.model.parakeet-ultra"));
         await run.control("ui.press", { id: "speech.model.parakeet-ultra" });
         await until("Ultra chosen", 10, async () => (await speech()).model === "parakeet-ultra");

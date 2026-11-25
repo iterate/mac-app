@@ -946,23 +946,26 @@ private struct CapturePillView: View {
         HStack(spacing: 10) {
             if let mind = pill.mind { MindAvatar(mind: mind, size: 22) }
             if let startedAt = pill.startedAt {
-                Circle().fill(.red).frame(width: 9, height: 9)
-                Text(startedAt, style: .timer).monospacedDigit()
+                Circle().fill(Theme.live).frame(width: 9, height: 9)
+                Text(startedAt, style: .timer).font(.system(size: 13, weight: .semibold)).monospacedDigit()
             }
             Text(pill.text).lineLimit(1).truncationMode(.middle)
-            if let progress = pill.progress { ProgressView(value: min(max(progress, 0), 1)).frame(width: 90) }
+            if let progress = pill.progress {
+                ProgressView(value: min(max(progress, 0), 1)).progressViewStyle(.linear).controlSize(.small).tint(Theme.t2).frame(width: 90)
+            }
             if pill.startedAt != nil {
-                Button("Send", action: send).accessibilityIdentifier("capture.send")
-                Button("Discard", action: discard).accessibilityIdentifier("capture.discard")
+                Spacer(minLength: 0)
+                Button("Discard", action: discard).buttonStyle(FillButtonStyle()).accessibilityIdentifier("capture.discard")
+                Button("Send", action: send).buttonStyle(FillButtonStyle(prominent: true)).accessibilityIdentifier("capture.send")
             }
         }
-        .font(.system(size: 13, weight: .medium))
-        .controlSize(.small)
+        .font(.system(size: 13))
+        .foregroundStyle(Theme.t1)
         .padding(.leading, pill.mind == nil ? 14 : 7)
-        .padding(.trailing, 14)
+        .padding(.trailing, pill.startedAt == nil ? 14 : 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.separator))
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.edge, lineWidth: 1))
     }
 }
 

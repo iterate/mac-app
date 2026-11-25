@@ -104,8 +104,6 @@ struct PanelActions {
 struct Panel: View {
     @ObservedObject var state: PanelState
     let model: AppModel
-    /// The speech model and what keeps fn dictation from working.
-    var speech = SpeechChoice()
     /// The person changed a choice.
     let changed: () -> Void
     /// The person wants to give a permission of macOS: the guide starts.
@@ -145,15 +143,14 @@ struct Panel: View {
                 bannerSection(banner)
                     .padding(.horizontal, 14)
                     .padding(.vertical, 12)
-                Divider()
+                    .background(Theme.raised)
+                PanelDivider()
             }
             lendSection
-                .padding(.horizontal, 6)
-                .padding(.vertical, 6)
             if lend.minds.isEmpty {
                 noMind
             } else {
-                Divider()
+                PanelDivider()
                 // The middle scrolls when the panel would be taller than the screen, so the mind at the
                 // top and Quit at the bottom are always reachable.
                 ScrollView(.vertical) {
@@ -161,11 +158,9 @@ struct Panel: View {
                         if state.isActivityOpen {
                             ActivityPage(log: model.acts, isOpen: $state.isActivityOpen, openWindow: openActivityWindow)
                         } else {
-                            middle
+                            middle.padding(.horizontal, 12)
                         }
                     }
-                    .padding(.horizontal, 12)
-                    .padding(.top, 12)
                     .padding(.bottom, 12)
                     .background(GeometryReader { geometry in
                         Color.clear.preference(key: MiddleHeight.self, value: geometry.size.height)
@@ -174,11 +169,19 @@ struct Panel: View {
                 .frame(height: min(middleHeight, Panel.middleMaxHeight))
                 .onPreferenceChange(MiddleHeight.self) { middleHeight = $0 }
             }
-            Divider()
+            PanelDivider()
             footer
         }
+        .foregroundStyle(Theme.t1)
+        .padding(1)
         .frame(width: Self.width)
+        .background(Theme.surface, in: Self.shape)
+        .clipShape(Self.shape)
+        .overlay(Self.shape.strokeBorder(Theme.edge, lineWidth: 1))
     }
+
+    /// The panel's outline: a rounded rectangle of 14 points, with an edge of 1 point.
+    static let shape = RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous)
 
     // MARK: - The mind and the phase
 
@@ -199,23 +202,24 @@ struct Panel: View {
     }
 
     private func lendRows(_ lend: LendView) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 0) {
             MindSwitcher(
                 lend: lend, isOpen: $state.isSwitcherOpen, actions: lendActions, dot: Self.color(of: lend.state.phase),
                 phaseColor: Self.textColor(of: lend.state.phase))
             if lend.active != nil, let block = lend.words.block {
-                phaseBlock(block, lend: lend).padding(.horizontal, 6)
+                phaseBlock(block, lend: lend).padding(.horizontal, 12).padding(.bottom, 12)
             }
             if !lend.isSetUp, !lend.minds.isEmpty {
                 Text("Not set up: run npx @iterate-com/mac-app in a terminal")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 8)
+                    .font(.system(size: 11)).foregroundStyle(Theme.t3).padding(.horizontal, 14).padding(.bottom, 10)
             }
             if let line = lend.commandLine {
                 HStack(spacing: 6) {
                     if lend.isCommandRunning { ProgressView().controlSize(.mini) }
-                    Text(line).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    Text(line).font(.system(size: 11)).foregroundStyle(Theme.t3).fixedSize(horizontal: false, vertical: true)
                 }
-                .padding(.horizontal, 8)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 10)
             }
         }
     }
@@ -224,16 +228,18 @@ struct Panel: View {
     /// it stopped, with what the person can do.
     private func phaseBlock(_ block: String, lend: LendView) -> some View {
         let waits = lend.words.tone == .waits
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
         return VStack(alignment: .leading, spacing: 8) {
-            Text(block).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+            Text(block).font(.system(size: 12)).lineSpacing(2.5).fixedSize(horizontal: false, vertical: true)
             if let code = lend.words.code {
                 Text(code)
                     .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                    .lineSpacing(2.5)
+                    .foregroundStyle(Theme.t2)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
             }
-            HStack(spacing: 8) {
+            HStack(spacing: 6) {
                 if case .incompatible = lend.state.phase {
                     Button {
                         NSPasteboard.general.clearContents()
@@ -241,7 +247,10 @@ struct Panel: View {
                         state.didCopyCommand = true
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { state.didCopyCommand = false }
                     } label: {
-                        Label(state.didCopyCommand ? "Copied" : "Copy Command", systemImage: "doc.on.doc")
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.on.doc").font(.system(size: 12))
+                            Text(state.didCopyCommand ? "Copied" : "Copy Command")
+                        }
                     }
                     .buttonStyle(FillButtonStyle())
                 } else {
@@ -255,48 +264,52 @@ struct Panel: View {
                 }
             }
         }
-        .padding(12)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(waits ? Palette.waitWash : Palette.redWash, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(waits ? Palette.waitEdge : Palette.redEdge))
+        .background(waits ? Theme.warnWash : Theme.liveWash, in: shape)
+        .overlay(shape.strokeBorder(waits ? Theme.warnEdge : Theme.liveEdge))
     }
 
     /// The dot on the mind's face.
     static func color(of phase: LendPhase) -> Color {
         switch phase {
-        case .live: return .green
-        case .connecting, .reconnecting: return .orange
-        case .idle: return .secondary
-        case .stopped, .notAllowed, .incompatible: return .red
+        case .live: return Theme.ok
+        case .connecting, .reconnecting: return Theme.warn
+        case .idle: return Theme.t3
+        case .stopped, .notAllowed, .incompatible: return Theme.live
         }
     }
 
     /// The phase's name at the right of the row.
     private static func textColor(of phase: LendPhase) -> Color {
         switch phase {
-        case .live: return Palette.liveText
-        case .connecting, .reconnecting: return Palette.waitText
-        case .idle: return .secondary
-        case .stopped, .notAllowed, .incompatible: return Palette.redText
+        case .live: return Theme.okText
+        case .connecting, .reconnecting: return Theme.warnText
+        case .idle: return Theme.t2
+        case .stopped, .notAllowed, .incompatible: return Theme.liveText
         }
     }
 
     // MARK: - The middle
 
     private var middle: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        VStack(alignment: .leading, spacing: 0) {
             LiveWatching(live: model.live)
-            actionsSection(hasMind: true)
-            CanUseSection(
-                state: state, acts: model.acts, live: model.live, changed: changed, allow: allow, cameraLayer: cameraLayer,
-                bigPicture: bigPicture)
-            DeviceEventsSection(events: model.deviceEvents, accessibilityMissing: state.missing.contains(.accessibility), allow: allow)
-            RecordSection(record: model.record, window: model.deviceWindow, missing: state.missing, allow: allow)
-            ActivitySummary(log: model.acts, isOpen: $state.isActivityOpen)
+            actionsSection(hasMind: true).padding(.top, 12)
+            Group {
+                CanUseSection(
+                    state: state, acts: model.acts, live: model.live, changed: changed, allow: allow, cameraLayer: cameraLayer,
+                    bigPicture: bigPicture)
+                DeviceEventsSection(events: model.deviceEvents, accessibilityMissing: state.missing.contains(.accessibility), allow: allow)
+                RecordSection(record: model.record, window: model.deviceWindow, missing: state.missing, allow: allow)
+                ActivitySummary(log: model.acts, isOpen: $state.isActivityOpen)
+            }
+            .padding(.top, 14)
         }
     }
 
-    /// Capture, Input and Dictate, how the newest of them ended, and the speech model.
+    /// Capture, Input and Dictate, and how the newest of them ended.
     private func actionsSection(hasMind: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
@@ -313,20 +326,23 @@ struct Panel: View {
             if let last = state.lastResult {
                 Text("\(last.what): \(last.line)")
                     .font(.system(size: 11))
-                    .foregroundStyle(last.failed ? Palette.waitText : Color.secondary)
+                    .lineSpacing(1.5)
+                    .foregroundStyle(last.failed ? Theme.warnText : Theme.t3)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(.horizontal, 2)
             }
-            SpeechSection(choice: speech)
         }
     }
 
     private func actionButton(_ title: String, symbol: String, key: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 2) {
-                Label(title, systemImage: symbol).font(.system(size: 12, weight: .semibold))
-                Text(key).font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Image(systemName: symbol).font(.system(size: 12, weight: .regular))
+                    Text(title).font(.system(size: 12, weight: .semibold))
+                }
+                Text(key).font(.system(size: 11)).foregroundStyle(Theme.t2)
             }
         }
         .buttonStyle(TileStyle())
@@ -335,42 +351,50 @@ struct Panel: View {
     // MARK: - No mind yet
 
     private var noMind: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Add a mind to lend this Mac to. It gets a key for one name, and a member of the mind allows it with a passkey.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(action: lendActions.add) {
-                Text("Add a Mind…").font(.system(size: 13, weight: .semibold)).frame(maxWidth: .infinity)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Add a mind to lend this Mac to. It gets a key for one name, and a member of the mind allows it with a passkey.")
+                    .font(.system(size: 13))
+                    .lineSpacing(3.5)
+                    .foregroundStyle(Theme.t2)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(action: lendActions.add) {
+                    Text("Add a Mind…").frame(maxWidth: .infinity)
+                }
+                .buttonStyle(FillButtonStyle(prominent: true, height: 32, fontSize: 13))
+                .disabled(!state.lend.isSetUp || state.lend.isCommandRunning)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Or in a terminal").font(.system(size: 11)).foregroundStyle(Theme.t3)
+                    Text("npx @iterate-com/mac-app")
+                        .font(.system(size: 12, design: .monospaced))
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 11)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Theme.code, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.line))
+                }
+                VStack(alignment: .leading, spacing: 9) {
+                    meaning("lock", "Everything starts at Off. You choose Off, Ask or Shared for each thing.")
+                    meaning("touchid", "Ask means you approve each use with Touch ID.")
+                    meaning("waveform", "Dictation already works: it runs on this Mac and needs no mind.")
+                }
+                .padding(.top, 2)
             }
-            .buttonStyle(FillButtonStyle(prominent: true, height: 32))
-            .disabled(!state.lend.isSetUp || state.lend.isCommandRunning)
-            VStack(alignment: .leading, spacing: 5) {
-                Text("Or in a terminal").font(.system(size: 11)).foregroundStyle(.secondary)
-                Text("npx @iterate-com/mac-app")
-                    .font(.system(size: 12, design: .monospaced))
-                    .textSelection(.enabled)
-                    .padding(.horizontal, 12)
-                    .frame(maxWidth: .infinity, minHeight: 36, alignment: .leading)
-                    .background(Palette.fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                meaning("lock", "Everything starts at Off. You choose Off, Ask or Shared for each thing.")
-                meaning("touchid", "Ask means you approve each use with Touch ID.")
-                meaning("waveform", "Dictation already works: it runs on this Mac and needs no mind.")
-            }
+            .padding(.horizontal, 14)
+            .padding(.top, 4)
+            .padding(.bottom, 2)
             actionsSection(hasMind: false)
+                .padding(.horizontal, 12)
+                .padding(.top, 12)
+                .padding(.bottom, 12)
         }
-        .padding(.horizontal, 12)
-        .padding(.top, 4)
-        .padding(.bottom, 12)
     }
 
     private func meaning(_ symbol: String, _ words: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Image(systemName: symbol).font(.system(size: 12)).frame(width: 16).foregroundStyle(.secondary)
-            Text(words).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Image(systemName: symbol).font(.system(size: 13, weight: .regular)).frame(width: 15).foregroundStyle(Theme.t2)
+            Text(words).font(.system(size: 12)).lineSpacing(3).foregroundStyle(Theme.t2).fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -380,37 +404,34 @@ struct Panel: View {
         HStack(spacing: 8) {
             if !state.lend.minds.isEmpty {
                 Button(state.didCopy ? "Copied" : "Copy Prompt", action: copyPrompt)
-                    .buttonStyle(FillButtonStyle(height: 26))
+                    .buttonStyle(FillButtonStyle(padding: 10))
                     .accessibilityIdentifier("panel.copyPrompt")
                     .help("Copies how an agent uses this Mac, to paste into a chat with it")
             }
             if let source = state.lend.source {
                 Text(source)
                     .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.t3)
                     .lineLimit(1)
                     .truncationMode(.middle)
             }
-            Spacer(minLength: 8)
+            Spacer(minLength: 0)
             Button(action: openSettings) {
-                Image(systemName: "gearshape").font(.system(size: 13))
+                Image(systemName: "slider.horizontal.3").font(.system(size: 13, weight: .regular))
             }
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Settings")
-                .keyboardShortcut(",")
-                .help("This Mac's settings, and each mind's (⌘,)")
-                .accessibilityIdentifier("panel.settings")
+            .buttonStyle(QuietButtonStyle())
+            .accessibilityLabel("Settings")
+            .keyboardShortcut(",")
+            .help("This Mac's settings, and each mind's (⌘,)")
+            .accessibilityIdentifier("panel.settings")
             Button("Quit") { NSApp.terminate(nil) }
-                .buttonStyle(.borderless)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
+                .buttonStyle(QuietButtonStyle())
                 .keyboardShortcut("q")
                 .accessibilityIdentifier("panel.quit")
         }
         .padding(.leading, 12)
-        .padding(.trailing, 14)
-        .padding(.vertical, 8)
+        .padding(.trailing, 8)
+        .padding(.vertical, 7)
     }
 
     // MARK: - The banner
@@ -420,24 +441,28 @@ struct Panel: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 11) {
                 Circle()
-                    .fill(Color.green)
+                    .fill(Theme.ok)
                     .frame(width: 34, height: 34)
-                    .overlay(Image(systemName: banner.isCall ? "phone.fill" : "bell.badge").font(.system(size: 14)).foregroundStyle(.white))
+                    .overlay(
+                        Image(systemName: banner.isCall ? "phone" : "bell.badge").font(.system(size: 14, weight: .regular))
+                            .foregroundStyle(Theme.onOk))
                 VStack(alignment: .leading, spacing: 2) {
                     Text(banner.isCall ? "\(banner.title) calls" : banner.title).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                     if !banner.body.isEmpty {
-                        Text(banner.body).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                        Text(banner.body).font(.system(size: 12)).lineSpacing(2).foregroundStyle(Theme.t2).lineLimit(2)
                     }
                 }
                 Spacer(minLength: 8)
-                Button { pressBanner(nil) } label: { Image(systemName: "xmark") }
-                    .buttonStyle(.borderless)
-                    .help(banner.isCall ? "Decline" : "Close the banner with no button")
+                Button { pressBanner(nil) } label: {
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .regular)).foregroundStyle(Theme.t2).padding(2)
+                }
+                .buttonStyle(.plain)
+                .help(banner.isCall ? "Decline" : "Close the banner with no button")
             }
             HStack(spacing: 8) {
                 ForEach(Array(banner.buttons.enumerated()), id: \.offset) { index, button in
                     Button { pressBanner(index) } label: { Text(button.label).frame(maxWidth: .infinity) }
-                        .buttonStyle(FillButtonStyle(prominent: index == banner.defaultButton, height: 28))
+                        .buttonStyle(FillButtonStyle(prominent: index == banner.defaultButton, height: 28, fontSize: 13, weight: .semibold))
                 }
             }
         }
@@ -509,15 +534,16 @@ private struct CanUseSection: View {
                     Button("Everything Off") { setAll(.off) }
                     Button("Ask for Everything") { setAll(.ask) }
                 } label: {
-                    Text("Set all").font(.system(size: 12))
+                    TitleLink(title: "Set all", chevron: "chevron.down")
                 }
-                .menuStyle(.borderlessButton)
+                .menuStyle(.button)
+                .buttonStyle(.plain)
+                .menuIndicator(.hidden)
                 .fixedSize()
-                .foregroundStyle(.secondary)
             }
             Card {
                 ForEach(Array(groups.enumerated()), id: \.offset) { index, group in
-                    if index > 0 { Divider().padding(.horizontal, 8).padding(.vertical, 3) }
+                    if index > 0 { CardDivider() }
                     ForEach(group) { thing in
                         ThingRow(
                             thing: thing, sharing: state.sharing[thing.id] ?? .off, note: note(for: thing, busy: busy),
@@ -584,21 +610,21 @@ private struct ThingRow: View {
     let allow: (Permission) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
+        VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
-                lead.frame(width: 30)
+                lead.frame(width: Theme.Metric.leadColumn)
                 VStack(alignment: .leading, spacing: 1) {
-                    Text(thing.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+                    Text(thing.title).font(.system(size: Theme.Size.row)).lineLimit(1).truncationMode(.tail)
                     if let note { noteView(note) }
                 }
                 Spacer(minLength: 6)
                 SharingControl(id: thing.id, title: thing.title, selection: sharing, choose: choose)
             }
-            .frame(minHeight: note == nil ? 28 : 40)
+            .frame(height: note == nil ? Theme.Metric.rowHeight : Theme.Metric.rowHeightWithNote)
             if sharing != .off, isMissing, let permission = thing.power.permission {
                 MissingPermission(words: "macOS has not allowed \(permission.title) yet") { allow(permission) }
                     .padding(.leading, 38)
-                    .padding(.bottom, 4)
+                    .padding(.bottom, 6)
             }
         }
         .padding(.horizontal, 6)
@@ -611,8 +637,8 @@ private struct ThingRow: View {
             Thumbnail(thing: thing, picture: picture, cameraLayer: cameraLayer, bigPicture: bigPicture)
         } else {
             Image(systemName: thing.symbol)
-                .font(.system(size: 14))
-                .foregroundStyle(sharing == .off ? Color.secondary : Palette.accentText)
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(sharing == .off ? Theme.t2 : Theme.accentText)
         }
     }
 
@@ -621,15 +647,15 @@ private struct ThingRow: View {
         switch note {
         case .busy(let word):
             HStack(spacing: 5) {
-                Circle().fill(Color.red).frame(width: 6, height: 6)
+                Circle().fill(Theme.live).frame(width: 6, height: 6)
                 Text(word)
             }
-            .font(.system(size: 11))
-            .foregroundStyle(Palette.redText)
+            .font(.system(size: 11, weight: .medium))
+            .foregroundStyle(Theme.liveText)
         case .approved(let words):
-            Text(words).font(.system(size: 11)).foregroundStyle(Palette.accentText)
+            Text(words).font(.system(size: 11)).foregroundStyle(Theme.accentText)
         case .used(let words):
-            Text(words).font(.system(size: 11)).foregroundStyle(.secondary)
+            Text(words).font(.system(size: 11)).foregroundStyle(Theme.t3)
         }
     }
 }
@@ -647,9 +673,9 @@ private struct Thumbnail: View {
             isZoomed = true
         } label: {
             content
-                .frame(width: 30, height: 19)
-                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).strokeBorder(Color.primary.opacity(0.14)))
+                .frame(width: Theme.Metric.thumbnail.width, height: Theme.Metric.thumbnail.height)
+                .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.thumbnail, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.thumbnail, style: .continuous).strokeBorder(Theme.edge))
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -667,8 +693,8 @@ private struct Thumbnail: View {
             LayerView(layer: cameraLayer(String(thing.id.dropFirst("camera.".count))))
         } else {
             ZStack {
-                Palette.fill
-                Image(systemName: thing.power == .camera ? "person" : thing.symbol).font(.system(size: 9)).foregroundStyle(.secondary)
+                Theme.block
+                Image(systemName: thing.power == .camera ? "person" : thing.symbol).font(.system(size: 9)).foregroundStyle(Theme.t2)
             }
         }
     }
@@ -687,7 +713,7 @@ private struct BigPicture: View {
                 Image(decorative: picture, scale: 2).resizable().aspectRatio(contentMode: .fit)
             } else {
                 Text(isDone ? "No picture: macOS or the device gave none." : "Making the picture…")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                    .font(.system(size: 12)).foregroundStyle(Theme.t2)
             }
         }
         .frame(width: 320, height: 200)
@@ -758,8 +784,8 @@ extension Panel {
         ActivityLog.fillSample(model.acts, running: phase == "busy" || phase == "activity", older: phase == "activity" ? 12 : 0)
         sample.fix(model)
         let panel = Panel(state: state, model: model, changed: {}, allow: { _ in }, copyPrompt: {})
-        // The panel has no background of its own (a popover gives it one); the file needs one.
-        return Rendering.png(of: panel.background(Color(nsColor: .windowBackgroundColor)), dark: dark, to: file)
+        // the panel draws its own ground, edge and corners, as in its window
+        return Rendering.png(of: panel, dark: dark, to: file)
     }
 
     /// The drawings' lend (`Rendering.minds`), in a phase made from the CLI's own states: a copy

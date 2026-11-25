@@ -107,8 +107,8 @@ private struct SettingsGroup<Content: View>: View {
             }
             VStack(alignment: .leading, spacing: 0) { content }
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Palette.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Palette.cardEdge))
+                .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.cardEdge))
         }
     }
 }
@@ -176,7 +176,7 @@ private struct WarningRow: View {
                     Button(button, action: action).buttonStyle(FillButtonStyle()).foregroundStyle(Color.primary)
                 }
             }
-            .foregroundStyle(Palette.waitText)
+            .foregroundStyle(Theme.warnText)
             .padding(.horizontal, 12)
             .padding(.vertical, 10)
         }
@@ -203,8 +203,8 @@ private struct Segments: View {
                         .foregroundStyle(isSelected ? Color.primary : Color.secondary)
                         .padding(.horizontal, 12)
                         .frame(height: 22)
-                        .background(isSelected ? Palette.knob : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-                        .shadow(color: isSelected ? Palette.knobShadow : .clear, radius: 1, y: 0.5)
+                        .background(isSelected ? Theme.knob : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .shadow(color: isSelected ? Theme.knobShadow : .clear, radius: 1, y: 0.5)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -213,7 +213,7 @@ private struct Segments: View {
             }
         }
         .padding(2)
-        .background(Palette.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(Theme.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityValue(selection)
@@ -263,7 +263,7 @@ private struct ExpressionField: View {
             .onSubmit(commit)
             .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(isEditable ? SettingsLook.field : Palette.fill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(isEditable ? SettingsLook.field : Theme.btn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 7, style: .continuous)
                     .strokeBorder(failed ? Color.red.opacity(0.8) : SettingsLook.fieldEdge, lineWidth: failed ? 1.5 : 1))
@@ -523,7 +523,7 @@ private struct KeyRecorder: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(isRecording ? Color.accentColor : SettingsLook.fieldEdge, lineWidth: isRecording ? 1.5 : 1))
             if let words = hint ?? problem {
-                Text(words).font(.system(size: 11)).foregroundStyle(Palette.waitText).fixedSize(horizontal: false, vertical: true)
+                Text(words).font(.system(size: 11)).foregroundStyle(Theme.warnText).fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.trailing)
                     .frame(width: 220, alignment: .trailing)
             }
@@ -754,7 +754,7 @@ private struct MindPage: View {
                     Circle().fill(Color.green).frame(width: 6, height: 6)
                     Text("Lent now").font(.system(size: 11, weight: .semibold))
                 }
-                .foregroundStyle(Palette.liveText)
+                .foregroundStyle(Theme.okText)
                 .padding(.horizontal, 9)
                 .frame(height: 22)
                 .background(Capsule().strokeBorder(Color.green, lineWidth: 1))
@@ -800,10 +800,10 @@ private struct MindPage: View {
                 .help("The app knows a key's state only for the mind this Mac is lent to.")
         } else {
             switch state.lend.state.phase {
-            case .live: DotLine(words: "Allowed by a member", color: .green, text: Palette.liveText)
+            case .live: DotLine(words: "Allowed by a member", color: .green, text: Theme.okText)
             case .notAllowed:
                 HStack(spacing: 8) {
-                    DotLine(words: "Not allowed yet", color: .orange, text: Palette.waitText)
+                    DotLine(words: "Not allowed yet", color: .orange, text: Theme.warnText)
                     if let link = state.lend.link { Button("Open the Link") { actions.lend.open(link) }.buttonStyle(FillButtonStyle()) }
                 }
             case .connecting: Text("Checked when it connects").font(.system(size: 12)).foregroundStyle(.secondary)
@@ -818,16 +818,16 @@ private struct MindPage: View {
             Text("Reading…").font(.system(size: 12)).foregroundStyle(.secondary)
         case .until(let end):
             if let now = state.fixedNow {
-                DotLine(words: "Signed in · \(SignIn.left(until: end, now: now))", color: .green, text: Palette.liveText)
+                DotLine(words: "Signed in · \(SignIn.left(until: end, now: now))", color: .green, text: Theme.okText)
             } else {
                 TimelineView(.everyMinute) { context in
-                    DotLine(words: "Signed in · \(SignIn.left(until: end, now: context.date))", color: .green, text: Palette.liveText)
+                    DotLine(words: "Signed in · \(SignIn.left(until: end, now: context.date))", color: .green, text: Theme.okText)
                 }
             }
         case .renews:
-            DotLine(words: "Signed in · renews at its next use", color: .green, text: Palette.liveText)
+            DotLine(words: "Signed in · renews at its next use", color: .green, text: Theme.okText)
         case .notSignedIn:
-            DotLine(words: "Not signed in", color: .orange, text: Palette.waitText)
+            DotLine(words: "Not signed in", color: .orange, text: Theme.warnText)
                 .help("Run iterate login \(SignIn.address(of: mind)) in a terminal.")
         }
     }
@@ -871,8 +871,8 @@ private struct MindPage: View {
         let status = status
         if let failure = status.failure, !status.isFetching {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Palette.redText)
-                (Text(failure).foregroundStyle(Palette.redText) + Text(" ") + Text(kept(status)))
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Theme.liveText)
+                (Text(failure).foregroundStyle(Theme.liveText) + Text(" ") + Text(kept(status)))
                     .font(.system(size: 12))
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -915,7 +915,7 @@ private struct MindPage: View {
                         .lineLimit(1)
                         .padding(.horizontal, 8)
                         .frame(height: 22)
-                        .background(Palette.fill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .background(Theme.btn, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     if list.entries.count > 5 {
                         Text("and \(list.entries.count - 5) more").font(.system(size: 12)).foregroundStyle(.secondary).frame(height: 22)
@@ -949,7 +949,7 @@ private struct MindPage: View {
         if list.entries.isEmpty {
             Text("No terms · \(fetched)").font(.system(size: 12)).foregroundStyle(.secondary)
         } else {
-            DotLine(words: "\(list.entries.count) terms · \(fetched)", color: .green, text: Palette.liveText)
+            DotLine(words: "\(list.entries.count) terms · \(fetched)", color: .green, text: Theme.okText)
         }
     }
 }

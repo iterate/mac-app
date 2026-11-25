@@ -413,19 +413,19 @@ final class Dictation: SpeechClient {
 
 struct LevelBars: View {
     let level: Float
-    var color: Color = .red
+    var color: Color = Theme.live
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<5, id: \.self) { index in
-                // the middle bars are the tallest
-                let shape: CGFloat = [0.5, 0.8, 1, 0.8, 0.5][index]
-                Capsule()
+                // the middle bar is the tallest: 8, 14, 18, 12 and 7 points at the loudest
+                let shape: CGFloat = [0.33, 0.73, 1, 0.6, 0.27][index]
+                RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                     .fill(color)
-                    .frame(width: 3, height: 4 + 12 * shape * CGFloat(min(max(level, 0), 1)))
+                    .frame(width: 3, height: 3 + 15 * shape * CGFloat(min(max(level, 0), 1)))
             }
         }
-        .frame(height: 16)
+        .frame(height: 18)
         .animation(.easeOut(duration: 0.12), value: level)
     }
 }
@@ -444,45 +444,52 @@ struct DictationPill: View {
         HStack(spacing: 10) {
             switch model.phase {
             case .loading(let part):
-                if let part { ProgressView(value: part).frame(width: 44) } else { ProgressView().controlSize(.small) }
-                Text(SpeechSession.loadingLine(part))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                HStack(spacing: 12) {
+                    if let part {
+                        ProgressView(value: part).progressViewStyle(.linear).controlSize(.small).tint(Theme.t2).frame(width: 44)
+                    } else {
+                        ProgressView().controlSize(.small)
+                    }
+                    Text(SpeechSession.loadingLine(part))
+                        .foregroundStyle(Theme.t2)
+                        .lineLimit(1)
+                }
                 Spacer(minLength: 0)
             case .listening:
                 LevelBars(level: model.level)
                 if model.text.isEmpty || !model.showsWords {
-                    Text("Listening").foregroundStyle(.secondary)
+                    Text("Listening").foregroundStyle(Theme.t3)
                     Spacer(minLength: 0)
                 } else {
                     DictationWords(text: model.text)
                 }
                 if model.locked {
                     Image(systemName: "lock.fill")
-                        .font(.system(size: 12))
-                        .foregroundStyle(Color.accentColor)
+                        .font(.system(size: 11))
+                        .foregroundStyle(Theme.accentText)
                         .accessibilityLabel("Stays on")
                 }
                 DictationClock(clock: model.clock)
             case .writing:
                 ProgressView().controlSize(.small)
                 if model.text.isEmpty || !model.showsWords {
-                    Text("Writing").foregroundStyle(.secondary)
+                    Text("Writing").foregroundStyle(Theme.t3)
                     Spacer(minLength: 0)
                 } else {
                     DictationWords(text: model.text)
                 }
             case .failed(let reason):
-                Circle().fill(Color.red).frame(width: 9, height: 9)
+                Circle().fill(Theme.live).frame(width: 9, height: 9)
                 Text(reason).lineLimit(1)
                 Spacer(minLength: 0)
             }
         }
-        .font(.system(size: 13))
+        .font(.system(size: Theme.Size.pillText))
+        .foregroundStyle(Theme.t1)
         .padding(.horizontal, 14)
         .frame(width: Self.width, height: Self.height)
-        .background(.regularMaterial, in: Self.shape)
-        .overlay(Self.shape.strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+        .background(Theme.surface, in: Self.shape)
+        .overlay(Self.shape.strokeBorder(Theme.edge, lineWidth: 1))
     }
 }
 
@@ -498,8 +505,7 @@ private struct DictationWords: View, Equatable {
             .overlay(alignment: .trailing) {
                 // the end of the text is plenty for one row
                 Text(text.count <= 200 ? text : String(text.suffix(200)))
-                    // the label's colour, not the material's vibrant one, which the fade's mask would lose
-                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .foregroundStyle(Theme.t1)
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
             }
@@ -534,7 +540,7 @@ private struct DictationClock: View, Equatable {
         let whole = max(0, Int(seconds))
         return Text(String(format: "%d:%02d", whole / 60, whole % 60))
             .font(.system(size: 12).monospacedDigit())
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.t3)
     }
 }
 
@@ -554,9 +560,9 @@ extension Dictation {
             model.text = text
             model.locked = locked
             model.clock = phase == .listening ? .fixed(seconds) : .none
-            model.level = 0.7
+            model.level = 1
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                let view = DictationPill(model: model).padding(24).background(Color(nsColor: .windowBackgroundColor))
+                let view = DictationPill(model: model).padding(24)
                 drawn = drawn && Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("dictation-\(name)-\(tone).png"))
             }
         }
