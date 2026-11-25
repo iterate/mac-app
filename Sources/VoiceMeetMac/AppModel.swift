@@ -39,11 +39,15 @@ final class AppModel {
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
     private var isListening = false
-    private var session: MindSession?
+    private(set) var session: MindSession?
     /// The session's bridge, held while the session lasts.
     private var bridge: MindBridge?
     /// False while the mind refuses this Mac's key: the lend's calls are refused.
-    private var isAuthorized = true
+    private(set) var isAuthorized = true
+    /// The lend's phase and its line, for this Mac's page (`PagePowers`): the app's delegate holds the lend.
+    var lendState: () -> [String: Any] = { [:] }
+    /// The live views of this Mac's page that run now (`PagePowers.swift`).
+    let pageStreams = PageStreams()
 
     /// True while any camera runs, for the mark in the menu bar.
     var isAnyCameraRunning: Bool { cameras.values.contains { $0.state.isRunning } }
@@ -118,6 +122,7 @@ final class AppModel {
 
     func shutDown() {
         endpoint.stop()
+        endPageStreams(why: "the app quits")
         live.stop()
         acts.stop()
         deviceEvents.stop()
@@ -260,18 +265,21 @@ final class AppModel {
             return try await shown(parameters, did: "Showed a banner") { try await self.banners.show(parameters) }
         case "call.ring":
             return try await shown(parameters, did: "Rang a call") { try await self.banners.ring(parameters) }
+        case "pages.state", "pages.live.start", "pages.live.frame", "pages.live.stop":
+            return try await pages(method, parameters)
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop."
             )
         }
     }
 
     /// Refuses a thing that is off or not permitted, asks the person first when its choice is
     /// "Ask", then counts the use, so that the menu bar and the panel show it.
-    private func use(_ thing: Shareable, what: String, asks detail: String? = nil) async throws {
+    /// `permitted`: in place of macOS's permission, for a source that needs none (the frame fixture).
+    func use(_ thing: Shareable, what: String, asks detail: String? = nil, permitted: Bool? = nil) async throws {
         let round = approval.round
-        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: approval.isApproved(thing) != nil) {
+        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted ?? thing.isPermitted, approved: approval.isApproved(thing) != nil) {
         case .off:
             throw EndpointRefusal("The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
         case .notPermitted:
@@ -280,7 +288,7 @@ final class AppModel {
             )
         case .ask:
             try await approval.ask(for: thing, what: what, detail: detail)
-            try stillAllowed(thing, in: round)
+            try stillAllowed(thing, in: round, permitted: permitted)
         case .go:
             break
         }
@@ -289,11 +297,11 @@ final class AppModel {
 
     /// After a question, which takes time: the use goes on only in the round it was asked in, while
     /// the mind allows this Mac's key, and while the thing is not turned off nor lost its permission.
-    private func stillAllowed(_ thing: Shareable, in round: ApprovalGrants.Round) throws {
+    func stillAllowed(_ thing: Shareable, in round: ApprovalGrants.Round, permitted: Bool? = nil) throws {
         guard approval.holds(round), isAuthorized else {
             throw EndpointRefusal("The Mac is no longer lent to this mind, or the mind refused its key, while the owner was asked to \(thing.does).")
         }
-        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: true) {
+        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted ?? thing.isPermitted, approved: true) {
         case .off: throw EndpointRefusal("The Mac's owner turned \(thing.title) off while they were asked. A mind cannot \(thing.does).")
         case .notPermitted: throw EndpointRefusal("macOS took back \(thing.power.permission?.title ?? "a permission") while the owner was asked.")
         case .ask, .go: break
@@ -357,7 +365,7 @@ final class AppModel {
     // MARK: - The record's switches
 
     /// The record's switches and its state, for `state()` and `record.state()`. Reading it is no use.
-    private func recordState() -> [String: Any] {
+    func recordState() -> [String: Any] {
         var answer = record.state()
         answer["windowText"] = deviceWindow.readsWindowText
         return answer
@@ -454,7 +462,7 @@ final class AppModel {
     }
 
     /// Words on one line, cut: for a line of the activity list.
-    private static func oneLine(_ words: String, limit: Int = 160) -> String {
+    static func oneLine(_ words: String, limit: Int = 160) -> String {
         let line = words.split(whereSeparator: \.isNewline).joined(separator: " ")
         return line.count > limit ? line.prefix(limit) + "…" : line
     }

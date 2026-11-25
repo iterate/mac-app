@@ -72,6 +72,8 @@ const PARTS = [
   "Tests",
   "Support",
   "bridge",
+  // the files of this Mac's pages, which the bridge serves (`http`)
+  "pages",
   "run-on-mac.sh",
   // the app runs this file's `add` from its installed copy
   "cli.mjs",

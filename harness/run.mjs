@@ -631,6 +631,58 @@ const scenarios = {
    * approved and denied through the socket, then through the panel's buttons (`ui.press`), and
    * "Approve for N Minutes" lets the next use run with no question.
    */
+  /**
+   * This Mac's pages (bridge/pages.mjs on the endpoint): Pages at Off refuses `/state.json`; at
+   * Shared, with the display Shared and a frame fixture (no screen capture), `/live.mjpeg` gives 3
+   * JPEG parts between multipart boundaries, and its cancel ends the view in the app.
+   */
+  async "pages-live"({ app, home }) {
+    const { pages, BOUNDARY } = await import("../bridge/pages.mjs");
+    const env = { ITERATE_MAC_FRAME_FIXTURE: "synthetic" };
+    let run = await start(app, home, env);
+    let screens;
+    try {
+      const off = await pages({ ask: run.endpoint }).http({ path: "/state.json" });
+      if (off.status !== 403 || !/off/.test(off.body)) throw new Error(`Pages at Off answered ${off.status} ${off.body}`);
+      screens = (await run.endpoint("state")).things.filter((t) => t.kind === "screen").map((t) => t.thing);
+    } finally {
+      await run.quit();
+    }
+    if (!screens.length) throw new Error("this Mac has no display");
+    for (const thing of ["pages", ...screens]) execFileSync("defaults", ["write", join(home, "defaults"), `sharing.${thing}`, "shared"]);
+    run = await start(app, home, env);
+    try {
+      const { http } = pages({ ask: run.endpoint });
+      const answer = await http({ method: "GET", path: "/live.mjpeg", query: {}, headers: {} });
+      if (answer.status !== 200) throw new Error(`/live.mjpeg answered ${answer.status} ${answer.body}`);
+      if (answer.headers["content-type"] !== `multipart/x-mixed-replace; boundary=${BOUNDARY}`) throw new Error(`its type is ${answer.headers["content-type"]}`);
+      const reader = answer.body.getReader();
+      let bytes = Buffer.alloc(0);
+      const parts = [];
+      while (parts.length < 3) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error(`the stream ended after ${parts.length} parts`);
+        bytes = Buffer.concat([bytes, value]);
+        // one part: the boundary, its head, the JPEG of Content-Length bytes, CRLF
+        const head = new RegExp(`^--${BOUNDARY}\r\nContent-Type: image/jpeg\r\nContent-Length: (\\d+)\r\n\r\n`).exec(bytes.toString("latin1"));
+        if (!head) throw new Error(`no boundary at the start of part ${parts.length + 1}: ${JSON.stringify(bytes.subarray(0, 60).toString("latin1"))}`);
+        const end = head[0].length + Number(head[1]);
+        if (bytes.length < end + 2) continue;
+        const jpeg = bytes.subarray(head[0].length, end);
+        if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8 || jpeg.at(-2) !== 0xff || jpeg.at(-1) !== 0xd9) throw new Error(`part ${parts.length + 1} is no JPEG`);
+        if (bytes.subarray(end, end + 2).toString("latin1") !== "\r\n") throw new Error(`part ${parts.length + 1} has no CRLF before the next boundary`);
+        parts.push(jpeg.length);
+        bytes = bytes.subarray(end + 2);
+      }
+      if ((await run.endpoint("pages.state")).live.pageViews !== 1) throw new Error("the app does not count the view");
+      await reader.cancel();
+      await until("the view's end in the app", 5, async () => (await run.endpoint("pages.state")).live.pageViews === 0);
+      const row = (await run.endpoint("pages.state")).acts.find((act) => /live in a page/.test(act.title));
+      if (!row || row.running) throw new Error(`the view's act is ${JSON.stringify(row)}`);
+    } finally {
+      await run.quit();
+    }
+  },
   async approval({ app, home }) {
     // a mind session: an approval for N minutes holds in a session only
     withMind(home);
