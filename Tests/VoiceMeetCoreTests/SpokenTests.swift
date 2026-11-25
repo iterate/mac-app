@@ -112,35 +112,6 @@ final class SpokenTests: XCTestCase {
     }
 }
 
-final class DictationKeyTests: XCTestCase {
-    private let start = Date(timeIntervalSince1970: 1_795_000_000)
-
-    func testHoldTalkAndLetGo() {
-        var key = DictationKey()
-        XCTAssertEqual(key.pressed(at: start), .start)
-        XCTAssertEqual(key.released(at: start.addingTimeInterval(2)), .finish)
-        XCTAssertFalse(key.isOn)
-    }
-
-    func testATapGoesOnUntilTheNextPress() {
-        var key = DictationKey()
-        XCTAssertEqual(key.pressed(at: start), .start)
-        XCTAssertEqual(key.released(at: start.addingTimeInterval(0.1)), .nothing)
-        XCTAssertTrue(key.isOn)
-        XCTAssertEqual(key.pressed(at: start.addingTimeInterval(20)), .finish)
-        XCTAssertEqual(key.released(at: start.addingTimeInterval(20.1)), .nothing)
-        XCTAssertFalse(key.isOn)
-    }
-
-    func testADictationThatEndedByItselfTakesNoRelease() {
-        var key = DictationKey()
-        _ = key.pressed(at: start)
-        key.ended()
-        XCTAssertEqual(key.released(at: start.addingTimeInterval(3)), .nothing)
-        XCTAssertEqual(key.pressed(at: start.addingTimeInterval(4)), .start)
-    }
-}
-
 final class SpokenTextTests: XCTestCase {
     func testSpokenWordsComeAfterWhatWasTyped() {
         var text = SpokenText(base: "For Misha:")

@@ -92,49 +92,6 @@ public enum Spoken {
     }
 }
 
-/// THE DICTATION KEY: hold it and talk, and the text is written when the key comes up. A short
-/// press (a tap) starts a dictation that goes on with no key held: the next press ends it.
-public struct DictationKey: Equatable, Sendable {
-    public enum Act: Equatable, Sendable {
-        case nothing
-        case start
-        case finish
-    }
-
-    /// A press shorter than this is a tap.
-    public static let tap: TimeInterval = 0.35
-
-    public private(set) var isOn = false
-    private var downAt: Date?
-
-    public init() {}
-
-    public mutating func pressed(at: Date) -> Act {
-        if isOn {
-            isOn = false
-            downAt = nil
-            return .finish
-        }
-        isOn = true
-        downAt = at
-        return .start
-    }
-
-    public mutating func released(at: Date) -> Act {
-        guard isOn, let downAt else { return .nothing }
-        self.downAt = nil
-        if at.timeIntervalSince(downAt) < Self.tap { return .nothing }
-        isOn = false
-        return .finish
-    }
-
-    /// The dictation ended for another reason (it failed, or the app ended it).
-    public mutating func ended() {
-        isOn = false
-        downAt = nil
-    }
-}
-
 /// A text that the person types and speaks at once (the input bar). What they typed is theirs; the
 /// words of the listening that is going come after it, and change while the model hears more.
 /// When the person changes the text by hand, everything in it at that moment is theirs, and only

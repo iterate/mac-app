@@ -7,7 +7,8 @@ import AppKit
 /// of these calls.
 ///
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
-/// - `dictation.start`, `dictation.stop`: ⌥⇧D down and up; `dictation.fn {down}`: fn down or up.
+/// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
+///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
 /// - `approval.answer {allow, keep?}`: answers the Ask question that waits, in place of the alert
 ///   and Touch ID (`Approval.answersByControl`); `keep` approves for 30 minutes, as "Approve for 30
 ///   Minutes" does.
@@ -26,6 +27,7 @@ final class ControlSocket {
     var dictationPressed: () -> Void = {}
     var dictationReleased: () -> Void = {}
     var dictationFn: (Bool) -> Void = { _ in }
+    var dictationEscape: () -> Void = {}
 
     private let endpoint: LocalEndpoint
     private let approval: Approval
@@ -64,6 +66,8 @@ final class ControlSocket {
         case "dictation.fn":
             guard let down = parameters["down"] as? Bool else { throw EndpointRefusal("dictation.fn needs down: true or false.") }
             dictationFn(down)
+        case "dictation.esc":
+            dictationEscape()
         case "approval.answer":
             guard let allow = parameters["allow"] as? Bool else { throw EndpointRefusal("approval.answer needs allow: true or false.") }
             guard approval.answer(allow: allow, keep: parameters["keep"] as? Bool ?? false) else { throw EndpointRefusal("No question waits for an answer.") }
@@ -103,7 +107,7 @@ final class ControlSocket {
             }
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, approval.answer.")
+                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
         }
         return [:]
     }

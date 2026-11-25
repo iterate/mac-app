@@ -15,41 +15,38 @@ final class DictationPillModel: ObservableObject {
         case failed(String)
     }
 
-    /// How the dictation goes on: with the key held, or with no key (and what ends it).
-    enum Mode: Equatable {
-        case holding(key: String)
-        case handsFree(stop: String)
-
-        var line: String {
-            switch self {
-            case .holding(let key): return "let go of \(key) to write"
-            case .handsFree(let stop): return "hands-free · \(stop) to stop · esc cancels"
-            }
-        }
+    /// The pill's clock: none while it is hidden, so that nothing ticks then.
+    enum Clock: Equatable {
+        case none
+        case since(Date)
+        /// A drawing's fixed time.
+        case fixed(TimeInterval)
     }
 
     @Published var phase: Phase = .listening
-    @Published var mode: Mode?
+    /// It stays on with no key held (double-tap fn, or a tap of ⌥⇧D).
+    @Published var locked = false
+    @Published var clock = Clock.none
     @Published var level: Float = 0
     @Published var text = ""
 }
 
 /// DICTATION: talk in any app, and what you said is written where the cursor is (README,
-/// "Dictation"). Two keys start it:
+/// "Dictation"). Hold fn (🌐) and talk; let go, and the text is written. Double-tap fn to keep it
+/// on with no key held: the next press of fn writes the text. Esc throws it away. ⌥⇧D works too:
+/// hold it and talk, or tap it to keep it on until the next press. One `DictationKey` decides for
+/// both keys; this class holds its timer.
 ///
-/// - fn (🌐), as Wispr Flow has it (`FnKey`): hold it to talk and let go to write; tap it twice to
-///   talk hands-free until the next tap. Escape cancels.
-/// - ⌥⇧D, as Hex has it (`DictationKey`): hold it and talk; a short press keeps it on until the
-///   next press.
+/// fn is heard by one event tap (`FnTap`), which macOS gives only to an app with Accessibility.
+/// Without it, ⌥⇧D (a Carbon hot key, no permission) still works, and its first use opens the
+/// permission's guide.
 ///
 /// The listening is the app's one foreground listening (`SpeechSession`), on this Mac: no sound and
 /// no text leaves it. The word list of the mind this Mac is lent to makes the mind's names and
 /// terms come out right. The text goes in through the clipboard and ⌘V, which needs the
-/// Accessibility permission; without it the text stays on the clipboard for the person's own ⌘V.
-/// fn is read with a monitor of the keyboard's modifier keys, which macOS gives only to an app
-/// with Accessibility.
+/// Accessibility permission too; without it the text stays on the clipboard for the person's own ⌘V.
 ///
-/// A copy with a home of its own (`AppEnvironment`) watches no key and opens no microphone unless
+/// A copy with a home of its own (`AppEnvironment`) taps no key and opens no microphone unless
 /// an audio fixture is set; it writes nothing: the text is kept for the control socket alone.
 @MainActor
 final class Dictation: SpeechClient {
@@ -63,16 +60,20 @@ final class Dictation: SpeechClient {
     private(set) var lastFailed = false
     /// The last dictation's text, in memory only: for the control socket, never for the log.
     private(set) var lastText: String?
+    /// How many dictations ended with a line, for the control socket.
+    private var ends = 0
     var isRunning: Bool { session.isListening(for: self) }
+    /// Whether fn is heard in every app.
+    var hearsFn: Bool { tap.isRunning }
 
     private let session: SpeechSession
     private let log = AppLog("dictation")
     private var key = DictationKey()
-    private var fn = FnKey()
-    private var fnMonitors: [Any] = []
-    /// Whether macOS gave Accessibility when the fn monitors were made: they hear nothing without it.
-    private var fnIsTrusted = false
-    private var trustWatch: Timer?
+    /// Ends the window of a single tap of fn (`DictationKey.Act.wait`).
+    private var window: DispatchWorkItem?
+    private lazy var tap = FnTap { [weak self] event in self?.heard(event) }
+    private var trustWatch: NSObjectProtocol?
+    private var guideOpened = false
     private let pill = DictationPillModel()
     private var panel: NSPanel?
     private var hide: DispatchWorkItem?
@@ -83,95 +84,114 @@ final class Dictation: SpeechClient {
 
     // MARK: - The keys
 
-    /// ⌥⇧D down.
-    func pressed() {
-        switch key.pressed(at: Date()) {
-        case .start: start(.holding(key: "⌥⇧D"))
-        case .finish: finish()
-        case .nothing: break
+    /// ⌥⇧D down, or the panel's Dictate button.
+    func shortcutPressed() {
+        if !guideOpened, !tap.isRunning, !AppEnvironment.current.hasOwnHome, !AXIsProcessTrusted() {
+            // the first use with no fn: the permission that fn and writing the text need
+            guideOpened = true
+            allow(.accessibility)
         }
+        act(key.down(.shortcut, at: Date()))
     }
 
     /// ⌥⇧D up: a short press keeps the dictation on.
-    func released() {
-        if key.released(at: Date()) == .finish { return finish() }
-        if key.isOn, isRunning { pill.mode = .handsFree(stop: "press ⌥⇧D") }
+    func shortcutReleased() {
+        act(key.up(at: Date()))
     }
 
-    /// fn went down or up (the monitor, or `dictation.fn` on the control socket).
-    func fnChanged(down: Bool) {
-        let now = Date()
-        act(down ? fn.fnDown(at: now) : fn.fnUp(at: now))
-        // a press longer than `FnKey.hold` is a hold: one look after it
-        if down {
-            DispatchQueue.main.asyncAfter(deadline: .now() + FnKey.hold + 0.02) { [weak self] in
-                MainActor.assumeIsolated { guard let self else { return }; self.act(self.fn.tick(at: Date())) }
-            }
+    /// fn went down or up (the tap, or `dictation.fn` on the control socket).
+    func fnChanged(down: Bool, at time: Date = Date()) {
+        act(down ? key.down(.fn, at: time) : key.up(at: time))
+    }
+
+    /// `dictation.start` on the control socket: fn down, as a hold.
+    func holdStarted() {
+        fnChanged(down: true)
+    }
+
+    /// `dictation.stop`: fn up, at least `DictationKey.hold` after its press.
+    func holdEnded() {
+        var time = Date()
+        if case .pressed(let since) = key.state { time = max(time, since.addingTimeInterval(DictationKey.hold)) }
+        fnChanged(down: false, at: time)
+    }
+
+    /// Esc (the tap, or `dictation.esc` on the control socket).
+    func escape() {
+        act(key.escape())
+    }
+
+    private func heard(_ event: FnTap.Event) {
+        switch event {
+        case .fn(let down, let time): fnChanged(down: down, at: time)
+        case .escape: escape()
+        case .otherKey: act(key.otherKey())
         }
     }
 
-    private func act(_ act: FnKey.Act) {
+    private func act(_ act: DictationKey.Act) {
         switch act {
         case .nothing: break
-        case .startHolding: start(.holding(key: "fn"))
-        case .startHandsFree: start(.handsFree(stop: "tap fn"))
+        case .start: start()
+        case .wait(let until): waitForSecondTap(until: until)
+        case .lock:
+            pill.locked = true
+            log.info("locked: on until the next press")
+            onChange()
         case .finish: finish()
-        case .cancel: cancel()
+        case .cancel(let quietly): cancel(quietly: quietly)
         }
+        keyChanged()
     }
 
-    /// Watches fn in every app. Made again once macOS gives Accessibility.
-    func watchFn() {
-        guard !AppEnvironment.current.hasOwnHome else { return log.info("fn: not watched in a home of its own (dictation.fn on the control socket)") }
-        for monitor in fnMonitors { NSEvent.removeMonitor(monitor) }
-        let handle: (NSEvent) -> Void = { [weak self] event in MainActor.assumeIsolated { self?.keyboard(event) } }
-        fnMonitors = [
-            NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged, .keyDown], handler: handle),
-            NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown]) { event in
-                handle(event)
-                return event
-            },
-        ].compactMap { $0 }
-        fnIsTrusted = AXIsProcessTrusted()
-        log.info(fnIsTrusted ? "fn: held, dictates; tapped twice, dictates hands-free" : "fn: needs Accessibility to be heard in other apps")
-        trustWatch?.invalidate()
-        trustWatch = nil
-        guard !fnIsTrusted else { return }
-        trustWatch = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
+    private func waitForSecondTap(until: Date) {
+        window?.cancel()
+        let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, AXIsProcessTrusted() else { return }
-                self.watchFn()
-                self.onChange()
+                guard let self else { return }
+                self.act(self.key.windowEnded(at: max(Date(), until)))
             }
         }
+        window = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + max(0, until.timeIntervalSinceNow), execute: work)
     }
 
-    private func keyboard(_ event: NSEvent) {
-        if event.type == .flagsChanged {
-            // fn is 63; some keyboards' 🌐 key says 179
-            if event.keyCode == UInt16(kVK_Function) || event.keyCode == 179 {
-                fnChanged(down: event.modifierFlags.contains(.function))
-            } else {
-                act(fn.otherKey())
-            }
-        } else if event.keyCode == UInt16(kVK_Escape) {
-            escape()
-        } else {
-            act(fn.otherKey())
+    /// The tap hears only what the key's state needs.
+    private func keyChanged() {
+        if case .tapped = key.state {} else {
+            window?.cancel()
+            window = nil
         }
+        tap.want(FnTap.Interest(otherKeys: key.wantsOtherKeys, escape: key.state != .idle, swallowsEscape: key.isLocked))
     }
 
-    /// Escape ends a hands-free dictation and writes nothing.
-    private func escape() {
-        if fn.escape() == .cancel { return cancel() }
-        if key.isOn, isRunning, case .handsFree = pill.mode { cancel() }
+    /// Hears fn in every app: one event tap, made once macOS gives Accessibility.
+    func watchKeys() {
+        guard !AppEnvironment.current.hasOwnHome else { return log.info("fn: not tapped in a home of its own (dictation.fn on the control socket)") }
+        guard !tap.isRunning else { return }
+        if tap.start() {
+            log.info("fn: held, dictates; tapped twice, stays on")
+            if let trustWatch { DistributedNotificationCenter.default().removeObserver(trustWatch) }
+            trustWatch = nil
+            onChange()
+            return
+        }
+        log.info("fn: needs Accessibility to be heard; ⌥⇧D works")
+        guard trustWatch == nil else { return }
+        // macOS posts this when the list of apps with Accessibility changes; the answer of
+        // `AXIsProcessTrusted` follows a moment later
+        trustWatch = DistributedNotificationCenter.default().addObserver(
+            forName: NSNotification.Name("com.apple.accessibility.api"), object: nil, queue: .main
+        ) { [weak self] _ in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { MainActor.assumeIsolated { self?.watchKeys() } }
+        }
     }
 
     /// The lines that the panel shows under the speech model about fn: what keeps it from working.
     var fnLines: [String] {
         guard !AppEnvironment.current.isRendering, !AppEnvironment.current.hasOwnHome else { return [] }
         var lines: [String] = []
-        if !AXIsProcessTrusted() { lines.append("fn dictation needs Accessibility") }
+        if !tap.isRunning { lines.append("fn dictation needs Accessibility") }
         // 0 is "Do Nothing"; with no value macOS does its default (the emoji picker or its own dictation)
         if UserDefaults(suiteName: "com.apple.HIToolbox")?.object(forKey: "AppleFnUsageType") as? Int != 0 {
             lines.append("macOS acts on 🌐 too: set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing”")
@@ -181,14 +201,15 @@ final class Dictation: SpeechClient {
 
     // MARK: - The listening
 
-    private func start(_ mode: DictationPillModel.Mode) {
+    private func start() {
         pill.text = ""
         pill.level = 0
-        pill.mode = mode
+        pill.locked = false
         switch session.start(self, words: words()) {
         case nil:
+            pill.clock = .since(Date())
             showPill()
-            log.info("start: \(mode.line)")
+            log.info("start: \(key.press == .fn ? "fn" : "⌥⇧D")")
         case .ownHome:
             ended()
             end("Not started at \(Lend.clock(Date())): a home of its own opens no microphone", failed: nil)
@@ -202,10 +223,10 @@ final class Dictation: SpeechClient {
         onChange()
     }
 
-    /// The keys know that no dictation runs.
+    /// The key knows that no dictation runs.
     private func ended() {
         key.ended()
-        fn.ended()
+        keyChanged()
     }
 
     func speech(_ event: SpeechSession.Event) {
@@ -235,11 +256,15 @@ final class Dictation: SpeechClient {
         onChange()
     }
 
-    private func cancel() {
+    /// Throws the sound away. `quietly`: no line in the panel (fn was a modifier, or one tap alone).
+    private func cancel(quietly: Bool) {
         guard isRunning else { return ended() }
         session.cancel(self)
         ended()
-        end("Cancelled at \(Lend.clock(Date()))", failed: nil)
+        guard quietly else { return end("Cancelled at \(Lend.clock(Date()))", failed: nil) }
+        log.info("cancelled with no sign")
+        hidePill(after: 0)
+        onChange()
     }
 
     /// The text goes where the cursor is: on the clipboard, ⌘V, and the clipboard as it was.
@@ -287,6 +312,7 @@ final class Dictation: SpeechClient {
         // the log holds counts, never the words
         log.info(line)
         lastLine = line
+        ends += 1
         lastFailed = failed != nil
         if let failed {
             pill.phase = .failed(failed)
@@ -306,13 +332,16 @@ final class Dictation: SpeechClient {
         case .writing: phase = "writing"
         case .failed(let reason): phase = "failed: \(reason)"
         }
-        var mode: Any = NSNull()
-        if isRunning, let shown = pill.mode {
-            if case .holding = shown { mode = "holding" } else { mode = "hands-free" }
+        let keyState: String
+        switch key.state {
+        case .idle: keyState = "idle"
+        case .pressed: keyState = "pressed"
+        case .tapped: keyState = "tapped"
+        case .locked: keyState = "locked"
         }
         return [
-            "running": isRunning, "pillVisible": panel?.isVisible ?? false, "phase": phase, "mode": mode, "text": pill.text,
-            "lastLine": lastLine ?? NSNull(), "lastText": lastText ?? NSNull(),
+            "running": isRunning, "key": keyState, "locked": pill.locked, "pillVisible": panel?.isVisible ?? false, "phase": phase, "text": pill.text,
+            "lastLine": lastLine ?? NSNull(), "ends": ends, "lastText": lastText ?? NSNull(),
         ]
     }
 
@@ -336,6 +365,8 @@ final class Dictation: SpeechClient {
             MainActor.assumeIsolated {
                 guard let self, !self.isRunning else { return }
                 self.panel?.orderOut(nil)
+                // nothing ticks while it is hidden
+                self.pill.clock = .none
             }
         }
         hide = work
@@ -344,7 +375,10 @@ final class Dictation: SpeechClient {
 
     private func makePanel() -> NSPanel {
         let host = NSHostingView(rootView: DictationPill(model: pill))
-        let panel = NSPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        // one size for every state: a new word lays out the pill, never the window
+        host.sizingOptions = []
+        host.frame = NSRect(origin: .zero, size: NSSize(width: DictationPill.width, height: DictationPill.height))
+        let panel = NSPanel(contentRect: host.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isOpaque = false
@@ -379,16 +413,15 @@ struct LevelBars: View {
     }
 }
 
-/// The pill at the bottom of the screen while a dictation goes: what is heard, as it is heard.
+/// The pill at the bottom of the screen while a dictation goes: one row that runs sideways, the
+/// newest words at the right, so that a long dictation shows at a glance that it is heard.
 struct DictationPill: View {
     @ObservedObject var model: DictationPillModel
 
     static let width: CGFloat = 460
-
-    /// The end of the text: the words that were said last.
-    private var tail: String {
-        model.text.count <= 120 ? model.text : "…" + model.text.suffix(120)
-    }
+    static let height: CGFloat = 38
+    /// A capsule, as a rounded rectangle of half the height: a `Capsule` drew a hairline beside its ends.
+    static let shape = RoundedRectangle(cornerRadius: height / 2, style: .circular)
 
     var body: some View {
         HStack(spacing: 10) {
@@ -397,34 +430,94 @@ struct DictationPill: View {
                 if let part { ProgressView(value: part).frame(width: 44) } else { ProgressView().controlSize(.small) }
                 Text(SpeechSession.loadingLine(part))
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
             case .listening:
                 LevelBars(level: model.level)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(model.text.isEmpty ? "Listening" : tail)
-                        .foregroundStyle(model.text.isEmpty ? .secondary : .primary)
-                        .lineLimit(2)
-                        .truncationMode(.head)
-                    if let mode = model.mode {
-                        Text(mode.line).font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
+                if model.text.isEmpty {
+                    Text("Listening").foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                } else {
+                    DictationWords(text: model.text)
                 }
+                if model.locked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.accentColor)
+                        .accessibilityLabel("Stays on")
+                }
+                DictationClock(clock: model.clock)
             case .writing:
                 ProgressView().controlSize(.small)
-                Text(model.text.isEmpty ? "Writing" : tail)
-                    .lineLimit(2)
-                    .truncationMode(.head)
+                if model.text.isEmpty {
+                    Text("Writing").foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                } else {
+                    DictationWords(text: model.text)
+                }
             case .failed(let reason):
-                Image(systemName: "exclamationmark.circle.fill").foregroundStyle(.red)
-                Text(reason).lineLimit(2)
+                Circle().fill(Color.red).frame(width: 9, height: 9)
+                Text(reason).lineLimit(1)
+                Spacer(minLength: 0)
             }
-            Spacer(minLength: 0)
         }
         .font(.system(size: 13))
         .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(width: Self.width, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+        .frame(width: Self.width, height: Self.height)
+        .background(.regularMaterial, in: Self.shape)
+        .overlay(Self.shape.strokeBorder(Color.primary.opacity(0.15), lineWidth: 1))
+    }
+}
+
+/// The words on one line, set against the right edge and clipped at the left with a fade: the
+/// newest words stay in sight. A value: SwiftUI skips it when only the level changed.
+private struct DictationWords: View, Equatable {
+    let text: String
+
+    var body: some View {
+        // the free width, whatever the text's: the text hangs out of it at the left and is clipped
+        Color.clear
+            .frame(maxWidth: .infinity, maxHeight: 22)
+            .overlay(alignment: .trailing) {
+                // the end of the text is plenty for one row
+                Text(text.count <= 200 ? text : String(text.suffix(200)))
+                    // the label's colour, not the material's vibrant one, which the fade's mask would lose
+                    .foregroundStyle(Color(nsColor: .labelColor))
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+            }
+            .clipped()
+            .mask(
+                HStack(spacing: 0) {
+                    LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 64)
+                    Color.black
+                }
+            )
+    }
+}
+
+/// The time since the start, m:ss: ticks once a second while the pill shows, and never while it is hidden.
+private struct DictationClock: View, Equatable {
+    let clock: DictationPillModel.Clock
+
+    var body: some View {
+        switch clock {
+        case .none:
+            EmptyView()
+        case .fixed(let seconds):
+            Self.text(seconds)
+        case .since(let start):
+            TimelineView(.periodic(from: start, by: 1)) { context in
+                Self.text(context.date.timeIntervalSince(start))
+            }
+        }
+    }
+
+    private static func text(_ seconds: TimeInterval) -> some View {
+        let whole = max(0, Int(seconds))
+        return Text(String(format: "%d:%02d", whole / 60, whole % 60))
+            .font(.system(size: 12).monospacedDigit())
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -432,16 +525,18 @@ extension Dictation {
     /// Draws the pill in its states, light and dark: PNG files in `folder` (`--render-input`).
     static func render(to folder: URL) -> Bool {
         var drawn = true
-        let states: [(String, DictationPillModel.Phase, String, DictationPillModel.Mode?)] = [
-            ("loading", .loading(0.42), "", nil),
-            ("listening", .listening, "Open the roadmap on Misha's computer and tell him why. The two files are what", .handsFree(stop: "tap fn")),
-            ("failed", .failed("On the clipboard: press ⌘V"), "", nil),
+        let states: [(String, DictationPillModel.Phase, String, Bool, TimeInterval)] = [
+            ("loading", .loading(0.42), "", false, 0),
+            ("listening", .listening, "Open the roadmap on Misha’s computer and tell him why. The two files are what I mean, and the second one is the newer", false, 7),
+            ("locked", .listening, "so the panel opens on the mind and the lend first, then what I do myself, and only then the switches", true, 252),
+            ("failed", .failed("On the clipboard: press ⌘V"), "", false, 0),
         ]
-        for (name, phase, text, mode) in states {
+        for (name, phase, text, locked, seconds) in states {
             let model = DictationPillModel()
             model.phase = phase
-            model.mode = mode
             model.text = text
+            model.locked = locked
+            model.clock = phase == .listening ? .fixed(seconds) : .none
             model.level = 0.7
             for (dark, tone) in [(false, "light"), (true, "dark")] {
                 let view = DictationPill(model: model).padding(24).background(Color(nsColor: .windowBackgroundColor))
