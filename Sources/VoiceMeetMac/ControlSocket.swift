@@ -29,6 +29,10 @@ import VoiceMeetCore
 /// - `perf.reset {watchMain?}`: the counters and the main queue's longest delay start again from
 ///   zero; `watchMain` starts the watch of the main queue (it wakes the app 20 times a second, so
 ///   it is off until asked, and false stops it). `ui.state`'s `perf` has the figures (`Perf`).
+/// - `perf.input {kind, count, every?}`: `count` keys (`key`), moves (`move`) or scrolls (`scroll`)
+///   of another app, one every `every` ms (100), into the path of "Keyboard and mouse"
+///   (`DeviceEvents.saw`), as the global monitor gives them: what they cost, with no key of the
+///   person and no move of the pointer.
 /// - `perf.threads`: each thread of the app, its name and its time so far (`Perf.threads`), and the
 ///   description of the main run loop (its sources and timers).
 @MainActor
@@ -42,6 +46,8 @@ final class ControlSocket {
     var dictationFn: (Bool) -> Void = { _ in }
     var dictationEscape: () -> Void = {}
     var writeSaid: () -> Void = {}
+    /// An event of another app, as the global monitor gives it (`perf.input`).
+    var feedInput: (NSEvent) -> Void = { _ in }
 
     private let endpoint: LocalEndpoint
     private let approval: Approval
@@ -124,6 +130,21 @@ final class ControlSocket {
             }
             mainWatch.reset()
             return ["figures": Perf.figures().dictionary]
+        case "perf.input":
+            guard let kind = parameters["kind"] as? String, ["key", "move", "scroll"].contains(kind), let count = parameters["count"] as? Int else {
+                throw EndpointRefusal("perf.input needs kind: key, move or scroll, and count.")
+            }
+            let every = Double(parameters["every"] as? Int ?? 100) / 1000
+            var left = count
+            let timer = Timer(timeInterval: every, repeats: true) { [weak self] timer in
+                MainActor.assumeIsolated {
+                    guard let self, left > 0, let event = Self.inputEvent(kind, n: left) else { return timer.invalidate() }
+                    left -= 1
+                    self.feedInput(event)
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            return ["seconds": every * Double(count)]
         case "perf.threads":
             // the main run loop's description names its timers, their intervals and callouts
             return [
@@ -241,6 +262,24 @@ final class ControlSocket {
     }
 
     /// The keys `ui.key` presses: their virtual key codes and characters.
+    /// An event as another app's would come: a key of the letters, a move, a scroll.
+    private static func inputEvent(_ kind: String, n: Int) -> NSEvent? {
+        let now = ProcessInfo.processInfo.systemUptime
+        switch kind {
+        case "key":
+            let letter = String(UnicodeScalar(UInt8(97 + n % 26)))
+            return NSEvent.keyEvent(
+                with: .keyDown, location: .zero, modifierFlags: [], timestamp: now, windowNumber: 0, context: nil,
+                characters: letter, charactersIgnoringModifiers: letter, isARepeat: false, keyCode: 0)
+        case "move":
+            return NSEvent.mouseEvent(
+                with: .mouseMoved, location: NSPoint(x: n % 500, y: 300), modifierFlags: [], timestamp: now, windowNumber: 0,
+                context: nil, eventNumber: n, clickCount: 0, pressure: 0)
+        default:
+            return CGEvent(scrollWheelEvent2Source: nil, units: .pixel, wheelCount: 1, wheel1: 3, wheel2: 0, wheel3: 0).flatMap(NSEvent.init(cgEvent:))
+        }
+    }
+
     private static let keyCodes: [String: (keyCode: UInt16, characters: String)] = [
         "tab": (48, "\t"), "return": (36, "\r"), "escape": (53, "\u{1b}"),
         "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "w": (13, "w"), "x": (7, "x"), "z": (6, "z"),
