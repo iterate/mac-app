@@ -92,6 +92,8 @@ npx @iterate-com/mac-app list                                      # the minds; 
 npx @iterate-com/mac-app add --mind example.org --name jane.mac    # a new key; a member allows it; then it is active
 npx @iterate-com/mac-app use example.org                           # lend to that mind; the app switches at once
 npx @iterate-com/mac-app remove example.org                        # forget it and delete its key
+npx @iterate-com/mac-app set --login                               # one saved value: --login, --no-login,
+npx @iterate-com/mac-app set --mind example.org --words-expression '…'   # a word list's expression ("" removes it)
 ```
 
 `add` offers the minds of the iterate CLI's profiles (`iterate login`). `remove` deletes the key on
@@ -133,6 +135,40 @@ while it is paused, none while it is off. `--render-icons <folder>` draws each m
 a dark bar, and `marks-light.png` and `marks-dark.png`: each colour of the mark with each dot.
 
 Needs macOS 14 or later and Node 22.18 or later.
+
+### Settings
+
+**Settings…** in the panel's footer (or ⌘, while the panel shows) opens one window, 800 points
+wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the Mac is lent to:
+
+- **General**: open at login (config.json's `login`), show each act on the screen (the same tick
+  as on the Activity page), how long an approval lasts (5, 15, 30, 60 or 120 minutes; the Ask
+  question's second button says it: "Approve for 30 Minutes"), the keys of capture and the input
+  (a click records a new one, with ⌘, ⌥ or ⌃; × removes it; a key that macOS refuses says so and
+  the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
+  a trial and a copy are updated by hand), and **Copy Prompt**.
+- **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on, the
+  orange row when macOS acts on 🌐 too, the speech model and its list, whether the pill shows the
+  words, where the text goes (where the cursor is, or on the clipboard only), and the default
+  expression of the word list (below).
+
+**Minds** has a page for each mind this Mac knows: **Lend to This Mind** (or "Lent now"), this
+Mac's name there (a new name needs a new key: the app asks, then runs the CLI's `add`), the key's
+state (known only for the mind this Mac is lent to: "Allowed by a member" while live, else "Not
+checked"), your sign-in of the iterate CLI, the mind's word list, and **Remove…**. Then **Add a
+Mind…**.
+
+Your sign-in is what the iterate CLI keeps in `~/.config/iterate/sessions.json`: the app reads the
+end of the mind's token (`expiresAt`) and whether it has a refresh token, nothing else, and asks no
+network. "Signed in · 3 h 12 min left" while the token lasts; "Signed in · renews at its next use"
+when it ended and the CLI renews it at its next connection; "Not signed in" with neither.
+
+The app writes config.json only through `cli.mjs` (`set`, `add`; `use` and `remove` as the panel
+does), and `cli.mjs` keeps every key it does not know, at the top and in each mind. The choices
+of this Mac are in the app's defaults: `approval.minutes`, `key.capture`, `key.input`,
+`dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.write`, `update.byItself`.
+`--render-settings <folder>` draws the pages (General, Dictation, a mind lent with the default
+list, a mind whose own expression fails), light and dark.
 
 ## Make your own thing
 
@@ -546,15 +582,17 @@ with a lock while it stays on and the time since the start.
   gives only to an app with Accessibility (the permission that also writes the text for you). The
   tap swallows one key: Esc while a dictation stays on, so that Esc does not reach the app in
   front. Without the permission, ⌥⇧D still works, its first use opens the permission's guide, and
-  the panel's speech row says so. macOS can act on 🌐 too (the emoji picker, or its own
-  dictation): when System Settings › Keyboard › "Press 🌐 key to" is not "Do Nothing", the panel
-  says to set it. The app changes no setting.
+  the panel's speech row and Settings › Dictation say so. macOS can act on 🌐 too (the emoji
+  picker, or its own dictation): when System Settings › Keyboard › "Press 🌐 key to" is not "Do
+  Nothing", Settings › Dictation says to set it, with **Open Keyboard Settings**. The app changes
+  no setting. Settings › Dictation can turn fn off (⌥⇧D stays) and the double tap off (a short
+  tap then does nothing).
 - **One listening at a time.** Dictation and the input bar share one microphone listening
   (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
   are written where they belonged.
 - **It runs on this Mac.** The speech model runs as Core ML through
   [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. No
-  sound and no text leaves the Mac. The panel's speech section chooses the model for dictation,
+  sound and no text leaves the Mac. Settings › Dictation (the panel's speech row opens it) chooses the model for dictation,
   the input and captures; each one shows its size and whether it is on this Mac:
 
   | Model                       | Download | License   | Note                                                     |
@@ -578,7 +616,16 @@ with a lock while it stays on and the time since the start.
   wrong forms that a transcript showed (`- Templestein: temple stein, temple steen`). The app reads
   that file as you (the job `words` of the mind's process, `bridge/words.mjs`, the iterate CLI's sign-in) and keeps a copy in
   `~/Library/Application Support/iterate-mac-app/words/<mind>.md`, fetched again when it is older
-  than ten minutes. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
+  than ten minutes. What it reads is a setting, an itx expression: by default
+  `itx.repos.get("/repos/config").readFile("words.md")`; Settings › Dictation sets another for
+  every mind (config.json's `wordsExpression`), and a mind's page one for that mind
+  (`minds[].wordsExpression`). The expression runs as you on that mind, with `itx` in scope (an
+  expression, or an `async (itx) => …` function), within 30 s, and must answer text with one
+  `- term: wrong form` on a line; an empty text is no list. Any other answer fails with its reason
+  ("This answered a commit id, with no line that starts with "- ""), and the last good list stays
+  in use. A new expression fetches at once, and so does **Fetch Now** on the mind's page, which
+  shows the count, when it was fetched and the first terms. The app runs no expression that came
+  from anywhere but this setting. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
   listens for the terms in what you said and puts a term in where the sound fits it; it works
   with each model above, as all of them share v3's tokenizer. Then each wrong form, and each term
   in another case, is written as the term. Dictation uses the list of the mind this Mac is lent
@@ -586,7 +633,8 @@ with a lock while it stays on and the time since the start.
   with no `words.md` gives no list.
 - **How the text goes in.** The text is put on the clipboard, ⌘V is pressed for you, and the
   clipboard gets back what it held. That needs the **Accessibility** permission. Without it the
-  text stays on the clipboard, and the app opens the guide for the permission.
+  text stays on the clipboard, and the app opens the guide for the permission. Settings ›
+  Dictation, "Put the text: On the clipboard only", leaves it there, with no ⌘V.
 - **Permissions.** The microphone, at the first use. The line under the panel's three buttons
   says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
 
@@ -744,7 +792,7 @@ draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearanc
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
 listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
-listening, locked, failed), light and dark, eighteen files. `--render-all <folder>` draws every view, light
+listening, locked, failed), light and dark, eighteen files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-all <folder>` draws every view, light
 and dark.
 
 **The speech bench** (local only, never in CI) compares speech-to-text engines on sentences with
@@ -812,17 +860,23 @@ connection, as the endpoint's; a mind never reaches it.
 | --- | --- |
 | `ui.state` | The lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
-| `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) |
-| `ui.type {id, text}` | Types into it (`input.text`) |
+| `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) or a pop-up button's item (`{"id":"settings.approvalMinutes","label":"1 hour"}`) |
+| `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
 | `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
-| `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for 30 minutes. While the socket is open, a question shows no alert and asks for no Touch ID |
+| `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for `approval.minutes` (30 unless set). While the socket is open, a question shows no alert and asks for no Touch ID |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
 `sharing.<thing>`, `device.input`, `device.keep`, `record.<source>`, `record.windowText`,
 `activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
-`capture.discard`, `speech.model` (the speech model's row) and `speech.model.<id>` (a model in its list). The tree is read in the app's own process and needs no permission of macOS; to
+`capture.discard`, `speech.model` (the panel's speech row: it opens Settings › Dictation),
+`speech.model.<id>` (a model in its list), `panel.settings`, and in Settings `settings.page.general`,
+`settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
+`settings.showsPill`, `settings.approvalMinutes`, `settings.key.capture`, `settings.key.input`,
+`settings.doubleTap`, `settings.dictationKey`, `settings.pillWords`, `settings.write`,
+`settings.wordsExpression`, `settings.mind.name`, `settings.mind.wordsSource`,
+`settings.mind.expression` (and `.save`), `settings.mind.fetch`, `settings.mind.use`, `settings.mind.remove`. The tree is read in the app's own process and needs no permission of macOS; to
 have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an
 assistive app does.
 
@@ -853,7 +907,11 @@ fails it, antialiasing does not; the pixel differences are reported, and a pictu
 (`--app <path>` for another) in a new home, drives it, and prints one JSON line a scenario:
 `boot` (the panel opens, the tree has its controls, a segment is pressed), `panel-pages` (**All**
 shows the Activity page, and its back button the main page), `input-send` (a text
-typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `activity` (a
+typed into the bar reaches the bridges' fake mind as `device/input-submitted`), `settings` (the panel's
+Settings button opens the window with This Mac's pages and the mind's; "1 hour" for an approval is
+`approval.minutes` 60 in the home's defaults; Open at login and a mind's own word-list expression
+go into config.json through `cli.mjs set`, which keeps the keys it does not know; that expression
+runs at once in the fake mind, and its answer is the app's copy of the list), `activity` (a
 command run through the endpoint is `device/act-started` and `device/act-ended` in the fake mind,
 and `ui.state` shows its row once, echoed from the context), `record-upload` (a slot that waits in
 the home's spool goes to the fake mind, its file before `record/slot-stored`, and leaves the

@@ -49,6 +49,11 @@ enum VoiceMeetMacApp {
             let folder = URL(fileURLWithPath: CommandLine.arguments[flag + 1])
             exit(MindInput.render(to: folder) && Dictation.render(to: folder) ? 0 : 1)
         }
+        // The Settings window's pages (general, dictation, a mind lent, a mind whose own word list
+        // fails), light and dark: `--render-settings <folder>`.
+        if let flag = CommandLine.arguments.firstIndex(of: "--render-settings"), CommandLine.arguments.indices.contains(flag + 1) {
+            exit(SettingsView.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
+        }
         // The menu-bar mark in each state of the lend: `--render-icons <folder>`.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-icons"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(IterateIcon.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)

@@ -10,14 +10,15 @@ import AppKit
 /// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
 ///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
 /// - `approval.answer {allow, keep?}`: answers the Ask question that waits, in place of the alert
-///   and Touch ID (`Approval.answersByControl`); `keep` approves for 30 minutes, as "Approve for 30
-///   Minutes" does.
+///   and Touch ID (`Approval.answersByControl`); `keep` approves for the chosen time
+///   (`approval.minutes`), as "Approve for 30 Minutes" does.
 /// - `ui.state`: the lend, the open windows and what each shows, the last acts, the record, the last
 ///   dictation's text.
 /// - `ui.tree`: the accessibility tree of the app's own windows, read in this process (no
 ///   permission of macOS is needed for the app's own elements).
-/// - `ui.press {id, label?}`, `ui.type {id, text}`: a press of a control, or text typed into it, by
-///   its accessibility identifier (and, for a segmented control, the segment's label).
+/// - `ui.press {id, label?}`, `ui.type {id, text, replace?}`: a press of a control, or text typed
+///   into it (at its end, or in place of its text), by its accessibility identifier (and, for a
+///   segmented control, the segment's label; for a pop-up button, the item's title).
 @MainActor
 final class ControlSocket {
     var state: () -> [String: Any] = { [:] }
@@ -83,6 +84,12 @@ final class ControlSocket {
             return ["windows": NSApp.windows.filter(\.isVisible).map { Self.node($0, depth: 0, budget: &budget) }]
         case "ui.press":
             let element = try find(parameters)
+            if let choice = element as? PopUpChoice {
+                // as a pick in the open menu: the item's own action, then the button's
+                choice.popUp.select(choice.item)
+                if let menu = choice.popUp.menu { menu.performActionForItem(at: menu.index(of: choice.item)) }
+                return [:]
+            }
             guard Self.bool(element, "accessibilityEnabled") != false else { throw EndpointRefusal("\(Self.name(of: element)) is disabled.") }
             // what a press answers is not to be trusted: the menu bar's button answers no and opens
             if element.responds(to: NSSelectorFromString("accessibilityPerformPress")) {
@@ -95,11 +102,20 @@ final class ControlSocket {
         case "ui.type":
             guard let text = parameters["text"] as? String else { throw EndpointRefusal("ui.type needs text.") }
             let element = try find(parameters)
+            let replace = parameters["replace"] as? Bool ?? false
             if let field = element as? NSTextView {
                 field.window?.makeFirstResponder(field)
-                field.insertText(text, replacementRange: field.selectedRange())
-            } else if let field = element as? NSTextField {
-                field.stringValue += text
+                field.insertText(text, replacementRange: replace ? NSRange(location: 0, length: field.string.utf16.count) : field.selectedRange())
+            } else if let field = (element as? NSTextField) ?? Self.textField(under: element) {
+                // as typing does: through the field editor, so that a SwiftUI binding hears it; a
+                // window that is not key has none, and its field's delegate hears the change instead
+                if field.window?.makeFirstResponder(field) == true, let editor = field.currentEditor() as? NSTextView {
+                    let length = editor.string.utf16.count
+                    editor.insertText(text, replacementRange: replace ? NSRange(location: 0, length: length) : NSRange(location: length, length: 0))
+                } else {
+                    field.stringValue = replace ? text : field.stringValue + text
+                    field.delegate?.controlTextDidChange?(Notification(name: NSControl.textDidChangeNotification, object: field))
+                }
             } else if element.responds(to: NSSelectorFromString("setAccessibilityValue:")) {
                 _ = element.perform(NSSelectorFromString("setAccessibilityValue:"), with: text)
             } else {
@@ -125,10 +141,37 @@ final class ControlSocket {
             throw EndpointRefusal("No control with the id \"\(id)\" is on the screen now.")
         }
         guard let label = parameters["label"] as? String else { return element }
-        guard let part = Self.first(in: Self.children(of: element), where: { Self.label(of: $0) == label }) else {
-            throw EndpointRefusal("\"\(id)\" has nothing labelled \"\(label)\".")
+        if let part = Self.first(in: Self.children(of: element), where: { Self.label(of: $0) == label }) { return part }
+        // a pop-up button lists its items only while it is open: its item is chosen by its title
+        if let popUp = Self.popUp(element), let item = popUp.itemArray.first(where: { $0.title.caseInsensitiveCompare(label) == .orderedSame }) {
+            return PopUpChoice(popUp: popUp, item: item)
         }
-        return part
+        throw EndpointRefusal("\"\(id)\" has nothing labelled \"\(label)\".")
+    }
+
+    /// The AppKit text field that a SwiftUI element stands for: the one of its window at its frame.
+    private static func textField(under element: NSObject) -> NSTextField? {
+        guard let frame = (read(element, "accessibilityFrame") as? NSValue)?.rectValue else { return nil }
+        func search(_ view: NSView) -> NSTextField? {
+            if let field = view as? NSTextField, field.isEditable, let window = field.window {
+                let onScreen = window.convertToScreen(field.convert(field.bounds, to: nil))
+                if onScreen.intersects(frame), abs(onScreen.midY - frame.midY) < 8 { return field }
+            }
+            for child in view.subviews { if let found = search(child) { return found } }
+            return nil
+        }
+        for window in NSApp.windows where window.isVisible {
+            if let content = window.contentView, let found = search(content) { return found }
+        }
+        return nil
+    }
+
+    /// The pop-up button of an element: the element, its view or its cell's.
+    private static func popUp(_ element: NSObject) -> NSPopUpButton? {
+        if let popUp = element as? NSPopUpButton { return popUp }
+        if let cell = element as? NSCell, let popUp = cell.controlView as? NSPopUpButton { return popUp }
+        if let view = element as? NSView { return view.subviews.lazy.compactMap { $0 as? NSPopUpButton }.first }
+        return nil
     }
 
     private static func first(in elements: [NSObject], where matches: (NSObject) -> Bool) -> NSObject? {
@@ -191,5 +234,16 @@ final class ControlSocket {
 
     private static func rect(_ rect: NSRect) -> [Double] {
         [rect.minX, rect.minY, rect.width, rect.height].map { Double($0.rounded()) }
+    }
+}
+
+/// An item of a pop-up button, for `ui.press {id, label}`: it is selected as a click on it would.
+private final class PopUpChoice: NSObject {
+    let popUp: NSPopUpButton
+    let item: NSMenuItem
+
+    init(popUp: NSPopUpButton, item: NSMenuItem) {
+        self.popUp = popUp
+        self.item = item
     }
 }

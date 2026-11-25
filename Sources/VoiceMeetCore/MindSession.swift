@@ -78,7 +78,7 @@ public struct MindSessions: Equatable, Sendable {
     }
 }
 
-/// The person's approvals "for 30 minutes", each for one thing in one round: one session, until
+/// The person's approvals "for N minutes" (`approval.minutes`), each for one thing in one round: one session, until
 /// the mind refuses this Mac's key. A new session or a refusal ends them all, and an approval
 /// given in an older round is not kept.
 public struct ApprovalGrants: Equatable, Sendable {

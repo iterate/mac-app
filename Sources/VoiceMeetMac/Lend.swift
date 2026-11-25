@@ -20,6 +20,8 @@ final class Lend {
         let mind: String
         let name: String
         let keyFile: String
+        /// The itx expression its word list comes from, when it has its own (`Words`).
+        var wordsExpression: String?
     }
 
     /// What `npx @iterate-com/mac-app` wrote (cli.mjs `setup`, `add`, `use`, `remove`).
@@ -36,9 +38,11 @@ final class Lend {
         let copy: String?
         let minds: [Mind]
         let active: String?
+        /// This Mac's default expression of a word list (Settings › Dictation); nil is the built-in one.
+        let wordsExpression: String?
 
         private enum Keys: String, CodingKey {
-            case login, spec, node, iterateBin, bridge, version, cli, copy, minds, active, mind, name, keyFile
+            case login, spec, node, iterateBin, bridge, version, cli, copy, minds, active, mind, name, keyFile, wordsExpression
         }
 
         init(from decoder: Decoder) throws {
@@ -51,6 +55,7 @@ final class Lend {
             version = try values.decode(String.self, forKey: .version)
             cli = try values.decodeIfPresent(String.self, forKey: .cli) ?? AppEnvironment.current.folder.appendingPathComponent("source/cli.mjs").path
             copy = try values.decodeIfPresent(String.self, forKey: .copy)
+            wordsExpression = try values.decodeIfPresent(String.self, forKey: .wordsExpression)
             if let minds = try values.decodeIfPresent([Mind].self, forKey: .minds) {
                 self.minds = minds
                 active = try values.decodeIfPresent(String.self, forKey: .active)
@@ -73,6 +78,8 @@ final class Lend {
     private(set) var commandLine: String?
     private(set) var commandLink: String?
     private(set) var isCommandRunning = false
+    /// The last ask of npm for a newer version: when, and the newest version it named (nil when it did not answer).
+    private(set) var updateCheck: (at: Date, latest: String?)?
     /// Node, the iterate CLI and the bridge's scripts of this config, resolved at each read of it.
     private(set) var helpers: MindSession.Helpers?
     /// The session of the mind this Mac is lent to, or none.
@@ -369,6 +376,12 @@ final class Lend {
         reload()
     }
 
+    /// `set`: one saved value of config.json (`--login`, `--words-expression`), through the CLI, as
+    /// Settings changes it. The folder's watch reads the new config.
+    func set(_ arguments: [String]) {
+        command(["set"] + arguments)
+    }
+
     /// `add`: the CLI makes the key, prints the link where a member allows it (and opens it), and
     /// makes the mind active once it is allowed.
     func add(mind: String, name: String) {
@@ -469,16 +482,20 @@ final class Lend {
     }
 
     /// Asks npm for the newest version. Only for the registry: a pkg.pr.new link or a folder is a
-    /// trial, updated by hand, and an app built from an owner's copy runs what was built.
-    private func checkForUpdate() {
+    /// trial, updated by hand, and an app built from an owner's copy runs what was built. The
+    /// person can turn it off (Settings › General, "Update by itself": `update.byItself`), and
+    /// Update Now (`now`) asks at once and updates while a capture runs too.
+    func checkForUpdate(now: Bool = false) {
         guard let config, config.source.updatesItself, !AppEnvironment.current.hasOwnHome else { return }
+        guard now || Choices.shared.updatesByItself else { return }
         guard let url = URL(string: "https://registry.npmjs.org/@iterate-com/mac-app/latest") else { return }
         Task { @MainActor in
-            guard let (data, _) = try? await URLSession.shared.data(from: url),
-                let latest = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])?["version"] as? String,
-                latest != config.version
-            else { return }
-            guard !isBusy() else { return log.info("version \(latest) is out; the update waits for the capture to end") }
+            let answer = try? await URLSession.shared.data(from: url)
+            let latest = answer.flatMap { (try? JSONSerialization.jsonObject(with: $0.0) as? [String: Any])?["version"] as? String }
+            updateCheck = (Date(), latest)
+            onChange?()
+            guard let latest, latest != config.version else { return }
+            guard now || !isBusy() else { return log.info("version \(latest) is out; the update waits for the capture to end") }
             log.info("version \(latest) is out (this is \(config.version)): updating")
             let npx = URL(fileURLWithPath: config.node).deletingLastPathComponent().appendingPathComponent("npx")
             let update = Process()

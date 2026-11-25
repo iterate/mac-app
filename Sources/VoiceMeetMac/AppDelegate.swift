@@ -40,6 +40,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// The control socket, for a test with no hand: nil unless `AppEnvironment` asks for it.
     private var control: ControlSocket?
     private let environment = AppEnvironment.current
+    /// The person's choices of Settings (`Choices`), and what Settings shows.
+    private let choices = Choices.shared
+    private let settingsState = SettingsState()
+    private lazy var settings = SettingsWindow { [unowned self] in
+        AnyView(SettingsView(state: settingsState, choices: choices, speech: speechChoice, words: words, actions: settingsActions()))
+    }
+    /// The word-list expressions of the config last seen: a change fetches the lists again.
+    private var seenExpressions: [String: String] = [:]
+    /// config.json's `login` as the login item was last set to it.
+    private var appliedLogin: Bool?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         logRunStart()
@@ -90,7 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 open: { link in if let url = URL(string: link) { NSWorkspace.shared.open(url) } }
             ),
             cameraLayer: { [weak self] id in self?.model.cameraPreviewLayer(for: id) ?? CALayer() },
-            bigPicture: { [weak self] thing in await self?.bigPicture(of: thing) }
+            bigPicture: { [weak self] thing in await self?.bigPicture(of: thing) },
+            openSettings: { [weak self] in self?.openSettings(.general) }
         )
         if #unavailable(macOS 15.0) { panelState.canCapture = false }
         pageWatch = panelState.$isActivityOpen.removeDuplicates().dropFirst().sink { [weak self] isOpen in
@@ -164,13 +175,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     /// The installed app (in /Applications) starts at each login when the person said so to
-    /// `npx @iterate-com/mac-app` (its config's `login`). A build run from elsewhere registers
+    /// `npx @iterate-com/mac-app` or in Settings (its config's `login`). A build run from elsewhere registers
     /// nothing, so that one copy alone is ever registered, and so does a copy with a home of its own.
     /// System Settings › General › Login Items shows it and can turn it off.
     private func openAtLogin() {
         guard Bundle.main.bundlePath.hasPrefix("/Applications/"), !environment.hasOwnHome else { return }
         let service = SMAppService.mainApp
         let wanted = lend.config?.login ?? false
+        appliedLogin = wanted
         do {
             if wanted, service.status != .enabled {
                 try service.register()
@@ -194,7 +206,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
         control?.markCapture = { capture.mark($0) }
-        register(.capture, "capture", "starts and ends one", pressed: { capture.toggle() })
+        if let combo = choices.captureKey { register(combo, "capture", "starts and ends one", pressed: { capture.toggle() }) }
     }
 
     /// ⌥⇧Space opens the input: a text and files, to one of the minds this Mac knows (`MindInput`).
@@ -207,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         input.allow = { [weak self] permission in self?.guide(permission) }
         input.onChange = { [weak self] in self?.stateDidChange() }
         control?.toggleInput = { [weak self] in self?.input.toggle() }
-        register(.input, "input", "opens it", pressed: { [weak self] in self?.input.toggle() })
+        if let combo = choices.inputKey { register(combo, "input", "opens it", pressed: { [weak self] in self?.input.toggle() }) }
     }
 
     /// fn and ⌥⇧D dictate into the app in front, with the word list of the mind this Mac is lent to
@@ -219,10 +231,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         speech.log = { speechLog.info($0) }
         speechChoice.onChange = { [weak self] in self?.stateDidChange() }
         speechChoice.allowAccessibility = { [weak self] in self?.guide(.accessibility) }
+        speechChoice.openSettings = { [weak self] in self?.openSettings(.dictation) }
         words.bridge = { [weak self] mind in
             guard let helpers = self?.lend.helpers, let known = self?.lend.config?.minds.first(where: { $0.mind == mind }) else { return nil }
             return MindBridge.of(mind: mind, name: known.name, helpers: helpers)
         }
+        // the mind's own expression, else this Mac's default, else the built-in one (nil)
+        words.expression = { [weak self] mind in
+            guard let config = self?.lend.config else { return nil }
+            return config.minds.first { $0.mind == mind }?.wordsExpression ?? config.wordsExpression
+        }
+        seenExpressions = expressions()
         for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
@@ -252,11 +271,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     /// A key that works in any app. A copy with a home of its own registers none: the keys are the
-    /// installed app's, and a test presses them through the control socket.
-    private func register(_ combo: HotKey.Combo, _ what: String, _ does: String, pressed: @escaping () -> Void, released: (() -> Void)? = nil) {
-        guard !environment.hasOwnHome else { return log.info("\(what): \(combo.words) is not registered in a home of its own") }
+    /// installed app's, and a test presses them through the control socket. False when macOS refused it.
+    @discardableResult
+    private func register(_ combo: HotKey.Combo, _ what: String, _ does: String, pressed: @escaping () -> Void, released: (() -> Void)? = nil) -> Bool {
+        guard !environment.hasOwnHome else {
+            log.info("\(what): \(combo.words) is not registered in a home of its own")
+            return true
+        }
         let isRegistered = HotKey.register(combo, pressed: pressed, released: released)
         log.info(isRegistered ? "\(what): \(combo.words) \(does)" : "\(what): macOS refused the key \(combo.words)")
+        return isRegistered
+    }
+
+    /// What the key of capture (`HotKey.Combo.capture.id`) or of the input does.
+    private func pressed(_ id: UInt32) -> () -> Void {
+        if id == HotKey.Combo.capture.id {
+            return { [weak self] in if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() } }
+        }
+        return { [weak self] in self?.input.toggle() }
+    }
+
+    /// Settings recorded a key for capture or the input, or removed it (nil). A key that macOS
+    /// refuses leaves the one before; the answer says so.
+    private func setKey(_ id: UInt32, _ combo: HotKey.Combo?) -> String? {
+        let isCapture = id == HotKey.Combo.capture.id
+        let what = isCapture ? "capture" : "input"
+        let before = isCapture ? choices.captureKey : choices.inputKey
+        let other = isCapture ? choices.inputKey : choices.captureKey
+        settingsState.keyProblems[id] = nil
+        if let combo, combo.key == other?.key, combo.modifiers == other?.modifiers {
+            return "\(combo.words) is the key of \(isCapture ? "the input" : "capture") already."
+        }
+        HotKey.unregister(id)
+        if let combo, !register(combo, what, isCapture ? "starts and ends one" : "opens it", pressed: pressed(id)) {
+            if let before { register(before, what, "again", pressed: pressed(id)) }
+            let problem = "macOS refused \(combo.words): another app may use it."
+            settingsState.keyProblems[id] = problem
+            return problem
+        }
+        if isCapture { choices.captureKey = combo } else { choices.inputKey = combo }
+        log.info("\(what): the person set the key to \(combo?.words ?? "none")")
+        return nil
+    }
+
+    /// While a recorder listens, the key it replaces does nothing, so that pressing it records it.
+    private func recordingKey(_ id: UInt32, _ isRecording: Bool) {
+        guard !environment.hasOwnHome else { return }
+        if isRecording { return HotKey.unregister(id) }
+        let combo = id == HotKey.Combo.capture.id ? choices.captureKey : choices.inputKey
+        if let combo { _ = HotKey.register(combo, pressed: pressed(id), released: nil) }
     }
 
     /// The control socket (`ControlSocket`), when the environment asks for it.
@@ -292,6 +355,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                         "failure": row.failure ?? NSNull(), "detail": row.detail ?? NSNull(),
                     ]
                 },
+            ],
+            "settings": ["visible": settings.isVisible, "page": settingsState.page.name],
+            "choices": [
+                "approvalMinutes": choices.approvalMinutes, "captureKey": choices.captureKey?.words ?? NSNull(),
+                "inputKey": choices.inputKey?.words ?? NSNull(), "dictationOnFn": choices.dictationOnFn, "doubleTap": choices.doubleTap,
+                "pillShowsWords": choices.pillShowsWords, "write": choices.write.rawValue,
             ],
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
             "record": model.record.state(),
@@ -387,8 +456,151 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if banner != panelState.banner { panelState.banner = banner }
         noteLastResult()
         showLend()
+        configChanged()
         // the things, their choices and the permissions are read for an open panel only
         if popover.isShown { refreshPanel() }
+        if settings.isVisible { refreshSettings() }
+    }
+
+    /// The words expressions of config.json, by mind ("" for this Mac's default).
+    private func expressions() -> [String: String] {
+        var all: [String: String] = [:]
+        if let config = lend.config {
+            all[""] = config.wordsExpression
+            for mind in config.minds { all[mind.mind] = mind.wordsExpression }
+        }
+        return all
+    }
+
+    /// config.json changed (the CLI's `set` among others): a new expression fetches its lists at
+    /// once, and a new `login` sets the login item.
+    private func configChanged() {
+        let now = expressions()
+        if now != seenExpressions {
+            seenExpressions = now
+            for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
+        }
+        if let login = lend.config?.login, appliedLogin != nil, login != appliedLogin { openAtLogin() }
+    }
+
+    // MARK: - Settings
+
+    private func openSettings(_ page: SettingsState.Page) {
+        popover.performClose(nil)
+        settingsState.page = page
+        refreshSettings()
+        settings.show()
+        log.info("settings open: \(page.name)")
+    }
+
+    /// What Settings shows, read here and not while it draws.
+    private func refreshSettings() {
+        if panelState.lend != settingsState.lend { settingsState.lend = panelState.lend }
+        let config = lend.config
+        if settingsState.login != (config?.login ?? false) { settingsState.login = config?.login ?? false }
+        if settingsState.defaultExpression != config?.wordsExpression { settingsState.defaultExpression = config?.wordsExpression }
+        let own = Dictionary(uniqueKeysWithValues: (config?.minds ?? []).compactMap { mind in mind.wordsExpression.map { (mind.mind, $0) } })
+        if settingsState.expressions != own { settingsState.expressions = own }
+        let update = updateRow()
+        if settingsState.update != update { settingsState.update = update }
+        if settingsState.showsPill != model.acts.showsPill { settingsState.showsPill = model.acts.showsPill }
+        // macOS's setting of 🌐 is read for the page that shows it alone
+        if settingsState.page == .dictation {
+            let fnLines = dictation.fnLines
+            if settingsState.fnLines != fnLines { settingsState.fnLines = fnLines }
+        }
+        // a mind that was removed: its page goes
+        if case .mind(let mind) = settingsState.page, !(config?.minds.contains { $0.mind == mind } ?? false) { settingsState.page = .general }
+    }
+
+    /// General's version rows, from where the app came from (`UpdateSource`) and the last ask of npm.
+    private func updateRow() -> SettingsState.UpdateRow {
+        guard let config = lend.config else { return .init(title: "Not set up", detail: "Run npx @iterate-com/mac-app in a terminal.") }
+        switch config.source {
+        case .copy:
+            return .init(
+                title: config.source.line(home: NSHomeDirectory()),
+                detail: "It runs what was built. Run node cli.mjs update in that folder to build it again.")
+        case .trial(let spec, let version):
+            return .init(title: "\(version), a trial", detail: "Updated by hand: npx \(spec) update.")
+        case .registry(let version):
+            let detail: String
+            if environment.hasOwnHome {
+                detail = "A home of its own never updates."
+            } else if let check = lend.updateCheck {
+                let at = Lend.shortClock(check.at)
+                if let latest = check.latest, latest != version {
+                    detail = "Version \(latest) is out. Checked at \(at)."
+                } else {
+                    detail = check.latest == nil ? "npm did not answer at \(at)." : "Up to date. Checked at \(at)."
+                }
+            } else {
+                detail = choices.updatesByItself ? "Not checked yet: the first check is a minute after the start." : "It does not update by itself."
+            }
+            return .init(title: "\(version), from npm", detail: detail, updatesItself: true)
+        }
+    }
+
+    private func settingsActions() -> SettingsActions {
+        SettingsActions(
+            setLogin: { [weak self] on in self?.lend.set([on ? "--login" : "--no-login"]) },
+            setShowsPill: { [weak self] on in
+                self?.model.acts.showsPill = on
+                self?.settingsState.showsPill = on
+            },
+            setKey: { [weak self] id, combo in self?.setKey(id, combo) },
+            recording: { [weak self] id, isRecording in self?.recordingKey(id, isRecording) },
+            updateNow: { [weak self] in self?.lend.checkForUpdate(now: true) },
+            copyPrompt: { [weak self] in self?.copyPrompt() },
+            openKeyboardSettings: {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension") { NSWorkspace.shared.open(url) }
+            },
+            allowAccessibility: { [weak self] in self?.guide(.accessibility) },
+            setDefaultExpression: { [weak self] expression in self?.lend.set(["--words-expression", expression ?? ""]) },
+            setExpression: { [weak self] mind, expression in self?.lend.set(["--mind", mind, "--words-expression", expression ?? ""]) },
+            fetchNow: { [weak self] mind in self?.words.fetchNow(mind) },
+            showMind: { [weak self] mind in self?.showMind(mind) },
+            rename: { [weak self] mind, name in self?.rename(mind, to: name) },
+            pageChanged: { [weak self] in self?.refreshSettings() },
+            lend: LendActions(
+                reconnect: { [weak self] in self?.lend.reconnectNow() },
+                use: { [weak self] mind in self?.lend.use(mind) },
+                add: { [weak self] in self?.addMind() },
+                remove: { [weak self] mind in self?.removeMind(mind) },
+                open: { link in if let url = URL(string: link) { NSWorkspace.shared.open(url) } }
+            )
+        )
+    }
+
+    /// A mind's page shows: its sign-in and its word list are read again, away from the main thread.
+    private func showMind(_ mind: String) {
+        words.loadStatus(mind)
+        words.refresh(mind)
+        Task { @MainActor in
+            let signIn = await SignIn.read(mind)
+            if settingsState.signIns[mind] != signIn { settingsState.signIns[mind] = signIn }
+        }
+    }
+
+    /// A new name for this Mac in a mind: a key is for one name, so the CLI's `add` makes a new key
+    /// and a member allows it again. The person says yes first.
+    private func rename(_ mind: String, to name: String) {
+        let rule = #"^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*$"#
+        let alert = NSAlert()
+        alert.icon = NSApp.applicationIconImage
+        guard name.range(of: rule, options: .regularExpression) != nil else {
+            alert.messageText = "\"\(name)\" is not a name"
+            alert.informativeText = "Letters and digits, starting with a letter; dots between parts, such as jane.mac."
+            alert.runModal()
+            return
+        }
+        alert.messageText = "Lend this Mac to \(mind) as itx.\(name)?"
+        alert.informativeText = "A key is for one name. The new name needs a new key, and a member of the mind allows it again with a passkey. Until then this Mac is not lent to \(mind)."
+        alert.addButton(withTitle: "Make a New Key")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        log.info("the person renames this Mac in \(mind) to itx.\(name)")
+        lend.add(mind: mind, name: name)
     }
 
     /// What the panel shows of this Mac, read here and not while it draws: the things, their

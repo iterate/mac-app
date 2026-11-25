@@ -29,6 +29,8 @@ final class DictationPillModel: ObservableObject {
     @Published var clock = Clock.none
     @Published var level: Float = 0
     @Published var text = ""
+    /// Settings › Dictation, "Show the words in one row": off, the pill has the level bars and the time alone.
+    @Published var showsWords = true
 }
 
 /// DICTATION: talk in any app, and what you said is written where the cursor is (README,
@@ -45,6 +47,10 @@ final class DictationPillModel: ObservableObject {
 /// no text leaves it. The word list of the mind this Mac is lent to makes the mind's names and
 /// terms come out right. The text goes in through the clipboard and ⌘V, which needs the
 /// Accessibility permission too; without it the text stays on the clipboard for the person's own ⌘V.
+///
+/// Settings › Dictation changes it (`Choices`): fn can be turned off (⌥⇧D stays), the double tap
+/// too (a tap alone then ends at once), the pill can leave the words out, and the text can go on
+/// the clipboard only.
 ///
 /// A copy with a home of its own (`AppEnvironment`) taps no key and opens no microphone unless
 /// an audio fixture is set; it writes nothing: the text is kept for the control socket alone.
@@ -123,7 +129,10 @@ final class Dictation: SpeechClient {
 
     private func heard(_ event: FnTap.Event) {
         switch event {
-        case .fn(let down, let time): fnChanged(down: down, at: time)
+        case .fn(let down, let time):
+            // Settings › Dictation, "Hold to talk" removed: fn is the keyboard's alone
+            guard Choices.shared.dictationOnFn || key.state != .idle else { return }
+            fnChanged(down: down, at: time)
         case .escape: escape()
         case .otherKey: act(key.otherKey())
         }
@@ -133,7 +142,9 @@ final class Dictation: SpeechClient {
         switch act {
         case .nothing: break
         case .start: start()
-        case .wait(let until): waitForSecondTap(until: until)
+        case .wait(let until):
+            // no double tap: a tap alone ends at once, with no sign
+            if Choices.shared.doubleTap { waitForSecondTap(until: until) } else { return self.act(key.windowEnded(at: until)) }
         case .lock:
             pill.locked = true
             log.info("locked: on until the next press")
@@ -205,6 +216,7 @@ final class Dictation: SpeechClient {
         pill.text = ""
         pill.level = 0
         pill.locked = false
+        pill.showsWords = Choices.shared.pillShowsWords
         switch session.start(self, words: words()) {
         case nil:
             pill.clock = .since(Date())
@@ -276,6 +288,11 @@ final class Dictation: SpeechClient {
             return end("Heard \(words) words at \(Lend.clock(Date())); a home of its own writes them nowhere", failed: nil)
         }
         let pasteboard = NSPasteboard.general
+        if Choices.shared.write == .clipboard {
+            pasteboard.clearContents()
+            pasteboard.setString(text, forType: .string)
+            return end("\(words) words are on the clipboard (\(Lend.clock(Date())))", failed: nil)
+        }
         guard AXIsProcessTrusted() else {
             pasteboard.clearContents()
             pasteboard.setString(text, forType: .string)
@@ -434,7 +451,7 @@ struct DictationPill: View {
                 Spacer(minLength: 0)
             case .listening:
                 LevelBars(level: model.level)
-                if model.text.isEmpty {
+                if model.text.isEmpty || !model.showsWords {
                     Text("Listening").foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                 } else {
@@ -449,7 +466,7 @@ struct DictationPill: View {
                 DictationClock(clock: model.clock)
             case .writing:
                 ProgressView().controlSize(.small)
-                if model.text.isEmpty {
+                if model.text.isEmpty || !model.showsWords {
                     Text("Writing").foregroundStyle(.secondary)
                     Spacer(minLength: 0)
                 } else {

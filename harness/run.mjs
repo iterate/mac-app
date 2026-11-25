@@ -68,7 +68,9 @@ function* nodes(tree) {
   }
 }
 
-/** The config of a home with these minds, the first active, as the CLI writes it: by a rename. */
+/** The config of a home with these minds, the first active, as the CLI writes it: by a rename. Its
+ *  `cli` is this checkout's cli.mjs, which Settings runs (`set`), and it has a key at the top and
+ *  one in each mind that no version knows: `set` must keep them. */
 function writeConfig(home, iterate, minds, active = minds[0].mind) {
   const file = join(home, "config.json");
   writeFileSync(
@@ -79,7 +81,9 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
       iterateBin: join(iterate, "bin/iterate.js"),
       bridge: join(root, "bridge/mac-endpoint.ts"),
       version: "0.0.0-harness",
-      minds: minds.map(({ mind, name }) => ({ mind, name, keyFile: join(home, "keys", `${mind}.key`) })),
+      cli: join(root, "cli.mjs"),
+      harnessUnknown: "kept",
+      minds: minds.map(({ mind, name }) => ({ mind, name, keyFile: join(home, "keys", `${mind}.key`), harnessUnknown: "kept" })),
       active,
     }),
   );
@@ -194,15 +198,74 @@ const scenarios = {
       if (!mark?.label?.startsWith("iterate test copy:")) throw new Error(`the mark's label is ${JSON.stringify(mark?.label)}`);
       for (const id of ["statusItem", "panel.quit", "panel.copyPrompt", "sharing.commands", "record.screens", "speech.model"])
         if (!ids.has(id)) throw new Error(`ui.tree has no ${id}`);
-      // the speech model's list opens under its row, with every model of the app
+      // the speech model's row opens Settings › Dictation, with every model of the app
       await run.control("ui.press", { id: "speech.model" });
       await until("the list of speech models", 5, async () => {
         const open = new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id));
         return open.has("speech.model.parakeet-v3") && open.has("speech.model.parakeet-ultra");
       });
-      // a segment of a sharing control, pressed by its label
+      // a segment of a sharing control, pressed by its label (the panel again: Settings took it away)
+      if (!(await run.state()).panel.visible) await run.control("ui.press", { id: "statusItem" });
+      await until("the panel again", 10, async () => (await run.state()).panel.visible);
       await run.control("ui.press", { id: "sharing.speaker", label: "Shared" });
       await until("the speakers shared", 5, async () => (await run.state()).sharing.speaker === "shared");
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * Settings opens from the panel's button, with This Mac's pages and one for each mind. A changed
+   * choice is in the home's defaults (`approval.minutes`), and a value of config.json goes through
+   * `cli.mjs set`, which keeps the keys it does not know. A mind's own word-list expression runs at
+   * once in the mind's process, and its answer is the app's copy of the list.
+   */
+  async settings({ app, home }) {
+    withMind(home);
+    const run = await start(app, home);
+    const ids = async () => new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id).filter(Boolean));
+    const config = () => JSON.parse(readFileSync(join(home, "config.json"), "utf8"));
+    try {
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "panel.settings" });
+      await until("the Settings window", 10, async () => (await run.state()).settings.visible);
+      await until("the sidebar", 5, async () => {
+        const shown = await ids();
+        return ["settings.page.general", "settings.page.dictation", `settings.page.mind.${MIND}`, "settings.addMind", "settings.approvalMinutes"].every((id) => shown.has(id));
+      });
+      if ((await run.state()).settings.page !== "general") throw new Error(`Settings opened on ${(await run.state()).settings.page}`);
+
+      // An approval can last: 60 minutes, kept in the home's defaults
+      await run.control("ui.press", { id: "settings.approvalMinutes", label: "1 hour" });
+      await until("approval.minutes at 60", 5, async () => (await run.state()).choices.approvalMinutes === 60);
+      const stored = execFileSync("defaults", ["read", join(home, "defaults"), "approval.minutes"], { encoding: "utf8" }).trim();
+      if (stored !== "60") throw new Error(`the stored approval.minutes is ${stored}`);
+
+      // Open at login: config.json's `login`, written by cli.mjs set, with the unknown keys kept
+      await run.control("ui.press", { id: "settings.login" });
+      await until("login in config.json", 15, () => config().login === true);
+      const written = config();
+      if (written.harnessUnknown !== "kept" || written.minds[0].harnessUnknown !== "kept")
+        throw new Error(`cli.mjs set dropped a key it does not know: ${JSON.stringify(written)}`);
+
+      // a mind's page, and its own word-list expression through cli.mjs set
+      await run.control("ui.press", { id: `settings.page.mind.${MIND}` });
+      await until("the mind's page", 5, async () => (await run.state()).settings.page === `mind:${MIND}` && (await ids()).has("settings.mind.wordsSource"));
+      await run.control("ui.press", { id: "settings.mind.wordsSource", label: "Its own" });
+      await until("the field of its own", 5, async () => (await ids()).has("settings.mind.expression"));
+      // an expression of its own, with itx in scope: its answer is the list
+      const own = 'itx.repos.get("/repos/config").tip().then((tip) => `- Harness: ${tip}`)';
+      await run.control("ui.type", { id: "settings.mind.expression", text: own, replace: true });
+      await until("the Save button", 5, async () => (await ids()).has("settings.mind.expression.save"));
+      await run.control("ui.press", { id: "settings.mind.expression.save" });
+      await until("the mind's expression in config.json", 15, () => config().minds[0].wordsExpression);
+      const mind = config().minds[0];
+      if (mind.harnessUnknown !== "kept" || mind.wordsExpression !== own)
+        throw new Error(`the mind's entry is ${JSON.stringify(mind)}`);
+      // the new expression fetches the list at once, through the job words of the mind's process
+      const copy = join(home, "words", `${MIND}.md`);
+      await until("the list of its own expression", 15, () => existsSync(copy) && readFileSync(copy, "utf8") === "- Harness: abc");
     } finally {
       await run.quit();
     }
