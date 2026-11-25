@@ -23,13 +23,24 @@ final class SoundDevice: NSObject, LKRTCAudioDevice, @unchecked Sendable {
     private let mono = AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: SoundDevice.rate, channels: 1, interleaved: true)!
     private var converter: AVAudioConverter?
 
+    /// The push thread, made when libwebrtc first wants sound (a watcher has the sound track).
+    private var thread: Thread?
+
     override init() {
         super.init()
         time.mFlags = .sampleTimeValid
+    }
+
+    deinit { out.deallocate() }
+
+    /// Under `lock`.
+    private func startThread() {
+        guard thread == nil else { return }
         let thread = Thread { [weak self] in while let self { self.next() } }
         thread.name = "live.sound"
         thread.qualityOfService = .userInteractive
         thread.start()
+        self.thread = thread
     }
 
     /// From the capture's callback: hand the buffer to the push thread. While nobody listens it is
@@ -126,7 +137,10 @@ final class SoundDevice: NSObject, LKRTCAudioDevice, @unchecked Sendable {
 
     /// libwebrtc wants sound (a watcher has the sound track): from now on each block goes to it.
     func startRecording() -> Bool {
-        lock.withLock { sending = delegate != nil }
+        lock.withLock {
+            sending = delegate != nil
+            if sending { startThread() }
+        }
         return true
     }
 

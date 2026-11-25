@@ -566,18 +566,28 @@ const scenarios = {
 
   /**
    * A slot that waits in the spool (as the recorder seals it) goes into the mind: its file first,
-   * then `record/slot-stored`, and it leaves the spool.
+   * then `record/slot-stored`, and it leaves the spool. The spool is the device's
+   * (`record/<mind>/itx.<name>/`). An earlier version's spool, one for the mind, is split by the
+   * name each slot was recorded as: this name's slot goes up, another name's waits in its own
+   * spool and is never published as this device (Astra 11).
    */
   async "record-upload"({ app, home }) {
     const sent = withMind(home);
-    const spool = join(home, "record", MIND);
+    const old = join(home, "record", MIND);
+    const spool = join(old, `itx.${NAME}`);
     const t = 1764000000;
     const file = `/devices/${NAME}/record/mic-0/2025-11-24/16/00-00.mp4`;
-    mkdirSync(dirname(join(spool, file)), { recursive: true });
-    writeFileSync(join(spool, file), Buffer.alloc(4321, 1));
-    mkdirSync(join(spool, "slots"), { recursive: true });
-    const payload = { t, tracks: { "mic-0": { kind: "audio", file, bytes: 4321 } } };
-    writeFileSync(join(spool, "slots", `${t}.json`), JSON.stringify(payload));
+    const slot = (folder, t, file, bytes) => {
+      mkdirSync(dirname(join(folder, file)), { recursive: true });
+      writeFileSync(join(folder, file), Buffer.alloc(bytes, 1));
+      mkdirSync(join(folder, "slots"), { recursive: true });
+      const payload = { t, tracks: { "mic-0": { kind: "audio", file, bytes } } };
+      writeFileSync(join(folder, "slots", `${t}.json`), JSON.stringify(payload));
+      return payload;
+    };
+    const payload = slot(old, t, file, 4321);
+    const renamed = `/devices/old.mac/record/mic-0/2025-11-24/15/59-30.mp4`;
+    slot(old, t - 30, renamed, 99);
     const run = await start(app, home);
     try {
       const event = await until("record/slot-stored in the fake mind", 30, () => sent().find((e) => e.type === "record/slot-stored"));
@@ -589,6 +599,11 @@ const scenarios = {
       if (stored > lines.findIndex((line) => line.type === "record/slot-stored")) throw new Error("the event came before its file");
       await until("the slot gone from the spool", 10, () => !existsSync(join(spool, "slots", `${t}.json`)) && !existsSync(join(spool, file)));
       await until("no slot waiting", 10, async () => (await run.endpoint("record.state")).waitingSlots === 0);
+      const other = join(old, "itx.old.mac");
+      if (!existsSync(join(other, "slots", `${t - 30}.json`)) || !existsSync(join(other, renamed)))
+        throw new Error("the slot of the old name is not in its own spool");
+      if (sent().some((e) => e.type === "record/slot-stored" && e.payload?.t === t - 30)) throw new Error("the old name's slot went up as this device");
+      if (existsSync(join(old, "slots", `${t}.json`))) throw new Error("the old spool still holds this name's slot");
     } finally {
       await run.quit();
     }
@@ -709,6 +724,18 @@ const scenarios = {
       await new Promise((resolve) => setTimeout(resolve, 3000));
       const late = sent().filter((e) => e.mind === A.mind).slice(toA);
       if (late.length) throw new Error(`A got ${late.length} events after the switch: ${late.map((e) => e.type).join(", ")}`);
+
+      // B: two uses wait, the first on its question, the second behind it; the switch back to A
+      // ends both, and neither runs, nor asks A (Astra 1)
+      const queued = [echo(), echo()];
+      await until("B's question again", 10, async () => (await run.state()).approval);
+      writeConfig(home, join(home, "fake-iterate"), [A, B], A.mind);
+      for (const { answer, error } of await Promise.all(queued)) {
+        if (answer) throw new Error("a use of B ran after the switch to A");
+        if (!/mind changed|no longer lent/.test(error?.message ?? "")) throw new Error(`a use of B ended with ${error?.message}`);
+      }
+      await until("the session for A again", 10, async () => (await run.state()).session?.mind === A.mind);
+      if ((await run.state()).approval) throw new Error("a question of B is still asked under A");
     } finally {
       await run.quit();
     }

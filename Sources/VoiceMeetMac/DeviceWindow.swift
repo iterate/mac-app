@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Record
+import VoiceMeetCore
 
 /// THE WINDOW IN FRONT, told to the mind as two events on `/devices/<name>` (`DeviceEvents`):
 ///
@@ -15,6 +16,8 @@ import Record
 /// An excluded app in front (a password manager: `ExcludeList`) is told as `{ app, bundle }` with
 /// no title, so that the run of the app before it ends; its window is never read. Every
 /// Accessibility call runs on a queue of its own: an app that does not answer holds no other work.
+/// A read is of the session and the setting it began in (`SessionWork`): one that ends after a
+/// switch to another mind, or after "Window text" was turned off, is told to no mind.
 @MainActor
 final class DeviceWindow: ObservableObject {
     nonisolated static let maxCharacters = 20_000
@@ -22,6 +25,7 @@ final class DeviceWindow: ObservableObject {
     @Published var readsWindowText = AppEnvironment.current.defaults.bool(forKey: "device.windowText") {
         didSet {
             AppEnvironment.current.defaults.set(readsWindowText, forKey: "device.windowText")
+            if !readsWindowText { endReads() }
             watchInput()
             if readsWindowText { trigger("window") }
         }
@@ -50,6 +54,7 @@ final class DeviceWindow: ObservableObject {
     private var lastRead = Date.distantPast
     private var waitingTrigger: String?
     private var lastText: String?
+    private var work = SessionWork()
 
     func start() {
         observer = NSWorkspace.shared.notificationCenter.addObserver(
@@ -59,6 +64,22 @@ final class DeviceWindow: ObservableObject {
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
         watchInput()
+    }
+
+    /// Another session, or none: what the old one began lands nowhere, and the new mind hears the
+    /// window in front and its text from the start.
+    func use(_ session: MindSession?) {
+        work.use(generation: session?.generation)
+        front = nil
+        lastText = nil
+        waitingTrigger = nil
+    }
+
+    /// "Window text" is off: a read that runs or waits is told to no mind.
+    private func endReads() {
+        work.end()
+        lastText = nil
+        waitingTrigger = nil
     }
 
     func stop() {
@@ -88,18 +109,20 @@ final class DeviceWindow: ObservableObject {
         isChecking = true
         let bundle = app.bundleIdentifier ?? "", pid = app.processIdentifier
         let name = app.localizedName ?? bundle, isExcluded = exclude.excludes(bundle)
+        // the title is told while the Mac is lent, Window text or not: it goes by the session alone
+        let session = work.stamp.generation
         reader.async { [weak self] in
             // a password manager's title is never read
             let title = isExcluded ? nil : Self.title(of: pid) ?? ""
             DispatchQueue.main.async {
-                MainActor.assumeIsolated { self?.checked(Front(app: name, bundle: bundle, title: title)) }
+                MainActor.assumeIsolated { self?.checked(Front(app: name, bundle: bundle, title: title), session: session) }
             }
         }
     }
 
-    private func checked(_ now: Front) {
+    private func checked(_ now: Front, session: Int?) {
         isChecking = false
-        guard isLent(), now != front else { return }
+        guard isLent(), session != nil, session == work.stamp.generation, now != front else { return }
         let trigger = now.bundle == front?.bundle ? "window" : "app"
         front = now
         var payload: [String: Any] = ["app": now.app, "bundle": now.bundle]
@@ -145,9 +168,10 @@ final class DeviceWindow: ObservableObject {
         let wait = lastRead.addingTimeInterval(2).timeIntervalSinceNow
         guard wait > 0 else { return read(name) }
         waitingTrigger = name
+        let stamp = work.stamp
         DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
             MainActor.assumeIsolated {
-                guard let self, let name = self.waitingTrigger else { return }
+                guard let self, self.work.lands(stamp), let name = self.waitingTrigger else { return }
                 self.waitingTrigger = nil
                 self.read(name)
             }
@@ -159,6 +183,7 @@ final class DeviceWindow: ObservableObject {
         // The app checked is the one whose window is read.
         guard let app = NSWorkspace.shared.frontmostApplication, !exclude.excludes(app.bundleIdentifier) else { return }
         let name = app.localizedName ?? app.bundleIdentifier ?? ""
+        let stamp = work.stamp
         reader.async { [weak self] in
             let element = AXUIElementCreateApplication(app.processIdentifier)
             AXUIElementSetMessagingTimeout(element, 0.5)
@@ -171,7 +196,8 @@ final class DeviceWindow: ObservableObject {
             let title = tree["title"] as? String ?? ""
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
-                    guard let self, text != self.lastText else { return }
+                    // of the session and the setting it began in, or of none
+                    guard let self, self.work.lands(stamp), self.readsWindowText, text != self.lastText else { return }
                     self.lastText = text
                     self.publish("device/window-read", ["app": name, "title": title, "text": text, "trigger": trigger])
                 }

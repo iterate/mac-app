@@ -8,7 +8,9 @@ import VoiceMeetCore
 /// 30 unless set), with Touch ID (or the Mac's password where there is no Touch ID), or denies it.
 /// A caller that gets no answer in a minute is refused. An approval holds in its round only
 /// (`ApprovalGrants`): another mind, none, or a refusal of this Mac's key ends every approval, and
-/// the answer to a question of an older round approves nothing.
+/// the answer to a question of an older round approves nothing. The round is the caller's from its
+/// call on: a caller that waited behind another question, or for Touch ID, while the round ended
+/// is refused, and Touch ID ends with the round.
 ///
 /// In a test copy with a home of its own and its control socket (`ControlSocket`), the panel shows
 /// as well and its buttons answer (`ui.press` on `approval.once`, `approval.minutes`,
@@ -55,8 +57,12 @@ final class Approval {
     private let log = AppLog("approval")
     private var grants = ApprovalGrants()
     private var isAsking = false
+    /// The callers that wait for their turn, in order: one question at a time.
+    private var turns: [CheckedContinuation<Void, Never>] = []
     private var questions = 0
     private var session: MindSession?
+    /// Touch ID while it asks: a new round ends it.
+    private var confirming: LAContext?
     private lazy var window = ApprovalWindow { [weak self] allow, keep in _ = self?.answer(allow: allow, keep: keep) }
 
     /// Another mind session, or none: every approval ends, and a question that waits is answered
@@ -64,14 +70,27 @@ final class Approval {
     func use(_ session: MindSession?) {
         self.session = session
         grants.use(generation: session?.generation)
-        _ = answer(allow: nil)
+        endRound()
     }
 
     /// The mind refused this Mac's key: every approval ends, and so does a question that waits.
     func refuse() {
         grants.refuse()
-        _ = answer(allow: nil)
+        endRound()
         log.info("the mind refused this Mac's key: every approval ends")
+    }
+
+    /// The round now: a use that waited for a question goes on only while it holds (`holds`).
+    var round: ApprovalGrants.Round { grants.round }
+
+    func holds(_ round: ApprovalGrants.Round) -> Bool { grants.holds(round) }
+
+    /// The question on the screen and Touch ID end: no answer. The callers that wait for their
+    /// turn wake one after the other and end too, their round being an older one.
+    private func endRound() {
+        _ = answer(allow: nil)
+        confirming?.invalidate()
+        confirming = nil
     }
 
     /// Until when the person approved a thing in this session without another question; nil when they did not.
@@ -92,12 +111,13 @@ final class Approval {
     /// One question for several things (a live watch: the screens, the camera, the microphone).
     /// "Approve for N Minutes" holds for each of them.
     func ask(for things: [Shareable], does: String, what: String, detail: String? = nil) async throws {
-        // One question at a time: a second caller waits for the first answer, which may cover it.
-        while isAsking { try await Task.sleep(nanoseconds: 200_000_000) }
-        if things.allSatisfy({ isApproved($0) != nil }) { return }
-        isAsking = true
-        defer { isAsking = false }
+        // The round of the call, before any wait: a caller of the mind before is no caller now.
         let round = grants.round
+        // One question at a time: a second caller waits for the first answer, which may cover it.
+        await takeTurn()
+        defer { endTurn() }
+        try stillTheRound(round, does: does)
+        if things.allSatisfy({ isApproved($0) != nil }) { return }
         let byControl = answersByControl && AppEnvironment.current.hasOwnHome
         let names = things.map(\.title).joined(separator: ", ")
         let question = Question(
@@ -106,6 +126,8 @@ final class Approval {
             keepWords: Choices.approvalWords(Self.minutes), askedAt: Date(), byControl: byControl)
 
         let answer = await wait(for: question)
+        // a switch or a refusal ended the question: that is the reason, not the person
+        try stillTheRound(round, does: does)
         guard let answer, answer.allow else {
             let words = answer != nil ? "denied it" : "gave no answer in \(Int(Self.patience)) seconds"
             log.info("to \(does): the person \(words)")
@@ -116,7 +138,10 @@ final class Approval {
             // not be the active one for it
             do {
                 let reason = "approve that your mind may \(does)"
-                guard try await LAContext().evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) else {
+                let context = LAContext()
+                confirming = context
+                defer { if confirming === context { confirming = nil } }
+                guard try await context.evaluatePolicy(.deviceOwnerAuthentication, localizedReason: reason) else {
                     throw EndpointRefusal("The Mac's owner did not confirm with Touch ID to \(does).")
                 }
             } catch let refusal as EndpointRefusal {
@@ -132,6 +157,17 @@ final class Approval {
         } else {
             log.info("to \(does): the person approved this one use")
         }
+    }
+
+    /// The caller's turn to ask: at once when no question is asked, else after the ones before it.
+    private func takeTurn() async {
+        guard isAsking else { return isAsking = true }
+        await withCheckedContinuation { turns.append($0) }
+    }
+
+    /// The turn passes to the next caller, which then holds `isAsking`.
+    private func endTurn() {
+        if turns.isEmpty { isAsking = false } else { turns.removeFirst().resume() }
     }
 
     /// Shows the question and waits for a button, the control socket, the end of the patience, or
@@ -155,7 +191,7 @@ final class Approval {
     /// The question was asked for another mind than the one this Mac is lent to now, or before the
     /// mind refused this Mac's key: its answer is no answer now.
     private func stillTheRound(_ round: ApprovalGrants.Round, does: String) throws {
-        guard round != grants.round else { return }
+        guard !grants.holds(round) else { return }
         log.info("to \(does): the answer came after the mind changed or refused the key; the use is refused")
         throw EndpointRefusal("The question to \(does) was asked before the mind changed or refused this Mac's key.")
     }

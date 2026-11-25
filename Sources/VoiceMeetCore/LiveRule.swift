@@ -24,6 +24,14 @@ public enum LiveTracks {
         gates.filter { $0.gate == .go || ($0.gate == .ask && approved) }.map(\.track)
     }
 
+    /// After the question, with the gates read again (`now`): the owner may have changed a switch
+    /// while they were asked. A track is offered when it is Shared now, or on Ask now and was asked
+    /// in the question the person approved. Off or without its permission now: not offered.
+    public static func offered(asked before: [(track: String, gate: UseGate)], now: [(track: String, gate: UseGate)], approved: Bool) -> [String] {
+        let asked = Set(before.filter { $0.gate == .ask }.map(\.track))
+        return now.filter { $0.gate == .go || ($0.gate == .ask && approved && asked.contains($0.track)) }.map(\.track)
+    }
+
     /// The reason in the `bye` to a watcher who may see nothing.
     public static func nothing(asked: Bool, approved: Bool) -> String {
         asked && !approved ? "the owner did not approve the watch" : "nothing to show: the owner shares no screen, camera or microphone"
@@ -70,6 +78,9 @@ public enum LiveEffect: Equatable, Sendable {
 /// for its answer: each side's signals go out and are used in order. At most `most` watchers.
 public struct LiveWatchers: Equatable, Sendable {
     public static let most = 4
+    /// From its offer, a watch has this long to connect: else it ends, and so does the capture
+    /// that runs for its tracks.
+    public static let patience: TimeInterval = 45
 
     public enum Phase: Equatable, Sendable {
         /// The owner's switches are asked (an Ask may wait for the person).
@@ -90,6 +101,8 @@ public struct LiveWatchers: Equatable, Sendable {
         public internal(set) var tracks: [String] = []
         public let asked: Date
         public internal(set) var connected: Date?
+        /// When the offer went out.
+        public internal(set) var offered: Date?
         /// The device's candidates made before its offer went out.
         var held: [LiveCandidate] = []
         /// The watcher's candidates that came before its answer.
@@ -129,9 +142,10 @@ public struct LiveWatchers: Equatable, Sendable {
 
     /// The offer is made: it goes out, then the candidates made meanwhile. `mids` maps each `mid`
     /// of the offer to a track id.
-    public mutating func offerMade(_ id: String, sdp: String, mids: [String: String]) -> [LiveEffect] {
+    public mutating func offerMade(_ id: String, sdp: String, mids: [String: String], now: Date) -> [LiveEffect] {
         guard let i = index(id), watches[i].phase == .offering else { return [] }
         watches[i].phase = .offered
+        watches[i].offered = now
         let held = watches[i].held
         watches[i].held = []
         return [.send(.offer(to: id, sdp: sdp, tracks: mids))] + held.map { .send(.candidate(to: id, $0)) }
@@ -187,6 +201,13 @@ public struct LiveWatchers: Equatable, Sendable {
             effects.append(.ended(watcher: id, who: watch.who, seconds: Int(now.timeIntervalSince(connected).rounded()), why: why))
         }
         return effects
+    }
+
+    /// Each watch whose offer went out `patience` ago or more and that is not connected ends: the
+    /// watcher hears `bye` (a page that left with no word, an answer that never came).
+    public mutating func expire(now: Date) -> [LiveEffect] {
+        let late = watches.filter { $0.connected == nil && $0.offered.map { now.timeIntervalSince($0) >= Self.patience } == true }
+        return late.flatMap { end($0.id, why: "no connection \(Int(Self.patience)) s after the offer", tell: true, now: now) }
     }
 
     public mutating func endAll(why: String, now: Date) -> [LiveEffect] {

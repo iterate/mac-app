@@ -199,26 +199,33 @@ final class VideoTrack: Track {
         pictures = pictures.filter { $0.key > file.slot }
     }
 
-    func tick() {
-        queue.async {
-            let now = nowMs()
-            if !self.paused, let frame = self.newest {
-                if let open = self.slot, now >= Double(open + Slot.ms) + 200 {
-                    self.begin(frame, at: Double(Slot.start(now - 200)))
-                } else if self.slot == nil, self.restart, Int64(now * 90) > self.lastTicks {
-                    self.restart = false
-                    self.begin(frame, at: now)
-                }
+    func tick() { queue.async { self.step() } }
+
+    /// On `queue`: a still screen's next slot, a run that begins again, a file whose slot is over.
+    private func step() {
+        let now = nowMs()
+        if !paused, let frame = newest {
+            if let open = slot, now >= Double(open + Slot.ms) + 200 {
+                begin(frame, at: Double(Slot.start(now - 200)))
+            } else if slot == nil, restart, Int64(now * 90) > lastTicks {
+                restart = false
+                begin(frame, at: now)
             }
-            if let file = self.file, self.held == nil, now >= Double(file.slot + Slot.ms) + 200 { self.finish() }
         }
+        if let file, held == nil, now >= Double(file.slot + Slot.ms) + 200 { finish() }
     }
 
     /// The display sleeps or the Mac is locked: the last frame lasts until now, and nothing more
     /// is written until `resume`. A slot without a file means "not recorded".
     func pause() { stopRun(at: nowMs()) { $0.paused = true } }
 
-    func resume() { queue.async { (self.paused, self.restart) = (false, !self.ended) } }
+    /// It begins again at once with its newest frame, not at the next tick.
+    func resume() {
+        queue.async {
+            (self.paused, self.restart) = (false, !self.ended)
+            self.step()
+        }
+    }
 
     /// A camera that was off has no newest frame: after it starts again, its first new frame
     /// begins the run, not the one from before the pause.

@@ -93,8 +93,12 @@ public enum Resync {
     /// The input sample for each output sample of a buffer that is `change` samples longer.
     public static func indices(count: Int, change: Int) -> [Int] {
         let out = max(0, count + change)
-        return (0..<out).map { $0 * count / max(1, out) }
+        return (0..<out).map { index($0, count: count, out: out) }
     }
+
+    /// The input sample of output sample `i`, of `out` made from `count`: with no list to allocate.
+    @inline(__always)
+    public static func index(_ i: Int, count: Int, out: Int) -> Int { i * count / max(1, out) }
 }
 
 /// Rounds to one decimal.

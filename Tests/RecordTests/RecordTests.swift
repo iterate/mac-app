@@ -248,6 +248,91 @@ final class SpoolTests: XCTestCase {
     }
 }
 
+extension SpoolTests {
+    /// Astra 10, Fable 5: a track that finishes after its slot was sealed without it does not
+    /// write its file, nor a slot event over the sealed one.
+    func testALateTrackLeavesTheSealedSlotAsItIs() throws {
+        let r = recorder(), t: Int64 = 1_795_275_690_000
+        XCTAssertTrue(r.opening(track: "mic-0", slot: t))
+        XCTAssertTrue(r.opening(track: "speaker-0", slot: t))
+        r.finished(track: "mic-0", slot: t, parts: [Data([1, 2])], size: 2, entry: entry("audio"), picture: nil)
+        // the speakers never wrote theirs: past the stale deadline, the slot is sealed with the mic
+        r.sealStale(now: Double(t + Slot.ms + 10_001))
+        XCTAssertEqual(slots(), ["\(t).json"])
+        let sealed = try Data(contentsOf: spool.appendingPathComponent("slots/\(t).json"))
+        r.finished(track: "speaker-0", slot: t, parts: [Data([7])], size: 1, entry: entry("audio"), picture: nil)
+        XCTAssertEqual(slots(), ["\(t).json"], "one slot")
+        XCTAssertEqual(try Data(contentsOf: spool.appendingPathComponent("slots/\(t).json")), sealed, "byte for byte as sealed")
+        let late = spool.appendingPathComponent(String(Slot.path(device: "test.mac", track: "speaker-0", slot: t, ext: "mp4").dropFirst()))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: late.path), "no file that no event names")
+    }
+
+    func testASlotSealedWithNothingWrittenTakesNoTrackAfter() {
+        let r = recorder(), t: Int64 = 1_795_275_690_000
+        XCTAssertTrue(r.opening(track: "screen-1", slot: t))
+        r.sealStale(now: Double(t + Slot.ms + 10_001))
+        XCTAssertEqual(slots(), [])
+        XCTAssertFalse(r.opening(track: "mic-0", slot: t))
+        r.finished(track: "screen-1", slot: t, parts: [Data([1])], size: 1, entry: entry("video"), picture: nil)
+        XCTAssertEqual(slots(), [])
+    }
+
+    /// Astra 11: an earlier version's spool, one for the whole mind, holds slots of two names;
+    /// each goes into the spool of the name it was recorded as, with its files.
+    func testAnOldSpoolSplitsByTheDeviceEachSlotNames() throws {
+        let mind = spool!, files = FileManager.default
+        func slot(_ t: Int64, _ device: String) throws -> String {
+            let file = Slot.path(device: device, track: "mic-0", slot: t, ext: "mp4")
+            let url = mind.appendingPathComponent(String(file.dropFirst()))
+            try files.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data([1]).write(to: url)
+            try files.createDirectory(at: mind.appendingPathComponent("slots"), withIntermediateDirectories: true)
+            try Slot.event(t: t, tracks: ["mic-0": ["kind": "audio", "file": file, "bytes": 1]]).write(to: mind.appendingPathComponent("slots/\(t).json"))
+            return file
+        }
+        let old = try slot(1_795_275_690_000, "old.mac"), new = try slot(1_795_275_720_000, "new.mac")
+        try Data("1795275720000".utf8).write(to: mind.appendingPathComponent("sealed"))
+        XCTAssertEqual(Spool.split(mindFolder: mind), 2)
+        for (device, file, t) in [("old.mac", old, 1_795_275_690_000), ("new.mac", new, 1_795_275_720_000)] {
+            let folder = Spool.folder(in: mind.deletingLastPathComponent(), mind: mind.lastPathComponent, device: device)
+            XCTAssertEqual(Spool.waiting(in: folder), 1)
+            XCTAssertTrue(files.fileExists(atPath: folder.appendingPathComponent("slots/\(t).json").path))
+            XCTAssertTrue(files.fileExists(atPath: folder.appendingPathComponent(String(file.dropFirst())).path), "the file goes with its slot")
+            XCTAssertTrue(files.fileExists(atPath: folder.appendingPathComponent("sealed").path))
+        }
+        XCTAssertEqual(Spool.waiting(in: mind), 0)
+        XCTAssertEqual(Spool.split(mindFolder: mind), 0, "once")
+    }
+
+    func testTheDeviceOfASlot() {
+        XCTAssertEqual(Spool.device(ofSlot: ["tracks": ["mic-0": ["file": "/devices/jane.mac/record/mic-0/x.mp4"]]]), "jane.mac")
+        XCTAssertNil(Spool.device(ofSlot: ["tracks": ["a": ["file": "/devices/a/record/x"], "b": ["file": "/devices/b/record/x"]]]))
+        XCTAssertNil(Spool.device(ofSlot: ["tracks": [:]]))
+    }
+}
+
+/// Fable 12, Carbon 5: a resume during a slow open makes no second stream, and an open that a
+/// display change or a stop made stale stops the stream it made.
+final class OpensTests: XCTestCase {
+    func testOneOpenAtATimeAndAStaleOneIsNotKept() {
+        var opens = Opens()
+        let first = opens.begin(again: true)!
+        XCTAssertNil(opens.begin(again: false), "a resume while the start's open runs")
+        XCTAssertTrue(opens.keeps(first))
+        // the displays change during it: a new open, and the first one's stream goes
+        let second = opens.begin(again: true)!
+        XCTAssertFalse(opens.keeps(first))
+        XCTAssertTrue(opens.keeps(second))
+        opens.end(first)
+        XCTAssertNil(opens.begin(again: false), "the second still runs")
+        opens.end(second)
+        let resume = opens.begin(again: false)
+        XCTAssertNotNil(resume)
+        opens.stop()
+        XCTAssertFalse(opens.keeps(resume!), "stopped during the open: the stream stops")
+    }
+}
+
 final class CaptureTests: XCTestCase {
     func testTheRecordKeeps10FramesASecondByTimeOutOf30() {
         // 30 frames a second for 3 s, with a millisecond of jitter

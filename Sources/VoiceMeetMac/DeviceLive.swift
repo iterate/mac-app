@@ -14,7 +14,11 @@ import VoiceMeetCore
 /// Activity shows it as a running act, and the panel lists it with a button that ends it.
 ///
 /// The job listens for one mind session (`MindSession`): `use` ends the old session's job and its
-/// watches at once.
+/// watches at once. What the peer says on its own queue (signals, the watch's records, its start
+/// and end, the watchers) waits in one outbox with the session's stamp (`SessionWork`) and goes to
+/// the main queue in order; `use` delivers what the old session said to the old bridge before it
+/// stops that job, and a late word of an old session lands nowhere. The peer (WebRTC's factory
+/// and threads) is made at the first signal of a watcher, not at the start.
 @MainActor
 final class DeviceLive: ObservableObject {
     /// A connected watcher, for the panel and `live.state()`.
@@ -35,56 +39,47 @@ final class DeviceLive: ObservableObject {
     var sourcesChanged: (Set<RecordSource>) -> Void = { _ in }
     var began: (_ who: String, _ tracks: [String]) -> String = { _, _ in "" }
     var finished: (_ act: String, _ failure: String?) -> Void = { _, _ in }
+    /// The peer is made: the recorder hands it the capture (`DeviceRecord.sink`).
+    var peerMade: (LivePeer) -> Void = { _ in }
 
-    /// The capture's sink: made once, at the start.
-    let peer = LivePeer()
+    /// The capture's sink, once a watcher came.
+    private(set) var peer: LivePeer?
     private let log = AppLog("live")
     /// The session's bridge, whose job `live` signals.
     private var bridge: MindBridge?
     private var acts: [String: String] = [:]
+    private var work = SessionWork()
+    private let outbox = Outbox()
+    /// The ICE servers the job said before the peer was made.
+    private var iceServers: [String: Any]?
+    private var isStopped = false
 
-    func start() {
-        peer.log = { line in AppLog("live").info(line) }
-        // the peer says these on its own queues: they go to the job in order, from the main queue
-        peer.send = { [weak self] signal in
-            let line = signal.json
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.bridge?.send("live", ["signal": line]) } }
-        }
-        peer.kept = { [weak self] facts in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.bridge?.send("live", facts) } }
-        }
-        peer.decide = { [weak self] _, who, answer in
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self else { return answer([], "the app is closing") }
-                    Task { @MainActor in
-                        let decided = await self.decide(who)
-                        answer(decided.tracks, decided.reason)
-                    }
-                }
-            }
-        }
-        peer.started = { [weak self] watcher, who, tracks in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.watchBegan(watcher, who: who, tracks: tracks) } }
-        }
-        peer.ended = { [weak self] watcher, who, seconds, why in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.watchEnded(watcher, why: why) } }
-        }
-        peer.changed = { [weak self] state in
-            let sources = Set(state.tracks.compactMap(RecordSource.of(track:)))
-            let connected = state.watches.compactMap { w in w.connected.map { Watcher(id: w.id, who: w.who, tracks: w.tracks, since: $0) } }
-            DispatchQueue.main.async {
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    if connected != self.watchers { self.watchers = connected }
-                    self.sourcesChanged(sources)
-                }
-            }
-        }
+    /// What the peer says, for the main queue.
+    private enum Said {
+        case line([String: Any])
+        case began(watcher: String, who: String, tracks: [String])
+        case ended(watcher: String, why: String)
+        case changed(watchers: [Watcher], sources: Set<RecordSource>)
+    }
+
+    /// The outbox and the stamp it puts things with: the peer's queue and the main queue share it.
+    private final class Outbox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var box = SessionOutbox<Said>()
+        private var stamp = SessionWork().stamp
+
+        var now: SessionWork.Stamp { lock.withLock { stamp } }
+        func set(_ stamp: SessionWork.Stamp) { lock.withLock { self.stamp = stamp } }
+        /// True when the box was empty: then one drain is to be scheduled.
+        func put(_ said: Said) -> Bool { lock.withLock { box.put(said, at: stamp) } }
+        func take(for work: SessionWork) -> [Said] { lock.withLock { box.take(for: work) } }
     }
 
     func stop() {
-        peer.endAll(why: "the Mac stopped")
+        isStopped = true
+        peer?.endAll(why: "the Mac stopped")
+        // the byes and the records go now: the bridge closes next
+        drain()
     }
 
     /// For a drawing (`Rendering`): watchers as given, with no peer.
@@ -95,7 +90,12 @@ final class DeviceLive: ObservableObject {
     /// The panel's button, or `live.end` on the endpoint.
     func end(_ watcher: String, why: String) {
         log.info("\(watcher.prefix(8)): ended, \(why)")
-        peer.end(watcher, why: why)
+        peer?.end(watcher, why: why)
+    }
+
+    /// Every watch and its tracks, connected or still connecting (`AppModel.liveChoicesChanged`).
+    var everyWatch: [(id: String, tracks: [String])] {
+        peer?.state.watches.map { ($0.id, $0.tracks) } ?? []
     }
 
     /// For `live.state()` on the endpoint.
@@ -106,13 +106,16 @@ final class DeviceLive: ObservableObject {
         ]
     }
 
-    /// Another session and its bridge, or none: the old one's job and watches end now, and the new
-    /// one's job starts.
+    /// Another session and its bridge, or none: the old one's watches end now, their byes and
+    /// records go to the old bridge, then its job stops; the new one's job starts.
     func use(_ session: MindSession?, bridge: MindBridge?) {
         if let old = self.bridge {
-            peer.endAll(why: "the Mac is no longer lent to this mind")
+            peer?.endAll(why: "the Mac is no longer lent to this mind")
+            drain()
             old.send("live", ["stop": true])
         }
+        work.use(generation: session?.generation)
+        outbox.set(work.stamp)
         self.session = session
         self.bridge = bridge
         guard let bridge else { return }
@@ -125,9 +128,11 @@ final class DeviceLive: ObservableObject {
     }
 
     private func said(_ line: [String: Any]) {
-        if peer.take(line) { return }
+        if line["iceServers"] != nil, peer == nil { return iceServers = line }
+        if line["signal"] != nil, !isStopped { makePeer() }
+        if peer?.take(line) == true { return }
         if line["exited"] != nil {
-            peer.endAll(why: "the signalling stopped")
+            peer?.endAll(why: "the signalling stopped")
         } else if line["started"] != nil {
             bridge?.send("live", ["start": true])
         } else if line["job"] != nil || line["connected"] != nil {
@@ -135,8 +140,58 @@ final class DeviceLive: ObservableObject {
         }
     }
 
-    private func watchBegan(_ watcher: String, who: String, tracks: [String]) {
-        acts[watcher] = began(who, tracks)
+    /// The peer, at the first watcher's signal: its callbacks put into the outbox.
+    private func makePeer() {
+        guard peer == nil else { return }
+        let peer = LivePeer()
+        self.peer = peer
+        peer.log = { line in AppLog("live").info(line) }
+        // the peer says these on its own queue: into the outbox, in order, with the session's stamp
+        peer.send = { [weak self] signal in self?.put(.line(["signal": signal.json])) }
+        peer.kept = { [weak self] facts in self?.put(.line(facts)) }
+        peer.started = { [weak self] watcher, who, tracks in self?.put(.began(watcher: watcher, who: who, tracks: tracks)) }
+        peer.ended = { [weak self] watcher, _, _, why in self?.put(.ended(watcher: watcher, why: why)) }
+        peer.changed = { [weak self] state in
+            let sources = Set(state.tracks.compactMap(RecordSource.of(track:)))
+            let connected = state.watches.compactMap { w in w.connected.map { Watcher(id: w.id, who: w.who, tracks: w.tracks, since: $0) } }
+            self?.put(.changed(watchers: connected, sources: sources))
+        }
+        peer.decide = { [weak self] _, who, answer in
+            guard let self else { return answer([], "the app is closing") }
+            let stamp = self.outbox.now
+            let gone = "the Mac is no longer lent to this mind"
+            Task { @MainActor in
+                // asked in one session, answered in it only
+                guard self.work.lands(stamp) else { return answer([], gone) }
+                let decided = await self.decide(who)
+                guard self.work.lands(stamp) else { return answer([], gone) }
+                answer(decided.tracks, decided.reason)
+            }
+        }
+        if let iceServers { _ = peer.take(iceServers) }
+        iceServers = nil
+        log.info("the peer is made for the first watcher")
+        peerMade(peer)
+    }
+
+    /// From the peer's queue.
+    nonisolated private func put(_ said: Said) {
+        guard outbox.put(said) else { return }
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.drain() } }
+    }
+
+    /// On the main queue: what the peer said in this session, in order, to its bridge and the app.
+    private func drain() {
+        for said in outbox.take(for: work) {
+            switch said {
+            case .line(let line): bridge?.send("live", line)
+            case let .began(watcher, who, tracks): acts[watcher] = began(who, tracks)
+            case let .ended(watcher, why): watchEnded(watcher, why: why)
+            case let .changed(connected, sources):
+                if connected != watchers { watchers = connected }
+                sourcesChanged(sources)
+            }
+        }
     }
 
     private func watchEnded(_ watcher: String, why: String) {

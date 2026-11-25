@@ -245,7 +245,9 @@ public final class LivePeer: NSObject, CaptureSink, @unchecked Sendable {
                     if let error { return self.run(self.watchers.end(id, why: "no offer: \(error.localizedDescription)", tell: true, now: Date())) }
                     var mids: [String: String] = [:]
                     for (transceiver, track) in sent where !transceiver.mid.isEmpty { mids[transceiver.mid] = track }
-                    self.run(self.watchers.offerMade(id, sdp: offer.sdp, mids: mids))
+                    self.run(self.watchers.offerMade(id, sdp: offer.sdp, mids: mids, now: Date()))
+                    // one look when its time is up: a watch that never connects lets its capture go
+                    self.work.asyncAfter(deadline: .now() + LiveWatchers.patience + 0.5) { self.run(self.watchers.expire(now: Date())) }
                 }
             }
         }

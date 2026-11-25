@@ -75,7 +75,7 @@ final class AppModel {
         presenceWatch = deviceEvents.$presence.removeDuplicates().sink { [weak self] _ in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.record.tick() } }
         }
-        record.sink = live.peer
+        live.peerMade = { [weak self] peer in self?.record.sink = peer }
         live.decide = { [weak self] who in await self?.liveTracks(who: who) ?? ([], "the app is closing") }
         live.sourcesChanged = { [weak self] sources in
             guard let self, sources != self.record.live else { return }
@@ -87,7 +87,6 @@ final class AppModel {
         }
         live.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
         record.start()
-        live.start()
     }
 
     /// Another mind session, or none, or another authorization (`Lend.sessionChanged`). A refusal
@@ -103,9 +102,12 @@ final class AppModel {
         let old = bridge
         bridge = session.map(MindBridge.of)
         bridge?.hold("session")
-        approval.use(session)
-        deviceEvents.use(session, bridge: bridge)
+        // live first: its watches end, and their byes, their records and their acts' ends go to
+        // the old mind, before the device's events turn to the new one
         live.use(session, bridge: bridge)
+        approval.use(session)
+        deviceWindow.use(session)
+        deviceEvents.use(session, bridge: bridge)
         record.use(session, bridge: bridge)
         acts.use(session)
         // one hold for each name: the same bridge again keeps it
@@ -268,6 +270,7 @@ final class AppModel {
     /// Refuses a thing that is off or not permitted, asks the person first when its choice is
     /// "Ask", then counts the use, so that the menu bar and the panel show it.
     private func use(_ thing: Shareable, what: String, asks detail: String? = nil) async throws {
+        let round = approval.round
         switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: approval.isApproved(thing) != nil) {
         case .off:
             throw EndpointRefusal("The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
@@ -277,24 +280,40 @@ final class AppModel {
             )
         case .ask:
             try await approval.ask(for: thing, what: what, detail: detail)
+            try stillAllowed(thing, in: round)
         case .go:
             break
         }
         count(thing)
     }
 
+    /// After a question, which takes time: the use goes on only in the round it was asked in, while
+    /// the mind allows this Mac's key, and while the thing is not turned off nor lost its permission.
+    private func stillAllowed(_ thing: Shareable, in round: ApprovalGrants.Round) throws {
+        guard approval.holds(round), isAuthorized else {
+            throw EndpointRefusal("The Mac is no longer lent to this mind, or the mind refused its key, while the owner was asked to \(thing.does).")
+        }
+        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: true) {
+        case .off: throw EndpointRefusal("The Mac's owner turned \(thing.title) off while they were asked. A mind cannot \(thing.does).")
+        case .notPermitted: throw EndpointRefusal("macOS took back \(thing.power.permission?.title ?? "a permission") while the owner was asked.")
+        case .ask, .go: break
+        }
+    }
+
     // MARK: - Live
 
     /// The owner changed a choice in the panel: a watch that has a track whose thing is now Off
-    /// (or lost its permission) ends at once. Ask and Shared go on: the watch was approved.
+    /// (or lost its permission) ends at once, connected or still connecting. Ask and Shared go on:
+    /// the watch was approved. A watch whose tracks are still being decided reads the choices
+    /// again after its question (`liveTracks`).
     func liveChoicesChanged() {
         let cameras = Camera.devices.map(Shareable.camera)
         let things = { (track: String) -> [Shareable] in
             track == "camera-0" ? cameras : track == "mic-0" ? [.microphone] : Screen.displays.filter { "screen-\($0.id)" == track }.map(Shareable.display)
         }
-        for watcher in live.watchers {
-            let off = watcher.tracks.first { track in things(track).contains { $0.sharing == .off || !$0.isPermitted } }
-            if let off { live.end(watcher.id, why: "the owner turned \(off) off") }
+        for watch in live.everyWatch {
+            let off = watch.tracks.first { track in things(track).contains { $0.sharing == .off || !$0.isPermitted } }
+            if let off { live.end(watch.id, why: "the owner turned \(off) off") }
         }
     }
 
@@ -303,14 +322,19 @@ final class AppModel {
     /// offered. Ask: one question for the whole watch. Shared: offered. Live shows one camera,
     /// and goes by every camera's choice, as the record's switch does.
     private func liveTracks(who: String) async -> (tracks: [String], reason: String) {
+        // (the watch is of the session it was asked in: `DeviceLive` drops an answer of an older one)
         let gate = { (thing: Shareable) in
             UseGate.decide(sharing: thing.sharing.rawValue, permitted: thing.isPermitted, approved: self.approval.isApproved(thing) != nil)
         }
-        let cameras = Camera.devices.map(Shareable.camera)
-        let things: [(track: String, things: [Shareable])] =
-            Screen.displays.map { ("screen-\($0.id)", [Shareable.display($0)]) } + [("camera-0", cameras), ("mic-0", [.microphone])]
-        let gates = things.map { (track: $0.track, gate: UseGate.strictest($0.things.map(gate))) }
+        let read = { () -> (things: [(track: String, things: [Shareable])], gates: [(track: String, gate: UseGate)]) in
+            let cameras = Camera.devices.map(Shareable.camera)
+            let things: [(track: String, things: [Shareable])] =
+                Screen.displays.map { ("screen-\($0.id)", [Shareable.display($0)]) } + [("camera-0", cameras), ("mic-0", [.microphone])]
+            return (things, things.map { (track: $0.track, gate: UseGate.strictest($0.things.map(gate))) })
+        }
+        var (things, gates) = read()
         let asked = LiveTracks.asks(gates)
+        var tracks = LiveTracks.offered(gates, approved: false)
         var approved = false
         if asked {
             let asking = zip(things, gates).filter { $0.1.gate == .ask }.flatMap { $0.0.things }
@@ -321,9 +345,12 @@ final class AppModel {
             } catch {
                 log.info("live: \(who) is not approved: \(AppLog.describe(error))")
             }
+            // the question took time: the owner may have changed a choice, or the round ended
+            let before = gates
+            (things, gates) = read()
+            tracks = LiveTracks.offered(asked: before, now: gates, approved: approved)
         }
-        let tracks = LiveTracks.offered(gates, approved: approved)
-        for (item, _) in zip(things, gates) where tracks.contains(item.track) { item.things.forEach(count) }
+        for item in things where tracks.contains(item.track) { item.things.forEach(count) }
         return (tracks, LiveTracks.nothing(asked: asked, approved: approved))
     }
 
