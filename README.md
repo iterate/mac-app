@@ -590,14 +590,16 @@ and no list of actions. What happens with your words is the mind's own matter.
   Mac knows (the panel's mind switcher adds and removes them); **Tab** chooses the next one. The
   bar starts with the mind you chose last, else the one this Mac is lent to. The choice changes
   nothing of the lend: an input can go to a mind this Mac is not lent to.
-- **Keys.** ⇧Return and ⌥Return make a new line. Escape closes the bar and keeps what you wrote;
-  ⌥⇧Space opens it again.
+- **Keys.** ⇧Return and ⌥Return make a new line. Escape, or a click outside the bar, closes it and
+  keeps what you wrote; ⌥⇧Space opens it again. The text grows to six lines, then scrolls.
 
 Return closes the bar at once. One input goes at a time: while it goes, the bar shows it and takes
 no new one. The input goes up as you, as a capture does: the job `input` of that mind's process
 (`bridge/input.mjs`) uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
 (no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
-reason, and Return sends the same input again (the same id: the mind keeps it once). An input you
+reason, and Return sends the same input again (the same id: the mind keeps it once). When the
+reason says the sign-in is missing, or the iterate CLI has none for that mind, the bar shows the
+command that fixes it (`iterate login <address>`) with **Copy**. An input you
 changed first is another input, with a new id. The line under the panel's three buttons says how
 the newest of the last capture, input and dictation ended, in orange when it failed.
 
@@ -848,8 +850,8 @@ recording, an act that runs), `blocked` (Screen Recording and Accessibility not 
 draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearance);
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
-listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
-listening, locked, failed), light and dark, eighteen files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-approval <folder>` draws the
+listening, with a text and files, while it sends, not sent, not sent with its fix) and the
+dictation pill (loading, listening, locked, failed), light and dark, twenty files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-approval <folder>` draws the
 Ask question, and `--render-log <folder>` the Activity window, light and dark, two files each. `--render-all <folder>` draws every
 view, light and dark.
 
@@ -931,7 +933,7 @@ The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copy
 `activity.all`, `activity.back`, `activity.context`, `activity.showsPill`, `activity.window`, `approval.once`,
 `approval.minutes`, `approval.deny`, in the Activity window `log.mode` (a segment by its label: `Acts`, `Every event`),
 `log.filter.<acts|presence|app|window|record|live|inputs|keys>`, `log.search`, `log.list`, `log.row`, `log.context`,
-`log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `capture.send`,
+`log.sharing`, `log.endApproval`, `log.copy`, `log.showsPill`, `log.close`, `input.text`, `input.send`, `input.mind`, `input.microphone`, `input.copyFix`, `capture.send`,
 `capture.discard`, `speech.model` (the panel's speech row: it opens Settings › Dictation),
 `speech.model.<id>` (a model in its list), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,

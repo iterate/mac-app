@@ -8,8 +8,11 @@ import VoiceMeetCore
 /// What the input bar shows: the draft, the minds it can go to, and the one that is chosen.
 @MainActor
 final class MindInputModel: ObservableObject {
-    static let fontSize: CGFloat = 18
-    static let lineHeight: CGFloat = 22
+    static let fontSize: CGFloat = 20
+    /// One line of the text, as the text view sets it: the font's own line height.
+    static let lineHeight: CGFloat = ceil(NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: fontSize)))
+    /// The text grows to this many lines, then scrolls inside.
+    static let mostLines: CGFloat = 6
     static let mindKey = "inputMind"
 
     @Published var draft = InputDraft(id: MindInputModel.newId())
@@ -18,6 +21,8 @@ final class MindInputModel: ObservableObject {
     @Published var mind: String?
     @Published var textHeight: CGFloat = MindInputModel.lineHeight
     @Published var isDropTargeted = false
+    /// The command that fixes the last failure (`iterate login <address>`), or nil.
+    @Published var fix: String?
     /// The microphone of the bar: it listens when the bar opens, and its button turns it off.
     @Published var voice: Voice = .off
     let level = VoiceLevel()
@@ -26,6 +31,8 @@ final class MindInputModel: ObservableObject {
     var send: () -> Void = {}
     var close: () -> Void = {}
     var toggleMicrophone: () -> Void = {}
+    /// A click on the face: the minds, in a menu under it.
+    var showMinds: () -> Void = {}
     /// The text view, for the keyboard's focus.
     weak var field: NSTextView?
     private var pictures = 0
@@ -48,16 +55,17 @@ final class MindInputModel: ObservableObject {
         }
     }
 
-    /// What of a draft sets the bar's height besides its text: the row of files and the status line.
+    /// What of a draft sets the bar's height besides its text: the files (they wrap), the failure
+    /// and its fix.
     struct Height: Equatable {
-        let files: Bool
+        let files: [String]
         let failure: String?
-        let refusal: Bool
+        let fix: Bool
 
-        init(_ draft: InputDraft) {
-            files = !draft.attachments.isEmpty
+        init(_ draft: InputDraft, fix: String?) {
+            files = draft.attachments.map(\.name)
             if case .failed(let reason) = draft.phase { failure = reason } else { failure = nil }
-            refusal = draft.refusal != nil
+            self.fix = failure != nil && fix != nil
         }
     }
 
@@ -217,6 +225,9 @@ final class MindInput: SpeechClient {
     var isListening: Bool { session.isListening(for: self) }
     /// The bridge each input that is being sent holds, by its id.
     private var sending: [String: MindBridge] = [:]
+    /// A click in another app or on the desktop while the bar has the keyboard: it closes the bar.
+    private var outside: [Any] = []
+    private var downAt: NSPoint?
 
     init(session: SpeechSession) {
         self.session = session
@@ -224,6 +235,15 @@ final class MindInput: SpeechClient {
         model.close = { [weak self] in self?.close() }
         model.toggleMicrophone = { [weak self] in self?.toggleMicrophone() }
         model.mindChanged = { [weak self] in self?.hearWithTheMindsWords() }
+        model.showMinds = { [weak self] in self?.showMinds() }
+        // The bar is made once, soon after the app starts, so that ⌥⇧Space shows it at once.
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, self.panel == nil else { return }
+                _ = self.makePanel()
+                self.fit()
+            }
+        }
     }
 
     /// ⌥⇧Space: open the bar, give it the keyboard when it is open without it, or close it.
@@ -235,7 +255,56 @@ final class MindInput: SpeechClient {
     private func close() {
         // a closed bar never listens
         stopListening(keepingLastWords: false)
+        stopWatchingClicks()
         panel?.orderOut(nil)
+    }
+
+    /// While the bar has the keyboard, a click elsewhere closes it, as Spotlight's does; the draft
+    /// stays. A drag that starts elsewhere (a file for the bar) is not a click: it moved.
+    private func watchClicks() {
+        guard outside.isEmpty else { return }
+        let down = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated { self?.downAt = NSEvent.mouseLocation }
+        }
+        let up = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseUp, .rightMouseUp]) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let at = self.downAt else { return }
+                self.downAt = nil
+                let now = NSEvent.mouseLocation
+                if hypot(now.x - at.x, now.y - at.y) < 4 { self.close() }
+            }
+        }
+        outside = [down, up].compactMap { $0 }
+    }
+
+    private func stopWatchingClicks() {
+        outside.forEach(NSEvent.removeMonitor)
+        outside = []
+        downAt = nil
+    }
+
+    /// The minds this Mac knows, in a native menu under the face: each one's face, its name and
+    /// address; the menu's own type-ahead finds one by its name.
+    private func showMinds() {
+        guard let host, !model.minds.isEmpty, !model.draft.isSending else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        for mind in model.minds {
+            let face = MindFaces.shared.face(of: mind.mind)
+            let item = NSMenuItem(title: face.title, action: #selector(MindMenuTarget.choose(_:)), keyEquivalent: "")
+            let title = NSMutableAttributedString(string: face.title, attributes: [.font: NSFont.menuFont(ofSize: 13)])
+            title.append(NSAttributedString(string: "  \(mind.mind)", attributes: [.font: NSFont.menuFont(ofSize: 11), .foregroundColor: NSColor.secondaryLabelColor]))
+            item.attributedTitle = title
+            item.target = MindMenuTarget.shared
+            item.representedObject = mind.mind
+            item.image = MindMenuTarget.avatar(of: mind.mind)
+            item.state = mind.mind == model.mind ? .on : .off
+            menu.addItem(item)
+        }
+        MindMenuTarget.shared.chosen = { [weak self] mind in self?.model.choose(mind) }
+        // under the face, whose top left is the bar's padding
+        let below = NSPoint(x: MindInputBar.padding - 4, y: host.isFlipped ? MindInputBar.padding + 34 : host.bounds.height - MindInputBar.padding - 34)
+        menu.popUp(positioning: nil, at: below, in: host)
     }
 
     // MARK: - The microphone
@@ -336,21 +405,49 @@ final class MindInput: SpeechClient {
         model.mind = wanted.first { address in model.minds.contains { $0.mind == address } } ?? model.minds.first?.mind
         let panel = self.panel ?? makePanel()
         fit()
-        if !panel.isVisible {
-            // on the display under the pointer, in its upper third
+        let appears = !panel.isVisible
+        if appears {
+            // on the display under the pointer, a little above its middle, as Spotlight; it grows down
             let pointer = NSEvent.mouseLocation
             let screen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) } ?? NSScreen.main
             if let visible = screen?.visibleFrame {
-                panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + visible.height * 0.72 - panel.frame.height))
+                panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.maxY - visible.height * 0.3 - panel.frame.height))
             }
         }
-        guard takingKeys else { return panel.orderFrontRegardless() }
-        panel.makeKeyAndOrderFront(nil)
-        // the bar starts by listening
-        listen(asking: false)
+        if takingKeys { panel.makeKeyAndOrderFront(nil) } else { panel.orderFrontRegardless() }
+        if appears { appear(panel) }
+        guard takingKeys else { return }
         focus()
-        // at the first opening the text view may not be made yet: once more after the layout
-        DispatchQueue.main.async { MainActor.assumeIsolated { self.focus() } }
+        // The bar starts by listening, after its first frame is on the screen. At the first
+        // opening the text view may not be made yet: the keyboard goes to it once more then.
+        DispatchQueue.main.async {
+            MainActor.assumeIsolated {
+                self.focus()
+                if panel.isKeyWindow { self.listen(asking: false) }
+            }
+        }
+    }
+
+    /// A short fade and scale from 97%, under 120 ms; with Reduce Motion, the fade alone.
+    private func appear(_ panel: NSPanel) {
+        panel.alphaValue = 0
+        if !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion, let layer = panel.contentView?.layer {
+            let size = layer.bounds.size
+            let scale: CGFloat = 0.97
+            var from = CATransform3DMakeTranslation(size.width * (1 - scale) / 2, size.height * (1 - scale) / 2, 0)
+            from = CATransform3DScale(from, scale, scale, 1)
+            let grow = CABasicAnimation(keyPath: "transform")
+            grow.fromValue = from
+            grow.toValue = CATransform3DIdentity
+            grow.duration = 0.11
+            grow.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            layer.add(grow, forKey: "appear")
+        }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.1
+            context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+            panel.animator().alphaValue = 1
+        }
     }
 
     /// The keyboard goes to the text.
@@ -361,12 +458,14 @@ final class MindInput: SpeechClient {
 
     private func makePanel() -> InputPanel {
         let host = NSHostingView(rootView: MindInputBar(model: model))
+        host.wantsLayer = true
         // The app in front stays in front: the bar takes the keyboard and nothing else.
         let panel = InputPanel(contentRect: NSRect(origin: .zero, size: host.fittingSize), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .floating
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        // the window's own shadow, of the bar's rounded shape (the material's mask)
         panel.hasShadow = true
         // It stays while another app is in front, so that a file can be dragged to it from there.
         panel.hidesOnDeactivate = false
@@ -379,10 +478,14 @@ final class MindInput: SpeechClient {
         self.host = host
         // The bar grows down with its text and its files: its top stays where it is. It is laid
         // out again only when what sets its height changed, not at each word.
-        changes = model.$draft.map(MindInputModel.Height.init).combineLatest(model.$textHeight).removeDuplicates { $0 == $1 }
+        changes = model.$draft.combineLatest(model.$fix).map(MindInputModel.Height.init).combineLatest(model.$textHeight)
+            .removeDuplicates { $0 == $1 }
             .sink { [weak self] _ in
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.fit() } }
             }
+        NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: panel, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.watchClicks() }
+        }
         return panel
     }
 
@@ -392,6 +495,7 @@ final class MindInput: SpeechClient {
         let size = host.fittingSize
         guard size.width > 0, size.height > 0, abs(size.height - panel.frame.height) > 0.5 || abs(size.width - panel.frame.width) > 0.5 else { return }
         panel.setFrame(NSRect(x: panel.frame.minX, y: panel.frame.maxY - size.height, width: size.width, height: size.height), display: true)
+        panel.invalidateShadow()
     }
 
     // MARK: - Send
@@ -399,7 +503,7 @@ final class MindInput: SpeechClient {
     /// Return: the input goes to the chosen mind, and the bar closes. The words that were said last
     /// are written first.
     private func submit() {
-        guard model.voice != .finishing else { return }
+        guard model.voice != .finishing, !model.draft.isSending else { return }
         stopListening(keepingLastWords: true) { [weak self] in self?.send() }
     }
 
@@ -490,6 +594,17 @@ final class MindInput: SpeechClient {
             try? FileManager.default.removeItem(at: Self.pasted)
         case .failed(let reason):
             log.error("input \(id): not sent to \(sendingTo): \(reason)")
+            // the fix, when the reason or the CLI's own file says the sign-in is missing
+            let mind = sendingTo
+            let address = SignIn.address(of: mind)
+            model.fix = InputDraft.fix(for: reason, address: address)
+            if model.fix == nil, !mind.isEmpty {
+                Task { [weak self] in
+                    let notSignedIn = await SignIn.read(mind) == .notSignedIn
+                    guard let self, notSignedIn, self.model.draft.id == id, case .failed = self.model.draft.phase else { return }
+                    self.model.fix = InputDraft.fix(for: reason, address: address, notSignedIn: true)
+                }
+            }
             lastLine = "Not sent to \(sendingTo) at \(Lend.clock(Date())): \(reason)"
             lastFailed = true
             // The input comes back with its reason. It takes no keyboard: the person may be typing elsewhere.
@@ -542,25 +657,35 @@ private final class InputPanel: NSPanel {
     }
 }
 
-/// The bar: the mind, the text, the files, and one line of state.
+/// The bar, as a launcher draws it: the mind's face at the left; one column that the text, the
+/// files, the line of keys and a failure all start at; the microphone and send at the right, at the
+/// height of the first line.
 struct MindInputBar: View {
     @ObservedObject var model: MindInputModel
     @ObservedObject private var faces = MindFaces.shared
+    /// Drawn to a file (`--render-input`): a ground of its own colour and shadow, since no
+    /// material blurs behind a picture.
+    var isDrawing = false
 
-    static let width: CGFloat = 680
+    static let width: CGFloat = 720
+    static let padding: CGFloat = 16
+    static let radius: CGFloat = 18
+    /// The face (30), its chevron and their gaps: where the text column starts.
+    static let column: CGFloat = 58
 
-    init(model: MindInputModel) {
+    init(model: MindInputModel, isDrawing: Bool = false) {
         self.model = model
+        self.isDrawing = isDrawing
     }
 
-    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: 16, style: .continuous) }
+    private var shape: RoundedRectangle { RoundedRectangle(cornerRadius: Self.radius, style: .continuous) }
 
     private var title: String { model.mind.map { faces.face(of: $0).title } ?? "a mind" }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 10) {
-                mindMenu
+            HStack(alignment: .top, spacing: 12) {
+                mindButton
                 ZStack(alignment: .topLeading) {
                     if model.draft.text.isEmpty {
                         Text(model.mind == nil ? "Add a mind first" : model.voice.isOpen ? "Talk or type: tell \(title) what you want" : "Tell \(title) what you want")
@@ -571,112 +696,125 @@ struct MindInputBar: View {
                     }
                     InputTextView(model: model).frame(height: model.textHeight)
                 }
-                .padding(.top, 5)
-                MicrophoneButton(voice: model.voice, level: model.level, press: model.toggleMicrophone)
-                    .disabled(model.draft.isSending)
-                    .accessibilityIdentifier("input.microphone")
-                SendButton(isEnabled: model.mind != nil && !model.draft.isEmpty && !model.draft.isSending, press: model.send)
+                .padding(.top, (30 - MindInputModel.lineHeight) / 2)
+                HStack(spacing: 10) {
+                    MicrophoneButton(voice: model.voice, level: model.level, press: model.toggleMicrophone)
+                        .disabled(model.draft.isSending)
+                        .accessibilityIdentifier("input.microphone")
+                    SendButton(phase: model.draft.phase, isEnabled: model.mind != nil && !model.draft.isEmpty && !model.draft.isSending, press: model.send)
+                }
             }
-            if !model.draft.attachments.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
+                if !model.draft.attachments.isEmpty {
+                    Flow(spacing: 6) {
                         ForEach(model.draft.attachments) { attachment in
                             AttachmentChip(attachment: attachment, remove: model.draft.isSending ? nil : { model.draft.remove(attachment.id) })
                         }
                     }
                 }
-            }
-            HStack(spacing: 8) {
-                status
-                Spacer(minLength: 12)
-                if !isFailed {
-                    Text("↩ sends · ⇧↩ new line · ⇥ next mind · ⌘V or drop a file · ⌘D microphone · esc closes")
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(1)
+                if case .failed(let reason) = model.draft.phase {
+                    FailureLines(reason: reason, fix: model.fix)
+                } else {
+                    hints
                 }
             }
-            .font(.system(size: 11))
+            .padding(.leading, Self.column)
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
+        .padding(.top, Self.padding)
+        .padding(.horizontal, Self.padding)
+        .padding(.bottom, 12)
         .frame(width: Self.width)
-        .background(.regularMaterial, in: shape)
-        .overlay(shape.strokeBorder(model.isDropTargeted ? Color.accentColor : Color.primary.opacity(0.15), lineWidth: model.isDropTargeted ? 2 : 1))
+        .background { ground }
+        .overlay(
+            shape.strokeBorder(
+                model.isDropTargeted ? Color.accentColor : Self.edge,
+                lineWidth: model.isDropTargeted ? 2 : 1))
         .onDrop(of: [UTType.fileURL, UTType.image], isTargeted: $model.isDropTargeted) { providers in
             model.drop(providers)
             return true
         }
     }
 
-    private var isFailed: Bool {
-        if case .failed = model.draft.phase { return true }
-        return false
+    /// A hairline, as a launcher's edge: dark on light, light on dark.
+    private static let edge = Color(nsColor: NSColor(name: nil) {
+        $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 1, alpha: 0.16) : NSColor(white: 0, alpha: 0.12)
+    })
+    /// The drawing's stand-in for the material: what `.popover` looks like over a desktop.
+    private static let drawnGround = Color(nsColor: NSColor(name: nil) {
+        $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(calibratedWhite: 0.13, alpha: 1) : NSColor(calibratedWhite: 0.955, alpha: 1)
+    })
+
+    @ViewBuilder
+    private var ground: some View {
+        if isDrawing {
+            shape.fill(Self.drawnGround).shadow(color: .black.opacity(0.3), radius: 16, y: 8)
+        } else {
+            BarMaterial()
+        }
     }
 
-    /// The mind the input goes to: its face, and under a click the minds this Mac knows.
-    private var mindMenu: some View {
-        Menu {
-            ForEach(model.minds) { mind in
-                Button {
-                    model.choose(mind.mind)
-                } label: {
-                    let words = "\(faces.face(of: mind.mind).title) · \(mind.mind)"
-                    if mind.mind == model.mind { Label(words, systemImage: "checkmark") } else { Text(words) }
-                }
-            }
-        } label: {
+    /// The mind the input goes to: its face; a click lists the minds this Mac knows.
+    private var mindButton: some View {
+        Button(action: model.showMinds) {
             HStack(spacing: 4) {
                 if let mind = model.mind {
-                    MindAvatar(mind: mind, size: 28)
+                    MindAvatar(mind: mind, size: 30)
                 } else {
                     Circle()
                         .strokeBorder(Color.secondary.opacity(0.6), style: StrokeStyle(lineWidth: 1.2, dash: [3, 3]))
-                        .frame(width: 28, height: 28)
+                        .frame(width: 30, height: 30)
                 }
                 Image(systemName: "chevron.down")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(.secondary)
+                    .frame(width: 12)
             }
         }
-        .menuStyle(.button)
-        .menuIndicator(.hidden)
         .buttonStyle(MindMenuStyle())
         .fixedSize()
         .disabled(model.minds.isEmpty || model.draft.isSending)
         .help("The mind this input goes to. Tab chooses the next one.")
+        .accessibilityLabel("To \(title). Choose the mind")
         .accessibilityIdentifier("input.mind")
+    }
+
+    /// The line under the text: where it goes (or what holds it up) at the left, the keys at the right.
+    private var hints: some View {
+        HStack(spacing: 12) {
+            status
+                .font(.system(size: 12))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .layoutPriority(1)
+            Spacer(minLength: 0)
+            HStack(spacing: 12) {
+                KeyHint(keys: "↩", words: "send")
+                KeyHint(keys: "⇧↩", words: "new line")
+                if model.minds.count > 1 { KeyHint(keys: "⇥", words: "next mind") }
+                KeyHint(keys: "⌘D", words: "microphone")
+                KeyHint(keys: "esc", words: "close")
+            }
+            .fixedSize()
+        }
     }
 
     @ViewBuilder
     private var status: some View {
-        if case .failed(let reason) = model.draft.phase {
-            Label("Not sent: \(reason)", systemImage: "exclamationmark.circle.fill")
-                .foregroundStyle(.red)
-                .lineLimit(3)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
-        } else if let refusal = model.draft.refusal {
+        if let refusal = model.draft.refusal {
             Label(refusal, systemImage: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-                .lineLimit(1)
-        } else if case .sending(let progress) = model.draft.phase {
-            HStack(spacing: 6) {
-                ProgressView(value: progress).frame(width: 60)
-                Text("Sending to \(title)…")
-            }
-            .foregroundStyle(.secondary)
+                .foregroundStyle(Palette.waitText)
+        } else if model.draft.isSending {
+            Text("Sending to \(title)…")
+                .foregroundStyle(.secondary)
         } else if case .loading(let part) = model.voice {
             Text(SpeechSession.loadingLine(part))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
         } else if case .failed(let reason) = model.voice {
             Label("Not listening: \(reason)", systemImage: "mic.slash")
-                .foregroundStyle(.orange)
-                .lineLimit(1)
+                .foregroundStyle(Palette.waitText)
         } else if let mind = model.mind {
             Text("To \(title) · \(mind)")
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
         } else {
             Text("No mind is set up: add one in the panel under the 𝑖.")
                 .foregroundStyle(.secondary)
@@ -684,7 +822,74 @@ struct MindInputBar: View {
     }
 }
 
-/// The bar's microphone: red with the loudness while it listens, and a click turns it off or on.
+/// A key and what it does, quiet: the key in secondary, the words in tertiary.
+private struct KeyHint: View {
+    let keys: String
+    let words: String
+
+    var body: some View {
+        (Text(keys).foregroundStyle(.secondary) + Text(" \(words)").foregroundStyle(.tertiary))
+            .font(.system(size: 11))
+            .lineLimit(1)
+    }
+}
+
+/// An input that did not go: the reason, the command that fixes it (with Copy), and what Return does now.
+private struct FailureLines: View {
+    let reason: String
+    let fix: String?
+    @State private var copied = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Label {
+                    Text("Not sent: \(reason)")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                }
+                .font(.system(size: 12))
+                .foregroundStyle(Palette.redText)
+                .lineLimit(3)
+                if fix == nil {
+                    Spacer(minLength: 12)
+                    again
+                }
+            }
+            if let fix {
+                HStack(spacing: 8) {
+                    Text(fix)
+                        .font(.system(size: 11.5, design: .monospaced))
+                        .lineLimit(1)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(Palette.codeFill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    Button(copied ? "Copied" : "Copy") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(fix, forType: .string)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { copied = false }
+                    }
+                    .buttonStyle(FillButtonStyle(height: 22))
+                    .help("Copy the command, then run it in a terminal.")
+                    .accessibilityIdentifier("input.copyFix")
+                    Spacer(minLength: 12)
+                    again
+                }
+            }
+        }
+    }
+
+    private var again: some View {
+        KeyHint(keys: "↩", words: "sends it again").fixedSize()
+    }
+}
+
+/// The bar's microphone. Off: a neutral circle. Listening: a red-tinted capsule with the loudness
+/// and the microphone. Only the bars follow the loudness: the bar's text is not laid out again.
 private struct MicrophoneButton: View {
     let voice: MindInputModel.Voice
     @ObservedObject var level: VoiceLevel
@@ -692,59 +897,181 @@ private struct MicrophoneButton: View {
 
     var body: some View {
         Button(action: press) {
-            HStack(spacing: 5) {
+            Group {
                 switch voice {
                 case .listening:
-                    LevelBars(level: level.level)
-                    Image(systemName: "mic.fill").foregroundStyle(.red)
+                    HStack(spacing: 6) {
+                        LevelBars(level: level.level, color: Palette.redText)
+                        Image(systemName: "mic.fill").foregroundStyle(Palette.redText)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(width: 62, height: 30)
+                    .background(Palette.redWash, in: Capsule())
                 case .loading:
-                    ProgressView().controlSize(.small)
-                    Image(systemName: "mic.fill").foregroundStyle(.red)
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Image(systemName: "mic.fill").foregroundStyle(Palette.redText)
+                    }
+                    .frame(width: 62, height: 30)
+                    .background(Palette.redWash, in: Capsule())
                 case .finishing:
-                    ProgressView().controlSize(.small)
+                    ProgressView().controlSize(.mini)
+                        .frame(width: 30, height: 30)
+                        .background(Palette.fill, in: Circle())
+                case .off:
                     Image(systemName: "mic").foregroundStyle(.secondary)
-                case .off, .failed:
-                    Image(systemName: "mic.slash").foregroundStyle(.secondary)
+                        .frame(width: 30, height: 30)
+                        .background(Palette.fill, in: Circle())
+                case .failed:
+                    Image(systemName: "mic.slash").foregroundStyle(Palette.waitText)
+                        .frame(width: 30, height: 30)
+                        .background(Palette.fill, in: Circle())
                 }
             }
-            .font(.system(size: 15))
-            .frame(height: 28)
-            .padding(.horizontal, 8)
-            .background(Color.primary.opacity(voice.isOpen ? 0.08 : 0.04), in: Capsule())
+            .font(.system(size: 14, weight: .medium))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)
         .fixedSize()
         .help(voice.isOpen ? "The microphone is on: what you say is written here, on this Mac. Click to turn it off (⌘D)." : "The microphone is off. Click to talk (⌘D).")
+        .accessibilityLabel(voice.isOpen ? "Microphone on" : "Microphone off")
     }
 }
 
-/// The bar's send button: what Return does.
+/// The bar's send button: what Return does. While the input goes, a ring shows how much went.
 private struct SendButton: View {
+    let phase: InputDraft.Phase
     let isEnabled: Bool
     let press: () -> Void
 
     var body: some View {
-        Button(action: press) {
-            Image(systemName: "arrow.up.circle.fill")
-                .font(.system(size: 24))
-                .foregroundStyle(isEnabled ? Color.accentColor : Color.secondary.opacity(0.5))
-                .frame(height: 28)
+        // while the input goes, the button shows it at full strength and does nothing
+        Button { if progress == nil { press() } } label: {
+            ZStack {
+                Circle().fill(isEnabled || progress != nil ? Color.accentColor : Palette.fill)
+                if let progress {
+                    Circle().stroke(Color.white.opacity(0.3), lineWidth: 2.5).padding(6)
+                    Circle()
+                        .trim(from: 0, to: max(0.06, progress))
+                        .stroke(Color.white, style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                        .padding(6)
+                        .animation(.easeOut(duration: 0.2), value: progress)
+                } else {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(isEnabled ? Color.white : Color.secondary.opacity(0.6))
+                }
+            }
+            .frame(width: 30, height: 30)
+            .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!isEnabled)
+        .disabled(!isEnabled && progress == nil)
         .help("Send (↩)")
-        .accessibilityLabel("Send")
+        .accessibilityLabel(progress == nil ? "Send" : "Sending")
         .accessibilityIdentifier("input.send")
+    }
+
+    private var progress: Double? {
+        if case .sending(let progress) = phase { return progress }
+        return nil
     }
 }
 
 private struct MindMenuStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .padding(3)
-            .background(Color.primary.opacity(configuration.isPressed ? 0.12 : 0), in: Capsule())
+            .padding(.trailing, 2)
+            .background(Color.primary.opacity(configuration.isPressed ? 0.1 : 0), in: Capsule())
             .contentShape(Capsule())
+    }
+}
+
+/// The target of the minds' menu, and the faces drawn for it.
+@MainActor
+private final class MindMenuTarget: NSObject {
+    static let shared = MindMenuTarget()
+    var chosen: (String) -> Void = { _ in }
+
+    @objc func choose(_ item: NSMenuItem) {
+        if let mind = item.representedObject as? String { chosen(mind) }
+    }
+
+    /// A mind's face as a menu draws an image, 18 points.
+    static func avatar(of mind: String) -> NSImage? {
+        let renderer = ImageRenderer(content: MindAvatar(mind: mind, size: 18))
+        renderer.scale = NSScreen.main?.backingScaleFactor ?? 2
+        return renderer.nsImage
+    }
+}
+
+/// The system's material behind the bar, cut to its rounded shape. The window's shadow follows it.
+private struct BarMaterial: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSVisualEffectView {
+        let view = NSVisualEffectView()
+        // follows the appearance, light or dark, as a popover's (.hudWindow is always dark)
+        view.material = .popover
+        view.blendingMode = .behindWindow
+        view.state = .active
+        view.maskImage = Self.mask
+        return view
+    }
+
+    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
+
+    /// The rounded shape, stretched to any size.
+    private static let mask: NSImage = {
+        let radius = MindInputBar.radius
+        let side = radius * 2 + 2
+        let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: radius, left: radius, bottom: radius, right: radius)
+        image.resizingMode = .stretch
+        return image
+    }()
+}
+
+/// Views in rows that wrap: the files.
+private struct Flow: Layout {
+    var spacing: CGFloat
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let width = proposal.width ?? .infinity
+        let rows = arrange(subviews, in: width)
+        return CGSize(width: proposal.width ?? rows.width, height: rows.height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let rows = arrange(subviews, in: bounds.width)
+        for (index, frame) in rows.frames.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY), proposal: ProposedViewSize(frame.size))
+        }
+    }
+
+    private func arrange(_ subviews: Subviews, in width: CGFloat) -> (frames: [CGRect], width: CGFloat, height: CGFloat) {
+        var frames: [CGRect] = []
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var row: CGFloat = 0
+        var widest: CGFloat = 0
+        for subview in subviews {
+            var size = subview.sizeThatFits(.unspecified)
+            size.width = min(size.width, width)
+            if x > 0, x + size.width > width {
+                x = 0
+                y += row + spacing
+                row = 0
+            }
+            frames.append(CGRect(origin: CGPoint(x: x, y: y), size: size))
+            x += size.width + spacing
+            row = max(row, size.height)
+            widest = max(widest, x - spacing)
+        }
+        return (frames, widest, y + row)
     }
 }
 
@@ -773,21 +1100,28 @@ private struct AttachmentChip: View {
         HStack(spacing: 6) {
             Image(nsImage: icon)
                 .resizable()
-                .frame(width: 18, height: 18)
-            Text(name)
+                .frame(width: 16, height: 16)
+            Text(name).fontWeight(.medium)
             Text(InputDraft.size(attachment.bytes)).foregroundStyle(.secondary)
             if let remove {
-                Button(action: remove) { Image(systemName: "xmark.circle.fill") }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .help("Take this file away")
+                Button(action: remove) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .frame(width: 16, height: 16)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .help("Take this file away")
+                .accessibilityLabel("Remove \(attachment.name)")
             }
         }
         .font(.system(size: 12))
         .lineLimit(1)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .padding(.leading, 8)
+        .padding(.trailing, remove == nil ? 8 : 4)
+        .frame(height: 26)
+        .background(Palette.fill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .fixedSize()
         .help(attachment.local)
     }
@@ -838,7 +1172,7 @@ private final class InputField: NSTextView {
     }
 }
 
-/// The text view in the bar, as tall as its lines, at most ten of them: then it scrolls.
+/// The text view in the bar, as tall as its lines, at most six of them: then it scrolls inside.
 private struct InputTextView: NSViewRepresentable {
     @ObservedObject var model: MindInputModel
 
@@ -859,7 +1193,7 @@ private struct InputTextView: NSViewRepresentable {
         func measure(_ field: NSTextView) {
             guard let container = field.textContainer, let layout = field.layoutManager else { return }
             layout.ensureLayout(for: container)
-            let height = min(max(ceil(layout.usedRect(for: container).height), MindInputModel.lineHeight), MindInputModel.lineHeight * 10)
+            let height = min(max(ceil(layout.usedRect(for: container).height), MindInputModel.lineHeight), MindInputModel.lineHeight * MindInputModel.mostLines)
             if abs(height - model.textHeight) > 0.5 { model.textHeight = height }
         }
     }
@@ -874,7 +1208,9 @@ private struct InputTextView: NSViewRepresentable {
         scroll.borderType = .noBorder
         scroll.hasVerticalScroller = true
         scroll.autohidesScrollers = true
-        let field = InputField(frame: NSRect(x: 0, y: 0, width: 400, height: MindInputModel.lineHeight))
+        // as wide as the scroll view's content (none yet): the width then follows it exactly. A
+        // wider start stayed that much wider, and its lines wrapped under the buttons.
+        let field = InputField(frame: NSRect(origin: .zero, size: scroll.contentSize))
         field.model = model
         field.delegate = context.coordinator
         field.isRichText = false
@@ -917,16 +1253,17 @@ private struct InputTextView: NSViewRepresentable {
 }
 
 extension MindInput {
-    /// Draws the bar in four states (empty, with a text and files, while it sends, not sent), each in
-    /// the light and the dark appearance: eight PNG files in `folder`, for a look with no Mac
-    /// (`--render-input <folder>`). The minds are the drawings' (`Rendering`).
+    /// Draws the bar in its states (empty, listening, with a text and files, while it sends, not
+    /// sent, not sent with the command that fixes it), each in the light and the dark appearance:
+    /// PNG files in `folder`, for a look with no Mac (`--render-input <folder>`). The minds are the
+    /// drawings' (`Rendering`). The ground around the bar stands for a desktop.
     static func render(to folder: URL) -> Bool {
         _ = NSApplication.shared
         Rendering.fixFaces()
         let minds = Rendering.minds
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         var drawn = true
-        for state in ["empty", "listening", "filled", "sending", "failed"] {
+        for state in ["empty", "listening", "filled", "sending", "failed", "failed-fix"] {
             let model = MindInputModel()
             model.minds = minds
             model.mind = minds.first?.mind
@@ -939,11 +1276,19 @@ extension MindInput {
                 model.draft.attach(name: "Roadmap 2027.pdf", local: "/tmp/Roadmap 2027.pdf", bytes: 2_200_000, contentType: "application/pdf")
                 model.draft.attach(name: "Pasted picture 14.02.11 1.png", local: "/tmp/Pasted picture 14.02.11 1.png", bytes: 35_000, contentType: "image/png")
             }
-            if state == "sending" || state == "failed" { _ = model.draft.submit(at: Rendering.now) }
+            if state == "filled" { model.voice = .listening; model.level.level = 0.7 }
+            if state != "empty", state != "listening", state != "filled" { _ = model.draft.submit(at: Rendering.now) }
             if state == "sending" { _ = model.draft.senderSaid(["progress": 0.4], next: "next") }
-            if state == "failed" { _ = model.draft.senderSaid(["failed": "Not signed in to \(minds.first?.mind ?? "example.com"): run `iterate login` once."], next: "next") }
+            if state == "failed" { _ = model.draft.senderEnded(status: 1) }
+            if state == "failed-fix" {
+                let mind = minds.first?.mind ?? "example.com"
+                let reason = "Not signed in to \(SignIn.address(of: mind)): run `iterate login` once."
+                _ = model.draft.senderSaid(["failed": reason], next: "next")
+                model.fix = InputDraft.fix(for: reason, address: SignIn.address(of: mind))
+            }
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                let view = MindInputBar(model: model).padding(24).background(Color(nsColor: .windowBackgroundColor))
+                let desktop = Color(nsColor: dark ? NSColor(srgbRed: 0.2, green: 0.21, blue: 0.23, alpha: 1) : NSColor(srgbRed: 0.78, green: 0.8, blue: 0.82, alpha: 1))
+                let view = MindInputBar(model: model, isDrawing: true).padding(32).background(desktop)
                 drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("input-\(state)-\(tone).png")) && drawn
             }
         }
