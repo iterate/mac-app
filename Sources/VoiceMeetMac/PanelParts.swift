@@ -94,7 +94,8 @@ struct SharingControl: View {
     let choose: (Sharing) -> Void
     /// The group's identifier: `sharing.<thing>` unless another view names it (the Activity window).
     var identifier: String?
-    /// A segment's width: 46 points in the panel, 42 in the Activity window.
+    /// A segment's width: 50 points in the panel, 48 in the Activity window: "Shared" in semibold is
+    /// about 42 points, and needs air on both sides.
     var segmentWidth = Theme.Metric.segment.width
 
     var body: some View {
