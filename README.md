@@ -362,8 +362,12 @@ again:
 | `device/act-ended`        | The act is over. Its idempotency key is `device/act-ended/<act>`                                                                                                        | `act`, `did`, `failure`                                       |
 | `device/input-submitted`  | You sent an input with ⌥⇧Space (below, "Input"). It goes to the mind you chose, which need not be the one this Mac is lent to                                             | `id`, `text`, `at`, `files`                                   |
 
-A key event holds the key itself, so what you type goes to the mind, a password too. Keyboard and
-mouse is off until you turn it on. Its events are ephemeral: they reach whoever listens at that
+A key event holds the key itself, so what you type goes to the mind, but never a password
+(`SecretKeys`). A key goes to no mind, not even as a key code, while macOS's secure input is on
+(a system password prompt, the login window, 1Password's master password), while a password
+manager or a system prompt is in front, or while the focused field is a password field (a
+browser's sign-in form). The keys go again when the focus leaves it. Keyboard and mouse is off
+until you turn it on. Its events are ephemeral: they reach whoever listens at that
 moment and are in no log, unless you tick **Keep these events in the mind's log**. Keys need the
 Accessibility permission of macOS. A presence event is always kept.
 

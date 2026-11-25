@@ -1,4 +1,5 @@
 import AppKit
+import Carbon
 import SwiftUI
 import VoiceMeetCore
 
@@ -202,6 +203,8 @@ final class DeviceEvents: ObservableObject {
         let place: [String: Any] = ["x": Int(point.x), "y": Int(primary - point.y)]
         switch event.type {
         case .keyDown:
+            // a key typed into a password goes to no mind, not even as a key code (`SecretKeys`)
+            guard !Self.isSecret() else { return }
             var payload: [String: Any] = ["keyCode": Int(event.keyCode), "isRepeat": event.isARepeat]
             if let key = event.charactersIgnoringModifiers, !key.isEmpty { payload["key"] = key }
             if let text = event.characters, !text.isEmpty { payload["text"] = text }
@@ -228,6 +231,26 @@ final class DeviceEvents: ObservableObject {
         default:
             break
         }
+    }
+
+    /// Whether the key now goes into a password: asked again for each key, because the focus can
+    /// move into a password field between two keys.
+    private static func isSecret() -> Bool {
+        let app = NSWorkspace.shared.frontmostApplication
+        var role: String?, subrole: String?
+        if !IsSecureEventInputEnabled(), let pid = app?.processIdentifier {
+            let element = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(element, 0.05)
+            var focused: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+               let focused, CFGetTypeID(focused) == AXUIElementGetTypeID() {
+                let field = focused as! AXUIElement
+                var value: CFTypeRef?
+                if AXUIElementCopyAttributeValue(field, kAXSubroleAttribute as CFString, &value) == .success { subrole = value as? String }
+                if AXUIElementCopyAttributeValue(field, kAXRoleAttribute as CFString, &value) == .success { role = value as? String }
+            }
+        }
+        return SecretKeys.withholds(secureInput: IsSecureEventInputEnabled(), app: app?.bundleIdentifier, focusedSubrole: subrole, focusedRole: role)
     }
 
     // MARK: - The events job
@@ -321,7 +344,7 @@ struct DeviceEventsSection: View {
                         .foregroundStyle(events.sharesInput ? Theme.liveText : Theme.t2)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("Keyboard and mouse").font(.system(size: Theme.Size.row))
-                        Text(events.sharesInput ? "Every key goes to the mind, a password too" : "Every key you type, click, move and scroll")
+                        Text(events.sharesInput ? "Every key goes to the mind, but never a password" : "Every key you type, click, move and scroll")
                             .font(.system(size: 11))
                             .foregroundStyle(events.sharesInput ? Theme.liveText : Theme.t3)
                             .lineLimit(1)
