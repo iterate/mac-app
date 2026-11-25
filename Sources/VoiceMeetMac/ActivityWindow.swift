@@ -724,7 +724,7 @@ struct ActivityWindowView: View {
                 Text(thing.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
                 Spacer(minLength: 0)
                 SharingControl(
-                    id: thing.id, title: thing.title, selection: sharing, choose: { actions.choose(thing, $0) }, identifier: "log.sharing", segmentWidth: 42)
+                    id: thing.id, title: thing.title, selection: sharing, choose: { actions.choose(thing, $0) }, identifier: "log.sharing", segmentWidth: 48)
             }
             if let until = state.approvals[thing.id] {
                 Text("Approved until \(Lend.shortClock(until))").font(.system(size: 11.5)).foregroundStyle(Theme.accentText)

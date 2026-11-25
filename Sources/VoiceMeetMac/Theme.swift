@@ -145,7 +145,7 @@ enum Theme {
         static let rowHeight: CGFloat = 28
         static let rowHeightWithNote: CGFloat = 40
         static let leadColumn: CGFloat = 30
-        static let segment = CGSize(width: 46, height: 20)
+        static let segment = CGSize(width: 50, height: 20)
         static let actionButtonHeight: CGFloat = 46
         static let recordChipHeight: CGFloat = 46
         /// The record's five switches: one row of equal columns, 6 apart; the icon in a 15 pt
