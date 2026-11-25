@@ -58,6 +58,16 @@ const VIEWS = {
     { view: "dictation-loading", file: "dictation-loading", pad: 24 },
     { view: "dictation-failed", file: "dictation-failed", pad: 24 },
   ],
+  "v2-Input": [
+    { view: "input-filled", file: "input-filled", pad: 32 },
+    { view: "input-failed", file: "input-failed-fix", pad: 32 },
+  ],
+  "v2-Approval": [{ view: "approval", file: "approval", pad: 20 }],
+  Log: [{ view: "log", file: "log" }],
+  SettingsGeneral: [{ view: "settings-general", file: "settings-general" }],
+  SettingsDictation: [{ view: "settings-dictation", file: "settings-dictation" }],
+  SettingsMindIterate: [{ view: "settings-mind-iterate", file: "settings-mind-lent" }],
+  SettingsMindGarden: [{ view: "settings-mind-garden", file: "settings-mind-failing" }],
 };
 
 /** The grey both pictures are put over, where they are see-through. */

@@ -96,8 +96,10 @@ enum Theme {
     static let knobRing = pair(dark: .clear, light: black(0.10))
     static let knobShadow = pair(dark: .clear, light: black(0.14))
     static let segIdle = pair(dark: hex(0xAEB0B6), light: hex(0x50535A))
-    /// A switch that is off.
+    /// A switch that is off, and a switch's knob and its shadow (`0 1px 2px rgba(0,0,0,0.3)`).
     static let toggleOff = pair(dark: white(0.20), light: black(0.20))
+    static let switchKnob = pair(dark: hex(0xFFFFFF), light: hex(0xFFFFFF))
+    static let switchKnobShadow = pair(dark: black(0.30), light: black(0.30))
 
     // MARK: Shadows
 
@@ -181,4 +183,28 @@ extension Text {
             .tracking(Theme.Size.sectionTracking)
             .foregroundStyle(Theme.t3)
     }
+}
+
+/// THE MOCKS' LINE HEIGHT. The mocks set a line `line-height` × the font's size tall (1.3 for most
+/// text, 1.4 for a row's line, 1.45 for a paragraph); SwiftUI sets SF's own height (about 1.2).
+/// The difference goes between the lines and half above and half under the text, as CSS does.
+extension View {
+    func lineHeight(_ factor: CGFloat, size: CGFloat) -> some View {
+        let extra = max(0, (size * factor - Theme.naturalLineHeight(size)).rounded(toHalf: true))
+        return self.lineSpacing(extra).padding(.vertical, extra / 2)
+    }
+}
+
+extension Theme {
+    /// The height of one line of the system font at `size`, as a `Text` lays it out: whole points,
+    /// measured (macOS 15), since it follows neither `NSFont`'s metrics nor `NSLayoutManager`'s.
+    static func naturalLineHeight(_ size: CGFloat) -> CGFloat {
+        let measured: [CGFloat: CGFloat] = [10: 13, 10.5: 13, 11: 14, 11.5: 14, 12: 15, 12.5: 15, 13: 16, 14: 17, 15: 19, 16: 19, 17: 20, 18: 21]
+        return measured[size] ?? NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: size)) + 1
+    }
+}
+
+extension CGFloat {
+    /// Rounded to the nearest half point (a pixel of a Retina screen) when `toHalf`.
+    fileprivate func rounded(toHalf: Bool) -> CGFloat { toHalf ? (self * 2).rounded() / 2 : rounded() }
 }

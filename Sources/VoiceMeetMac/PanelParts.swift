@@ -94,6 +94,8 @@ struct SharingControl: View {
     let choose: (Sharing) -> Void
     /// The group's identifier: `sharing.<thing>` unless another view names it (the Activity window).
     var identifier: String?
+    /// A segment's width: 46 points in the panel, 42 in the Activity window.
+    var segmentWidth = Theme.Metric.segment.width
 
     var body: some View {
         HStack(spacing: 2) {
@@ -105,7 +107,7 @@ struct SharingControl: View {
                     Text(choice.title)
                         .font(.system(size: Theme.Size.control, weight: weight(choice, isSelected)))
                         .foregroundStyle(textColor(choice, isSelected))
-                        .frame(width: Theme.Metric.segment.width, height: Theme.Metric.segment.height)
+                        .frame(width: segmentWidth, height: Theme.Metric.segment.height)
                         .background {
                             let shape = RoundedRectangle(cornerRadius: Theme.Radius.segment, style: .continuous)
                             shape.fill(fill(choice, isSelected))
@@ -284,16 +286,46 @@ struct MissingPermission: View {
     }
 }
 
-/// The panel's switch: a native one, in the accent.
+/// The panel's switch: a Toggle in the mocks' switch style.
 struct PanelSwitch: View {
     let title: String
     @Binding var isOn: Bool
 
     var body: some View {
         Toggle(title, isOn: $isOn)
-            .toggleStyle(.switch)
+            .toggleStyle(ThemeSwitchStyle())
             .labelsHidden()
-            .controlSize(.small)
-            .tint(Theme.accent)
+    }
+}
+
+/// A Toggle drawn as the mocks' switch: 34 × 20 points, the accent when on (`toggleOff` when
+/// off), a white knob of 16 points with its shadow. A native switch draws grey while its window is
+/// not the key window, as a menu-bar app's often is; the mocks' is always in the accent.
+struct ThemeSwitchStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Look(configuration: configuration)
+    }
+
+    private struct Look: View {
+        let configuration: Configuration
+        @Environment(\.isEnabled) private var isEnabled
+
+        var body: some View {
+            Button {
+                withAnimation(.easeOut(duration: 0.15)) { configuration.isOn.toggle() }
+            } label: {
+                Capsule()
+                    .fill(configuration.isOn ? Theme.accent : Theme.toggleOff)
+                    .frame(width: 34, height: 20)
+                    .overlay(alignment: configuration.isOn ? .trailing : .leading) {
+                        Circle().fill(Theme.switchKnob).frame(width: 16, height: 16).shadow(color: Theme.switchKnobShadow, radius: 1, y: 1).padding(2)
+                    }
+                    .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .opacity(isEnabled ? 1 : 0.45)
+            .accessibilityValue(configuration.isOn ? "1" : "0")
+            .accessibilityAddTraits(.isToggle)
+        }
     }
 }

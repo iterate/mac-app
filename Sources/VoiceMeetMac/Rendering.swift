@@ -145,14 +145,18 @@ enum Rendering {
     /// `window` makes the window it is laid out in, a borderless one when it is nil.
     static func png<Content: View>(
         of content: Content, dark: Bool, to file: URL,
-        window makeWindow: ((NSRect) -> NSWindow)? = nil
+        window makeWindow: ((NSRect) -> NSWindow)? = nil, titled: Bool = false
     ) -> Bool {
         _ = NSApplication.shared
         let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
         let view = NSHostingView(rootView: content)
         view.appearance = appearance
+        // a titled window's content goes under its see-through title bar, as the window's does
+        if titled { view.safeAreaRegions = [] }
         let frame = NSRect(origin: .zero, size: view.fittingSize)
-        let window = makeWindow?(frame) ?? NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        let window =
+            makeWindow?(frame)
+            ?? (titled ? titledWindow(frame) : NSWindow(contentRect: frame, styleMask: [.borderless], backing: .buffered, defer: false))
         window.appearance = appearance
         window.contentView = view
         view.layoutSubtreeIfNeeded()
@@ -162,7 +166,9 @@ enum Rendering {
             window.setContentSize(view.fittingSize)
             view.layoutSubtreeIfNeeded()
         }
-        let size = view.bounds.size
+        // a titled window: its frame view too, with the window's buttons
+        let drawn = titled ? view.superview ?? view : view
+        let size = drawn.bounds.size
         // in sRGB, the space of the design's colours: a token's value is the file's value
         guard size.width > 0, size.height > 0,
             let picture = NSBitmapImageRep(
@@ -171,9 +177,19 @@ enum Rendering {
                 .retagging(with: .sRGB)
         else { return false }
         picture.size = size
-        view.cacheDisplay(in: view.bounds, to: picture)
+        drawn.cacheDisplay(in: drawn.bounds, to: picture)
         try? FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         return picture.representation(using: .png, properties: [:]).map { (try? $0.write(to: file)) != nil } ?? false
+    }
+
+    /// A window with the design's title bar over its content, as Settings and the Activity window.
+    /// The drawing process is never the active app: the window's buttons draw grey.
+    private static func titledWindow(_ frame: NSRect) -> NSWindow {
+        let window = NSWindow(
+            contentRect: frame, styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered,
+            defer: false)
+        window.tallTitleBar()
+        return window
     }
 
     /// Every view, light and dark, into `folder` (`--render-all <folder>`): the panel in each phase
@@ -188,6 +204,7 @@ enum Rendering {
         }
         drawn = MindSwitcher.render(to: folder) && drawn
         drawn = ActivityLog.render(to: folder) && drawn
+        drawn = CapturePillView.render(to: folder) && drawn
         drawn = MindInput.render(to: folder) && drawn
         drawn = Dictation.render(to: folder) && drawn
         drawn = IterateIcon.render(to: folder) && drawn

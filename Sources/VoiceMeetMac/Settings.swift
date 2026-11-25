@@ -41,13 +41,14 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
         .frame(width: Self.width)
+        .foregroundStyle(Theme.t1)
         .background(SettingsLook.ground)
     }
 
     private var page: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text(title)
-                .font(.system(size: 15, weight: .semibold))
+                .font(.system(size: Theme.Size.panelTitle, weight: .semibold))
                 .frame(height: 38)
                 .accessibilityAddTraits(.isHeader)
             Group {
@@ -78,19 +79,16 @@ struct SettingsView: View {
 
 // MARK: - The look
 
-/// The colours of the window: the system's where it has one for the role.
+/// The window's colours, from the Theme: a solid ground, a darker sidebar, fields and their edge.
 enum SettingsLook {
-    private static func pair(light: NSColor, dark: NSColor) -> Color {
-        Color(nsColor: NSColor(name: nil) { $0.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light })
-    }
-
-    static let ground = Color(nsColor: .windowBackgroundColor)
-    /// The sidebar: a shade under the window's ground.
-    static let sidebar = pair(light: NSColor(white: 0, alpha: 0.045), dark: NSColor(white: 0, alpha: 0.18))
-    static let line = pair(light: NSColor(white: 0, alpha: 0.09), dark: NSColor(white: 1, alpha: 0.10))
-    static let field = Color(nsColor: .textBackgroundColor)
-    static let fieldEdge = pair(light: NSColor(white: 0, alpha: 0.14), dark: NSColor(white: 1, alpha: 0.14))
+    static let ground = Theme.win
+    static let sidebar = Theme.side
+    static let line = Theme.line
+    static let field = Theme.field
+    static let fieldEdge = Theme.edge
     static let mono = Font.system(size: 12, design: .monospaced)
+    /// A small button of a row: 24 points high, as the mocks' (Update Now, Fetch Now, Remove…).
+    static let button = FillButtonStyle(height: 24, padding: 10)
 }
 
 /// A group of rows: its title (13 points, semibold), an optional line under it, and a card.
@@ -101,14 +99,18 @@ private struct SettingsGroup<Content: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
-            Text(title).font(.system(size: 13, weight: .semibold)).padding(.horizontal, 2).accessibilityAddTraits(.isHeader)
+            Text(title).font(.system(size: Theme.Size.settingsGroupTitle, weight: .semibold)).lineHeight(1.3, size: 13).padding(.horizontal, 2)
+                .accessibilityAddTraits(.isHeader)
             if let note {
-                Text(note).font(.system(size: 12)).foregroundStyle(.secondary).padding(.horizontal, 2).fixedSize(horizontal: false, vertical: true)
+                Text(note).font(.system(size: 12)).lineHeight(1.45, size: 12).foregroundStyle(Theme.t2).padding(.horizontal, 2)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             VStack(alignment: .leading, spacing: 0) { content }
+                // inside the card's edge of 1 point
+                .padding(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Theme.raised, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.cardEdge))
+                .background(Theme.raised, in: RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous).strokeBorder(Theme.cardEdge))
         }
     }
 }
@@ -125,9 +127,10 @@ private struct SettingsRow<Trailing: View>: View {
             if !isFirst { SettingsLook.line.frame(height: 1).padding(.leading, 12) }
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title).font(.system(size: 13))
+                    Text(title).font(.system(size: 13)).lineHeight(1.3, size: 13)
                     if let detail {
-                        Text(detail).font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                        Text(detail).font(.system(size: 11.5)).lineHeight(1.4, size: 11.5).foregroundStyle(Theme.t3)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -169,11 +172,11 @@ private struct WarningRow: View {
         VStack(spacing: 0) {
             SettingsLook.line.frame(height: 1).padding(.leading, 12)
             HStack(alignment: .center, spacing: 10) {
-                Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 12))
-                Text(words).font(.system(size: 12)).fixedSize(horizontal: false, vertical: true)
+                Image(systemName: "exclamationmark.triangle").font(.system(size: 12))
+                Text(words).font(.system(size: 12)).lineHeight(1.4, size: 12).fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let button {
-                    Button(button, action: action).buttonStyle(FillButtonStyle()).foregroundStyle(Color.primary)
+                    Button(button, action: action).buttonStyle(SettingsLook.button)
                 }
             }
             .foregroundStyle(Theme.warnText)
@@ -200,10 +203,10 @@ private struct Segments: View {
                 } label: {
                     Text(choice)
                         .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
-                        .foregroundStyle(isSelected ? Color.primary : Color.secondary)
+                        .foregroundStyle(isSelected ? Theme.t1 : Theme.segIdle)
                         .padding(.horizontal, 12)
                         .frame(height: 22)
-                        .background(isSelected ? Theme.knob : .clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .background(isSelected ? Theme.knob : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.segment, style: .continuous))
                         .shadow(color: isSelected ? Theme.knobShadow : .clear, radius: 1, y: 0.5)
                         .contentShape(Rectangle())
                 }
@@ -213,7 +216,7 @@ private struct Segments: View {
             }
         }
         .padding(2)
-        .background(Theme.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(Theme.track, in: RoundedRectangle(cornerRadius: Theme.Radius.segmentTrack, style: .continuous))
         .fixedSize()
         .accessibilityElement(children: .contain)
         .accessibilityValue(selection)
@@ -230,8 +233,7 @@ private struct SettingsSwitch: View {
 
     var body: some View {
         Toggle(label, isOn: Binding(get: { isOn }, set: set))
-            .toggleStyle(.switch)
-            .controlSize(.small)
+            .toggleStyle(ThemeSwitchStyle())
             .labelsHidden()
             .accessibilityIdentifier(id)
     }
@@ -259,17 +261,15 @@ private struct ExpressionField: View {
             .font(SettingsLook.mono)
             .labelsHidden()
             .disabled(!isEditable)
-            .foregroundStyle(isEditable ? Color.primary : Color.secondary)
+            .foregroundStyle(isEditable ? Theme.t1 : Theme.t2)
             .onSubmit(commit)
             .padding(.horizontal, 10)
             .frame(height: 30)
-            .background(isEditable ? SettingsLook.field : Theme.btn, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
-                    .strokeBorder(failed ? Color.red.opacity(0.8) : SettingsLook.fieldEdge, lineWidth: failed ? 1.5 : 1))
+            .background(isEditable ? SettingsLook.field : Theme.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).strokeBorder(failed ? Theme.live : SettingsLook.fieldEdge))
             .accessibilityIdentifier(id)
             if isEditable, let draft, draft != saved {
-                Button("Save", action: commit).buttonStyle(FillButtonStyle(prominent: true, height: 28))
+                Button("Save", action: commit).buttonStyle(FillButtonStyle(prominent: true, height: 28, padding: 9))
                     .accessibilityIdentifier("\(id).save")
             }
         }
@@ -351,11 +351,11 @@ private struct SettingsSidebar: View {
             }
             Button(action: actions.lend.add) {
                 HStack(spacing: 8) {
-                    Image(systemName: "plus").font(.system(size: 13)).frame(width: 20)
+                    Image(systemName: "plus").font(.system(size: 13, weight: .light)).frame(width: 20)
                     Text("Add a Mind…").font(.system(size: 13))
                     Spacer(minLength: 0)
                 }
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Theme.t2)
                 .padding(.horizontal, 8)
                 .frame(height: 30)
                 .contentShape(Rectangle())
@@ -371,14 +371,15 @@ private struct SettingsSidebar: View {
     private func header(_ title: String) -> some View {
         Text(title)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(.secondary)
+            .lineHeight(1.3, size: 11)
+            .foregroundStyle(Theme.t3)
             .padding(.horizontal, 8)
             .padding(.top, 10)
             .padding(.bottom, 4)
     }
 
     private func symbol(_ name: String) -> some View {
-        Image(systemName: name).font(.system(size: 13))
+        Image(systemName: name).font(.system(size: 13, weight: .regular))
     }
 
     private func item<Lead: View, Title: View, Trailing: View>(
@@ -395,10 +396,10 @@ private struct SettingsSidebar: View {
                 title().font(.system(size: 13)).lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
                 trailing()
             }
-            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .foregroundStyle(isSelected ? Theme.onAccent : Theme.t1)
             .padding(.horizontal, 8)
             .frame(height: 30)
-            .background(isSelected ? Color.accentColor : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(isSelected ? Theme.accent : .clear, in: RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous))
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -457,13 +458,13 @@ private struct GeneralPage: View {
                         .accessibilityIdentifier("settings.key.input")
                 }
                 SettingsRow(title: "Dictate") {
-                    Text(choices.dictationOnFn ? "fn, under Dictation" : "⌥⇧D, under Dictation").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(choices.dictationOnFn ? "fn, under Dictation" : "⌥⇧D, under Dictation").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 }
             }
             SettingsGroup(title: "Version") {
                 SettingsRow(title: state.update.title, detail: state.update.detail, isFirst: true) {
                     if state.update.updatesItself {
-                        Button("Update Now", action: actions.updateNow).buttonStyle(FillButtonStyle(height: 26))
+                        Button("Update Now", action: actions.updateNow).buttonStyle(SettingsLook.button)
                             .accessibilityIdentifier("settings.updateNow")
                     }
                 }
@@ -473,8 +474,13 @@ private struct GeneralPage: View {
                     }
                 }
                 SettingsRow(title: "Prompt for an agent", detail: "How an agent finds this Mac in a mind and uses it.") {
-                    Button(action: actions.copyPrompt) { Label("Copy Prompt", systemImage: "doc.on.doc") }
-                        .buttonStyle(FillButtonStyle(height: 26))
+                    Button(action: actions.copyPrompt) {
+                        HStack(spacing: 6) {
+                            Image(systemName: "doc.on.doc").font(.system(size: 11, weight: .regular))
+                            Text("Copy Prompt")
+                        }
+                    }
+                    .buttonStyle(SettingsLook.button)
                         .accessibilityIdentifier("settings.copyPrompt")
                 }
             }
@@ -495,13 +501,13 @@ private struct KeyRecorder: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 4) {
-            HStack(spacing: 6) {
+            HStack(spacing: 8) {
                 Button {
                     isRecording ? stop() : start()
                 } label: {
                     Text(isRecording ? "Press a key…" : combo?.words ?? "None")
                         .font(.system(size: 13))
-                        .foregroundStyle(isRecording || combo == nil ? Color.secondary : Color.primary)
+                        .foregroundStyle(isRecording || combo == nil ? Theme.t3 : Theme.t1)
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(isRecording ? "Press a key" : combo?.words ?? "None")
@@ -509,19 +515,20 @@ private struct KeyRecorder: View {
                     Button {
                         _ = actions.setKey(id, nil)
                     } label: {
-                        Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                        Image(systemName: "xmark").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.t3)
                     }
                     .buttonStyle(.plain)
                     .help("Remove the key")
                     .accessibilityLabel("Remove the key")
                 }
             }
-            .padding(.horizontal, 10)
+            .padding(.leading, 10)
+            .padding(.trailing, 7)
             .frame(height: 24)
             .background(SettingsLook.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .strokeBorder(isRecording ? Color.accentColor : SettingsLook.fieldEdge, lineWidth: isRecording ? 1.5 : 1))
+                    .strokeBorder(isRecording ? Theme.accent : SettingsLook.fieldEdge, lineWidth: isRecording ? 1.5 : 1))
             if let words = hint ?? problem {
                 Text(words).font(.system(size: 11)).foregroundStyle(Theme.warnText).fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.trailing)
@@ -622,14 +629,15 @@ private struct DictationPage: View {
             SettingsGroup(title: "Word list") {
                 VStack(alignment: .leading, spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("Default itx expression").font(.system(size: 13))
+                        Text("Default itx expression").font(.system(size: 13)).lineHeight(1.3, size: 13)
                         Text("Used for each mind that does not set its own. It runs as you on that mind and must answer text with one “- term: wrong form, wrong form” on a line.")
-                            .font(.system(size: 11.5)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                            .font(.system(size: 11.5)).lineHeight(1.4, size: 11.5).foregroundStyle(Theme.t3).fixedSize(horizontal: false, vertical: true)
                     }
                     ExpressionField(id: "settings.wordsExpression", saved: state.defaultExpression ?? Words.builtInExpression, isEditable: state.lend.isSetUp) {
                         actions.setDefaultExpression($0.isEmpty || $0 == Words.builtInExpression ? nil : $0)
                     }
-                    Text("A mind’s list, and whether it was read, is under that mind.").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                    Text("A mind’s list, and whether it was read, is under that mind.").font(.system(size: 11.5)).lineHeight(1.3, size: 11.5)
+                        .foregroundStyle(Theme.t3)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
@@ -639,22 +647,23 @@ private struct DictationPage: View {
 
     /// "fn ×" while fn dictates; "Use fn" when the person removed it.
     private var fnKey: some View {
-        HStack(spacing: 6) {
-            Text(choices.dictationOnFn ? "fn" : "None").font(.system(size: 13)).foregroundStyle(choices.dictationOnFn ? Color.primary : Color.secondary)
+        HStack(spacing: 8) {
+            Text(choices.dictationOnFn ? "fn" : "None").font(.system(size: 13)).foregroundStyle(choices.dictationOnFn ? Theme.t1 : Theme.t3)
             Button {
                 choices.dictationOnFn.toggle()
             } label: {
                 if choices.dictationOnFn {
-                    Image(systemName: "xmark").font(.system(size: 9, weight: .semibold)).foregroundStyle(.secondary)
+                    Image(systemName: "xmark").font(.system(size: 9, weight: .medium)).foregroundStyle(Theme.t3)
                 } else {
-                    Text("Use fn").font(.system(size: 12)).foregroundStyle(Color.accentColor)
+                    Text("Use fn").font(.system(size: 12)).foregroundStyle(Theme.accentText)
                 }
             }
             .buttonStyle(.plain)
             .help(choices.dictationOnFn ? "fn does nothing for dictation; ⌥⇧D still works" : "Hold fn to dictate")
             .accessibilityLabel(choices.dictationOnFn ? "Remove fn" : "Use fn")
         }
-        .padding(.horizontal, 10)
+        .padding(.leading, 10)
+        .padding(.trailing, 7)
         .frame(height: 24)
         .background(SettingsLook.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(SettingsLook.fieldEdge))
@@ -672,15 +681,15 @@ private struct DictationPage: View {
                 HStack(spacing: 10) {
                     Image(systemName: "checkmark")
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(Color.accentColor)
+                        .foregroundStyle(Theme.accentText)
                         .opacity(model == speech.chosen ? 1 : 0)
                         .frame(width: 14)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(model.name).font(.system(size: 13))
-                        Text("\(model.megabytes) MB · \(model.license)").font(.system(size: 11.5)).foregroundStyle(.secondary)
+                        Text(model.name).font(.system(size: 13)).lineHeight(1.3, size: 13)
+                        Text("\(model.megabytes) MB · \(model.license)").font(.system(size: 11.5)).lineHeight(1.4, size: 11.5).foregroundStyle(Theme.t3)
                     }
                     Spacer(minLength: 8)
-                    Text(status(of: model)).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(status(of: model)).font(.system(size: 12)).foregroundStyle(Theme.t2)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
@@ -732,7 +741,7 @@ private struct MindPage: View {
                     isFirst: true
                 ) {
                     Button("Remove…") { actions.lend.remove(mind) }
-                        .buttonStyle(FillButtonStyle(height: 26))
+                        .buttonStyle(SettingsLook.button)
                         .disabled(state.lend.isCommandRunning)
                         .accessibilityIdentifier("settings.mind.remove")
                 }
@@ -745,23 +754,23 @@ private struct MindPage: View {
         HStack(spacing: 13) {
             MindAvatar(mind: mind, size: 44)
             VStack(alignment: .leading, spacing: 1) {
-                Text(title).font(.system(size: 17, weight: .semibold)).lineLimit(1)
-                Text(mind).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                Text(title).font(.system(size: 17, weight: .semibold)).lineHeight(1.2, size: 17).lineLimit(1)
+                Text(mind).font(.system(size: 12)).lineHeight(1.3, size: 12).foregroundStyle(Theme.t2).lineLimit(1)
             }
             Spacer(minLength: 8)
             if isActive {
                 HStack(spacing: 5) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                    Circle().fill(Theme.ok).frame(width: 6, height: 6)
                     Text("Lent now").font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(Theme.okText)
                 .padding(.horizontal, 9)
                 .frame(height: 22)
-                .background(Capsule().strokeBorder(Color.green, lineWidth: 1))
+                .background(Capsule().strokeBorder(Theme.ok, lineWidth: 1))
                 .fixedSize()
             } else {
                 Button("Lend to This Mind") { actions.lend.use(mind) }
-                    .buttonStyle(FillButtonStyle(prominent: true, height: 26))
+                    .buttonStyle(FillButtonStyle(prominent: true, height: 24, padding: 10))
                     .disabled(state.lend.isCommandRunning)
                     .accessibilityIdentifier("settings.mind.use")
             }
@@ -773,13 +782,13 @@ private struct MindPage: View {
     private var nameField: some View {
         let saved = entry?.name ?? ""
         return HStack(spacing: 4) {
-            Text("itx.").font(SettingsLook.mono).foregroundStyle(.secondary)
+            Text("itx.").font(SettingsLook.mono).foregroundStyle(Theme.t3)
             TextField("Name", text: Binding(get: { name ?? saved }, set: { name = $0 }))
                 .textFieldStyle(.plain)
                 .font(SettingsLook.mono)
                 .labelsHidden()
                 .padding(.horizontal, 8)
-                .frame(width: 120, height: 24)
+                .frame(width: 96, height: 24)
                 .background(SettingsLook.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(SettingsLook.fieldEdge))
                 .onSubmit {
@@ -796,18 +805,18 @@ private struct MindPage: View {
     /// The key's state: known only for the mind this Mac is lent to, from the lend's phase (HANDOFF 8.2).
     @ViewBuilder private var keyState: some View {
         if !isActive {
-            Text("Not checked").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Not checked").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 .help("The app knows a key's state only for the mind this Mac is lent to.")
         } else {
             switch state.lend.state.phase {
-            case .live: DotLine(words: "Allowed by a member", color: .green, text: Theme.okText)
+            case .live: DotLine(words: "Allowed by a member", color: Theme.ok, text: Theme.okText)
             case .notAllowed:
                 HStack(spacing: 8) {
-                    DotLine(words: "Not allowed yet", color: .orange, text: Theme.warnText)
-                    if let link = state.lend.link { Button("Open the Link") { actions.lend.open(link) }.buttonStyle(FillButtonStyle()) }
+                    DotLine(words: "Not allowed yet", color: Theme.warn, text: Theme.warnText)
+                    if let link = state.lend.link { Button("Open the Link") { actions.lend.open(link) }.buttonStyle(SettingsLook.button) }
                 }
-            case .connecting: Text("Checked when it connects").font(.system(size: 12)).foregroundStyle(.secondary)
-            default: Text("Not checked").font(.system(size: 12)).foregroundStyle(.secondary)
+            case .connecting: Text("Checked when it connects").font(.system(size: 12)).foregroundStyle(Theme.t2)
+            default: Text("Not checked").font(.system(size: 12)).foregroundStyle(Theme.t2)
             }
         }
     }
@@ -815,19 +824,19 @@ private struct MindPage: View {
     @ViewBuilder private var signIn: some View {
         switch state.signIns[mind] ?? .unknown {
         case .unknown:
-            Text("Reading…").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Reading…").font(.system(size: 12)).foregroundStyle(Theme.t2)
         case .until(let end):
             if let now = state.fixedNow {
-                DotLine(words: "Signed in · \(SignIn.left(until: end, now: now))", color: .green, text: Theme.okText)
+                DotLine(words: "Signed in · \(SignIn.left(until: end, now: now))", color: Theme.ok, text: Theme.okText)
             } else {
                 TimelineView(.everyMinute) { context in
-                    DotLine(words: "Signed in · \(SignIn.left(until: end, now: context.date))", color: .green, text: Theme.okText)
+                    DotLine(words: "Signed in · \(SignIn.left(until: end, now: context.date))", color: Theme.ok, text: Theme.okText)
                 }
             }
         case .renews:
-            DotLine(words: "Signed in · renews at its next use", color: .green, text: Theme.okText)
+            DotLine(words: "Signed in · renews at its next use", color: Theme.ok, text: Theme.okText)
         case .notSignedIn:
-            DotLine(words: "Not signed in", color: .orange, text: Theme.warnText)
+            DotLine(words: "Not signed in", color: Theme.warn, text: Theme.warnText)
                 .help("Run iterate login \(SignIn.address(of: mind)) in a terminal.")
         }
     }
@@ -872,8 +881,9 @@ private struct MindPage: View {
         if let failure = status.failure, !status.isFetching {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Image(systemName: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Theme.liveText)
-                (Text(failure).foregroundStyle(Theme.liveText) + Text(" ") + Text(kept(status)))
+                (Text(failure).foregroundStyle(Theme.liveText) + Text(" ") + Text(kept(status)).foregroundStyle(Theme.t2))
                     .font(.system(size: 12))
+                    .lineHeight(1.45, size: 12)
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if own != nil {
@@ -881,7 +891,7 @@ private struct MindPage: View {
                         wantsOwn = false
                         actions.setExpression(mind, nil)
                     }
-                    .buttonStyle(FillButtonStyle(height: 26))
+                    .buttonStyle(SettingsLook.button)
                     .accessibilityIdentifier("settings.mind.useDefault")
                 } else {
                     fetchButton
@@ -891,7 +901,7 @@ private struct MindPage: View {
             HStack(spacing: 8) {
                 if status.isFetching {
                     ProgressView().controlSize(.small)
-                    Text("Fetching…").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Fetching…").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 } else if let list = status.list, let at = status.fetchedAt {
                     if let now = state.fixedNow {
                         fetchedLine(list, at: at, now: now)
@@ -899,7 +909,7 @@ private struct MindPage: View {
                         TimelineView(.everyMinute) { context in fetchedLine(list, at: at, now: context.date) }
                     }
                 } else {
-                    Text("Not fetched yet.").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text("Not fetched yet.").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 }
                 Spacer(minLength: 8)
                 fetchButton
@@ -909,7 +919,7 @@ private struct MindPage: View {
                     ForEach(Array(list.entries.prefix(5).enumerated()), id: \.offset) { _, entry in
                         HStack(spacing: 6) {
                             Text(entry.term).fontWeight(.medium)
-                            if !entry.wrong.isEmpty { Text(entry.wrong.joined(separator: ", ")).foregroundStyle(.secondary) }
+                            if !entry.wrong.isEmpty { Text(entry.wrong.joined(separator: ", ")).foregroundStyle(Theme.t3) }
                         }
                         .font(.system(size: 12))
                         .lineLimit(1)
@@ -918,7 +928,7 @@ private struct MindPage: View {
                         .background(Theme.btn, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
                     }
                     if list.entries.count > 5 {
-                        Text("and \(list.entries.count - 5) more").font(.system(size: 12)).foregroundStyle(.secondary).frame(height: 22)
+                        Text("and \(list.entries.count - 5) more").font(.system(size: 12)).foregroundStyle(Theme.t3).frame(height: 22)
                     }
                 }
             }
@@ -929,9 +939,12 @@ private struct MindPage: View {
         Button {
             actions.fetchNow(mind)
         } label: {
-            Label("Fetch Now", systemImage: "arrow.clockwise")
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.clockwise").font(.system(size: 11, weight: .regular))
+                Text("Fetch Now")
+            }
         }
-        .buttonStyle(FillButtonStyle(height: 26))
+        .buttonStyle(SettingsLook.button)
         .disabled(status.isFetching)
         .accessibilityIdentifier("settings.mind.fetch")
     }
@@ -947,9 +960,9 @@ private struct MindPage: View {
         let minutes = max(0, Int(now.timeIntervalSince(at) / 60))
         let fetched = minutes == 0 ? "fetched just now" : minutes < 60 ? "fetched \(minutes) min ago" : "fetched at \(Lend.shortClock(at))"
         if list.entries.isEmpty {
-            Text("No terms · \(fetched)").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("No terms · \(fetched)").font(.system(size: 12)).foregroundStyle(Theme.t2)
         } else {
-            DotLine(words: "\(list.entries.count) terms · \(fetched)", color: .green, text: Theme.okText)
+            DotLine(words: "\(list.entries.count) terms · \(fetched)", color: Theme.ok, text: Theme.okText)
         }
     }
 }
@@ -975,13 +988,14 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         if window == nil {
             let host = NSHostingController(rootView: makeView())
             host.sizingOptions = []
+            // the content goes under the see-through title bar (`SettingsView` sets its title there)
+            host.safeAreaRegions = []
             let window = SettingsNSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: SettingsView.width, height: 680),
                 styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView], backing: .buffered, defer: false)
             window.contentViewController = host
             window.title = "Settings"
-            window.titleVisibility = .hidden
-            window.titlebarAppearsTransparent = true
+            window.tallTitleBar()
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: SettingsView.width, height: 420)
             window.contentMaxSize = NSSize(width: SettingsView.width, height: 4000)
@@ -1010,6 +1024,22 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 /// ⌘Z, ⇧⌘Z, ⌘W) come from the app's one main menu (`AppDelegate.installMainMenu`), which a
 /// menu-bar app has though it shows no menu bar.
 final class SettingsNSWindow: NSWindow {}
+
+extension NSWindow {
+    /// The design's title bar: 38 points (an empty toolbar in the compact style), see-through, with
+    /// no title of its own and no line under it. The content goes under it and sets its title there.
+    func tallTitleBar() {
+        styleMask.insert(.fullSizeContentView)
+        titleVisibility = .hidden
+        titlebarAppearsTransparent = true
+        titlebarSeparatorStyle = .none
+        let toolbar = NSToolbar(identifier: "iterate.titleBar")
+        toolbar.showsBaselineSeparator = false
+        toolbar.allowsUserCustomization = false
+        self.toolbar = toolbar
+        toolbarStyle = .unifiedCompact
+    }
+}
 
 // MARK: - Drawings
 
@@ -1055,7 +1085,7 @@ extension SettingsView {
             }
             let view = SettingsView(state: state, choices: Choices.shared, speech: SpeechChoice(), words: words, scrolls: false)
             for (dark, tone) in [(false, "light"), (true, "dark")] {
-                drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("settings-\(page)-\(tone).png")) && drawn
+                drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("settings-\(page)-\(tone).png"), titled: true) && drawn
             }
         }
         return drawn

@@ -391,11 +391,14 @@ final class ActivityWindow: NSObject, NSWindowDelegate {
         if window == nil {
             let host = NSHostingController(rootView: makeView())
             host.sizingOptions = []
+            // the content goes under the see-through title bar, and the view sets the title there
+            host.safeAreaRegions = []
             let window = SettingsNSWindow(
                 contentRect: NSRect(origin: .zero, size: Self.size), styleMask: [.titled, .closable, .miniaturizable, .resizable],
                 backing: .buffered, defer: false)
             window.contentViewController = host
             window.title = "Activity"
+            window.tallTitleBar()
             window.isReleasedWhenClosed = false
             window.contentMinSize = NSSize(width: 760, height: 420)
             window.setContentSize(Self.size)
@@ -440,50 +443,71 @@ struct ActivityWindowView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
-                .padding(.horizontal, 14)
-                .padding(.vertical, 10)
-            Divider()
+            VStack(spacing: 0) {
+                // the title bar's band: the window's buttons at the left, the title in the middle
+                Text("Activity")
+                    .font(.system(size: 13, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 38)
+                    .accessibilityAddTraits(.isHeader)
+                toolbar
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+            }
+            .background(Theme.titlebar)
+            Theme.line.frame(height: 1)
             HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 0) {
                     header
                     list
                 }
                 .frame(maxWidth: .infinity)
-                Divider()
+                Theme.line.frame(width: 1)
                 details
-                    .frame(width: 286)
+                    .frame(width: 285)
             }
-            Divider()
+            Theme.line.frame(height: 1)
             footer
-                .padding(.horizontal, 22)
-                .padding(.vertical, 8)
+                .padding(.leading, 22)
+                .padding(.trailing, 14)
+                .padding(.top, 8)
+                .padding(.bottom, 9)
         }
-        .background(Color(nsColor: .windowBackgroundColor))
+        .foregroundStyle(Theme.t1)
+        .background(Theme.win)
     }
 
     // MARK: - The top: the switch, the filters, the search
 
     private var toolbar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             HStack(spacing: 2) {
                 modeButton(.acts, "Acts")
                 modeButton(.every, "Every event")
             }
             .padding(2)
-            .background(Theme.track, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .background(Theme.track, in: RoundedRectangle(cornerRadius: Theme.Radius.segmentTrack, style: .continuous))
             .accessibilityElement(children: .contain)
             .accessibilityLabel("Show")
             .accessibilityIdentifier("log.mode")
             if mode == .every {
-                ForEach(LogLine.Group.allCases.filter { $0 != .other }) { group in chip(group) }
+                HStack(spacing: 5) {
+                    ForEach(LogLine.Group.allCases.filter { $0 != .other }) { group in chip(group) }
+                }
             }
             Spacer(minLength: 8)
-            TextField("Search", text: mode == .every ? $log.search : .constant(""))
-                .textFieldStyle(.roundedBorder)
-                .frame(width: 150)
-                .disabled(mode != .every)
-                .accessibilityIdentifier("log.search")
+            HStack(spacing: 6) {
+                Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .regular)).foregroundStyle(Theme.t3)
+                TextField("Search", text: mode == .every ? $log.search : .constant(""))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .disabled(mode != .every)
+                    .accessibilityIdentifier("log.search")
+            }
+            .padding(.horizontal, 9)
+            .frame(width: 150, height: 24)
+            .background(Theme.field, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).strokeBorder(Theme.edge))
         }
         .font(.system(size: 12))
     }
@@ -495,11 +519,11 @@ struct ActivityWindowView: View {
             selected = nil
         } label: {
             Text(title)
-                .font(.system(size: 12, weight: isSelected ? .medium : .regular))
-                .foregroundStyle(isSelected ? Color.primary : Color.secondary)
-                .padding(.horizontal, 11)
+                .font(.system(size: 12, weight: isSelected ? .semibold : .regular))
+                .foregroundStyle(isSelected ? Theme.t1 : Theme.segIdle)
+                .padding(.horizontal, 12)
                 .frame(height: 22)
-                .background(isSelected ? Theme.knob : Color.clear, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .background(isSelected ? Theme.knob : Color.clear, in: RoundedRectangle(cornerRadius: Theme.Radius.segment, style: .continuous))
                 .shadow(color: isSelected ? Theme.knobShadow : .clear, radius: 1, y: 0.5)
                 .contentShape(Rectangle())
         }
@@ -514,12 +538,12 @@ struct ActivityWindowView: View {
             if isOn { log.groups.remove(group) } else { log.groups.insert(group) }
         } label: {
             Text(group.title)
-                .font(.system(size: 12))
-                .foregroundStyle(isOn ? Theme.accentTintText : Color.secondary)
-                .padding(.horizontal, 8)
+                .font(.system(size: 11.5))
+                .foregroundStyle(isOn ? Theme.accentTintText : Theme.t3)
+                .padding(.horizontal, 9)
                 .frame(height: 22)
                 .background(isOn ? Theme.accentTint : Color.clear, in: Capsule())
-                .overlay(Capsule().strokeBorder(isOn ? Color.clear : Color.primary.opacity(0.18)))
+                .overlay(Capsule().strokeBorder(isOn ? Color.clear : Theme.edge))
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
@@ -535,26 +559,27 @@ struct ActivityWindowView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Text(acts.contextLine)
-                .font(.system(size: 11.5, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(Theme.t2)
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("log.context")
-            Spacer(minLength: 8)
+            Spacer(minLength: 10)
             if isFollowing {
-                HStack(spacing: 5) {
-                    Circle().fill(Color.green).frame(width: 6, height: 6)
+                HStack(spacing: 6) {
+                    Circle().fill(Theme.ok).frame(width: 7, height: 7)
                     Text("Following")
                 }
-                .font(.system(size: 12))
+                .font(.system(size: 11))
                 .foregroundStyle(Theme.okText)
                 .help("New events of this context come into the list as they happen")
             }
         }
         .padding(.leading, 22)
         .padding(.trailing, 14)
-        .padding(.top, 10)
+        .padding(.top, 9)
+        .padding(.bottom, 5)
     }
 
     private var isFollowing: Bool {
@@ -578,7 +603,7 @@ struct ActivityWindowView: View {
     private var list: some View {
         let lines = self.lines
         return ScrollView(.vertical) {
-            LazyVStack(alignment: .leading, spacing: 2) {
+            LazyVStack(alignment: .leading, spacing: 1) {
                 ForEach(lines) { line in
                     LogRow(line: line, isSelected: line.id == selected?.id)
                         .onTapGesture { selected = line }
@@ -587,7 +612,7 @@ struct ActivityWindowView: View {
                     .onAppear { if mode == .every { log.reachedEnd() } }
             }
             .padding(.horizontal, 14)
-            .padding(.bottom, 10)
+            .padding(.bottom, 12)
         }
         .accessibilityIdentifier("log.list")
     }
@@ -605,7 +630,7 @@ struct ActivityWindowView: View {
                         : log.window.hasOlder ? "Reading older events…" : count == 0 ? "No event on this context yet." : nil)
             }
         if let words {
-            Text(words).font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.vertical, 8)
+            Text(words).font(.system(size: 11)).foregroundStyle(Theme.t3).padding(.horizontal, 8).padding(.vertical, 8)
         } else {
             Color.clear.frame(height: 1)
         }
@@ -618,59 +643,75 @@ struct ActivityWindowView: View {
         if let line = selected {
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(line.title).font(.system(size: 15, weight: .semibold)).fixedSize(horizontal: false, vertical: true)
-                        Text("\(line.type) · \(line.time)").font(.system(size: 11.5, design: .monospaced)).foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(line.title).font(.system(size: 14, weight: .semibold)).lineHeight(1.3, size: 14).fixedSize(horizontal: false, vertical: true)
+                        Text("\(line.type) · \(line.time)").font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.t3)
                             .lineLimit(1).truncationMode(.middle)
                     }
-                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 14, verticalSpacing: 7) {
+                    Grid(alignment: .leadingFirstTextBaseline, horizontalSpacing: 10, verticalSpacing: 4) {
                         ForEach(line.fields, id: \.self) { field in
                             GridRow {
-                                Text(field.key).font(.system(size: 12.5)).foregroundStyle(.secondary)
-                                Text(field.value).font(.system(size: 12, design: .monospaced)).lineLimit(2).truncationMode(.middle)
+                                Text(field.key).font(.system(size: 12)).lineHeight(1.45, size: 12).foregroundStyle(Theme.t3).frame(width: 52, alignment: .leading)
+                                Text(field.value).font(.system(size: 11.5, design: .monospaced)).lineLimit(2).truncationMode(.middle)
                                     .textSelection(.enabled)
                             }
                         }
                         if line.block != nil {
-                            GridRow { Text(line.type == DeviceFact.actStartedType || line.type == DeviceFact.actEndedType ? "detail" : "text").font(.system(size: 12.5)).foregroundStyle(.secondary) }
+                            GridRow {
+                                Text(line.type == DeviceFact.actStartedType || line.type == DeviceFact.actEndedType ? "detail" : "text").font(.system(size: 12))
+                                    .lineHeight(1.45, size: 12).foregroundStyle(Theme.t3)
+                            }
                         }
                     }
                     if let block = line.block {
                         Text(block)
-                            .font(.system(size: 11.5, design: .monospaced))
+                            .font(.system(size: 11, design: .monospaced))
+                            .lineHeight(1.5, size: 11)
                             .lineLimit(12)
                             .textSelection(.enabled)
                             .fixedSize(horizontal: false, vertical: true)
-                            .padding(10)
+                            // the mock's padding (9, 11) inside its edge of 1 point
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(Theme.code, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+                            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.line))
                     }
                     if line.notInMind {
                         HStack(alignment: .top, spacing: 8) {
-                            Image(systemName: "icloud.slash").foregroundStyle(Theme.warnText)
+                            Image(systemName: "icloud.slash").font(.system(size: 12, weight: .regular)).foregroundStyle(Theme.warnText).padding(.top, 2)
                             Text("Not yet in the mind. It waits in the bridge’s queue and goes when the connection is back.")
+                                .lineHeight(1.45, size: 12)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        .font(.system(size: 12.5))
-                        .padding(10)
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 10)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Theme.warnWash, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.warnEdge))
                     }
-                    if let thing = line.thing.flatMap({ id in state.things.first { $0.id == id } }) {
+                    let thing = line.thing.flatMap { id in state.things.first { $0.id == id } }
+                    if let thing {
                         thingControl(thing)
                     }
-                    Button("Copy Event") { actions.copy(LogWords.json(of: line)) }
-                        .accessibilityIdentifier("log.copy")
+                    HStack(spacing: 6) {
+                        if let thing, state.approvals[thing.id] != nil {
+                            Button("End the Approval") { actions.endApproval(thing) }
+                                .buttonStyle(SettingsLook.button)
+                                .accessibilityIdentifier("log.endApproval")
+                        }
+                        Button("Copy Event") { actions.copy(LogWords.json(of: line)) }
+                            .buttonStyle(SettingsLook.button)
+                            .accessibilityIdentifier("log.copy")
+                    }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 14)
+                .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         } else {
             VStack {
-                Text("Choose an event to see its fields.").font(.system(size: 12)).foregroundStyle(.secondary)
+                Text("Choose an event to see its fields.").font(.system(size: 12)).foregroundStyle(Theme.t3)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
@@ -678,28 +719,27 @@ struct ActivityWindowView: View {
 
     private func thingControl(_ thing: Shareable) -> some View {
         let sharing = state.sharing[thing.id, default: .off]
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text(thing.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
-                Spacer(minLength: 6)
-                SharingControl(id: thing.id, title: thing.title, selection: sharing, choose: { actions.choose(thing, $0) }, identifier: "log.sharing")
+        return VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Text(thing.title).font(.system(size: 12)).lineLimit(1).truncationMode(.tail)
+                Spacer(minLength: 0)
+                SharingControl(
+                    id: thing.id, title: thing.title, selection: sharing, choose: { actions.choose(thing, $0) }, identifier: "log.sharing", segmentWidth: 42)
             }
             if let until = state.approvals[thing.id] {
-                Text("Approved until \(Lend.shortClock(until))").font(.system(size: 12)).foregroundStyle(Theme.accentText)
-                Button("End the Approval") { actions.endApproval(thing) }
-                    .accessibilityIdentifier("log.endApproval")
+                Text("Approved until \(Lend.shortClock(until))").font(.system(size: 11.5)).foregroundStyle(Theme.accentText)
             }
         }
-        .padding(.top, 4)
+        .padding(.top, 2)
     }
 
     // MARK: - The foot
 
     private var footer: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 10) {
             Text("Keys and moves are in no log unless you keep them. A refused use is no act and is not listed.")
-                .font(.system(size: 11.5))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.t3)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 8)
@@ -720,34 +760,36 @@ private struct LogRow: View {
     let isSelected: Bool
 
     var body: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text(line.time).font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary).frame(width: 56, alignment: .leading)
+        HStack(alignment: .center, spacing: 9) {
+            Text(line.time).font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3).frame(width: 52, alignment: .leading)
             Image(systemName: line.symbol)
-                .font(.system(size: 12))
-                .frame(width: 20)
-                .foregroundStyle(line.isRed ? Theme.liveText : Color.secondary)
-            VStack(alignment: .leading, spacing: 1) {
-                Text(line.title).font(.system(size: 13)).lineLimit(1).truncationMode(.tail)
+                .font(.system(size: 12, weight: .regular))
+                .frame(width: 14)
+                .foregroundStyle(line.isRed ? Theme.liveText : Theme.t2)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(line.title).font(.system(size: 12.5)).lineHeight(1.3, size: 12.5).lineLimit(1).truncationMode(.tail)
                 if let detail = line.detail {
                     Text(detail)
-                        .font(line.detailIsCode ? .system(size: 11.5, design: .monospaced) : .system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .font(line.detailIsCode ? .system(size: 10.5, design: .monospaced) : .system(size: 11.5))
+                        .lineHeight(1.3, size: line.detailIsCode ? 10.5 : 11.5)
+                        .foregroundStyle(Theme.t3)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
             }
             .layoutPriority(1)
-            Spacer(minLength: 8)
+            Spacer(minLength: 0)
             if line.notInMind {
-                Image(systemName: "icloud.slash").font(.system(size: 11)).foregroundStyle(Theme.warnText)
+                Image(systemName: "icloud.slash").font(.system(size: 11, weight: .regular)).foregroundStyle(Theme.warnText)
                     .help("Not yet in the mind: it goes when the connection is back")
             }
-            Text(line.type).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1)
-            Text(line.took ?? "").font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary).frame(width: 34, alignment: .trailing)
+            Text(line.type).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.t3).lineLimit(1)
+            Text(line.took ?? "").font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3).frame(width: 30, alignment: .trailing)
         }
         .padding(.horizontal, 8)
+        .padding(.vertical, 3)
         .frame(minHeight: 36)
-        .background(isSelected ? Color.primary.opacity(0.07) : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(isSelected ? Theme.block : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
@@ -802,7 +844,7 @@ extension ActivityWindowView {
         for (dark, tone) in [(false, "light"), (true, "dark")] {
             let view = ActivityWindowView(acts: acts, log: log, state: state, selected: selected, isDrawing: true)
                 .frame(width: ActivityWindow.size.width, height: ActivityWindow.size.height)
-            drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("log-\(tone).png")) && drawn
+            drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("log-\(tone).png"), titled: true) && drawn
         }
         return drawn
     }

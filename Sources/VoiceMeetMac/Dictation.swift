@@ -465,7 +465,7 @@ struct DictationPill: View {
                 }
                 if model.locked {
                     Image(systemName: "lock.fill")
-                        .font(.system(size: 11))
+                        .font(.system(size: 12))
                         .foregroundStyle(Theme.accentText)
                         .accessibilityLabel("Stays on")
                 }
@@ -486,7 +486,8 @@ struct DictationPill: View {
         }
         .font(.system(size: Theme.Size.pillText))
         .foregroundStyle(Theme.t1)
-        .padding(.horizontal, 14)
+        // the design's padding (14) inside its edge of 1 point
+        .padding(.horizontal, 15)
         .frame(width: Self.width, height: Self.height)
         .background(Theme.surface, in: Self.shape)
         .overlay(Self.shape.strokeBorder(Theme.edge, lineWidth: 1))

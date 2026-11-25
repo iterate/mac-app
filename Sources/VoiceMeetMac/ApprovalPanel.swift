@@ -80,38 +80,45 @@ struct ApprovalView: View {
                 if let mind = question.mind {
                     MindAvatar(mind: mind, size: 40)
                 } else {
-                    Image(systemName: "questionmark.circle").font(.system(size: 34)).foregroundStyle(.secondary).frame(width: 40, height: 40)
+                    Image(systemName: "questionmark.circle").font(.system(size: 34, weight: .light)).foregroundStyle(Theme.t3).frame(width: 40, height: 40)
                 }
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 1) {
                     Text("\(question.mind.map { faces.face(of: $0).title } ?? "Your mind") wants to \(question.does)")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.system(size: Theme.Size.panelTitle, weight: .semibold))
+                        .lineHeight(1.25, size: Theme.Size.panelTitle)
+                        .foregroundStyle(Theme.t1)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                    Text(subtitle).font(.system(size: 12)).lineHeight(1.3, size: 12).foregroundStyle(Theme.t2).lineLimit(1).truncationMode(.middle)
                 }
             }
             if let detail = question.detail {
                 Text(detail)
-                    .font(.system(size: 11.5, design: .monospaced))
+                    .font(.system(size: 12, design: .monospaced))
+                    // the mock sets 7 points to a character, SF Mono 7.2: a command of 45 fits one line
+                    .tracking(-0.2)
+                    .lineHeight(1.5, size: 12)
+                    .foregroundStyle(Theme.t1)
                     .lineLimit(8)
                     .truncationMode(.tail)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 11)
-                    .padding(.vertical, 9)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(Theme.code, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Color.primary.opacity(0.1)))
+                    .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(Theme.line))
             }
             Text(question.note)
-                .font(.system(size: 12.5))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+                .lineHeight(1.45, size: 12)
+                .foregroundStyle(Theme.t2)
                 .fixedSize(horizontal: false, vertical: true)
             VStack(spacing: 6) {
                 Button {
                     answer(true, false)
                 } label: {
                     HStack(spacing: 6) {
-                        if !question.byControl { Image(systemName: "touchid").font(.system(size: 13)) }
+                        if !question.byControl { Image(systemName: "touchid").font(.system(size: 14, weight: .light)) }
                         Text("Approve Once")
                     }
                 }
@@ -127,7 +134,7 @@ struct ApprovalView: View {
                 } label: {
                     HStack(spacing: 6) {
                         Text("Deny")
-                        Text("esc").font(.system(size: 11)).foregroundStyle(.secondary)
+                        Text("esc").font(.system(size: 11, weight: .regular))
                     }
                 }
                 .buttonStyle(AnswerStyle(prominent: false))
@@ -136,7 +143,7 @@ struct ApprovalView: View {
                 .accessibilityIdentifier("approval.deny")
             }
             HStack(spacing: 7) {
-                Image(systemName: "clock").font(.system(size: 11))
+                Image(systemName: "clock").font(.system(size: 12, weight: .light))
                 if let now {
                     Text(left(at: now))
                 } else {
@@ -145,14 +152,17 @@ struct ApprovalView: View {
                 }
             }
             .font(.system(size: 11).monospacedDigit())
-            .foregroundStyle(.secondary)
+            .foregroundStyle(Theme.t3)
             .lineLimit(1)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(19)
+        // the mock's padding (18, 18, 14) inside its edge of 1 point
+        .padding(.horizontal, 19)
+        .padding(.top, 19)
+        .padding(.bottom, 15)
         .frame(width: Self.width)
-        .background(Color(nsColor: .windowBackgroundColor), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.primary.opacity(0.14), lineWidth: 0.5))
+        .background(Theme.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.edge))
     }
 
     private var subtitle: String {
@@ -167,18 +177,19 @@ struct ApprovalView: View {
     }
 
     /// The answers' buttons, 32 points high and the panel's width: the first one prominent and
-    /// neutral (the label colour), the others a neutral fill.
+    /// neutral (the text colour as its fill), the others a neutral fill.
     private struct AnswerStyle: ButtonStyle {
         let prominent: Bool
 
         func makeBody(configuration: Configuration) -> some View {
+            let shape = RoundedRectangle(cornerRadius: Theme.Radius.button, style: .continuous)
             configuration.label
                 .font(.system(size: 13, weight: prominent ? .semibold : .medium))
-                .foregroundStyle(prominent ? Color(nsColor: .windowBackgroundColor) : Color.primary)
+                .foregroundStyle(prominent ? Theme.onPrimary : Theme.t1)
                 .frame(maxWidth: .infinity, minHeight: 32)
-                .background(prominent ? Color.primary : Theme.btn, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.primary.opacity(configuration.isPressed ? 0.12 : 0)))
-                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .background(prominent ? Theme.primary : Theme.btn, in: shape)
+                .overlay(shape.fill(Theme.t1.opacity(configuration.isPressed ? 0.12 : 0)))
+                .contentShape(shape)
         }
     }
 }
@@ -199,9 +210,8 @@ extension ApprovalWindow {
         Rendering.fixFaces()
         var drawn = true
         for (dark, tone) in [(false, "light"), (true, "dark")] {
-            let view = ApprovalView(question: sampleQuestion(), answer: { _, _ in }, now: Rendering.now)
-                .padding(20)
-                .background(Color(nsColor: .underPageBackgroundColor))
+            // around it, the see-through panel's margin
+            let view = ApprovalView(question: sampleQuestion(), answer: { _, _ in }, now: Rendering.now).padding(20)
             drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("approval-\(tone).png")) && drawn
         }
         return drawn

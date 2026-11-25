@@ -852,8 +852,9 @@ draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearanc
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
 listening, with a text and files, while it sends, not sent, not sent with its fix) and the
 dictation pill (loading, listening, locked, failed), light and dark, twenty files. `--render-settings <folder>` draws the Settings window's pages, light and dark, eight files. `--render-approval <folder>` draws the
-Ask question, and `--render-log <folder>` the Activity window, light and dark, two files each. `--render-all <folder>` draws every
-view, light and dark.
+Ask question, `--render-log <folder>` the Activity window, and `--render-capture <folder>` the capture's pill while it
+records, light and dark, two files each. Settings and the Activity window draw in a window with its title bar, so their
+window buttons show (grey: the drawing is never the active app). `--render-all <folder>` draws every view, light and dark.
 
 **The speech bench** (local only, never in CI) compares speech-to-text engines on sentences with
 known text: `harness/speech-bench/sentences.md`, 24 sentences as the owner dictates to a coding
