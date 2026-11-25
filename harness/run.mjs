@@ -198,6 +198,26 @@ async function start(app, home, env = {}, args = []) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * Waits until the copy's start is over: a second with at most 5 wake-ups, at most 30 s. macOS
+ * starts an AppKit app with work of its own on the main thread, which no code of the app asks
+ * for: on a GitHub runner (macOS 15 in a virtual machine) about 60 wake-ups a second for its
+ * first 8 to 10 s, in AppKit alone too (harness/launch-baseline.swift, 25 Nov 2026); on a Mac
+ * none. An idle window that starts in those seconds measures macOS, not the app. The answer is
+ * the seconds waited.
+ */
+async function settled(run) {
+  const started = Date.now();
+  let last = (await run.state()).perf;
+  while (Date.now() - started < 30000) {
+    await sleep(1000);
+    const now = (await run.state()).perf;
+    if (now.interruptWakeups - last.interruptWakeups <= 5) break;
+    last = now;
+  }
+  return Math.round((Date.now() - started) / 100) / 10;
+}
+
 /** What changed in `perf` (ui.state) from `a` to `b`: the CPU, the wake-ups and the counters. */
 function perfDelta(a, b) {
   const counters = {};
@@ -340,8 +360,9 @@ const scenarios = {
     try {
       await until("the lend live", 20, async () => (await run.state()).lend.phase === "live");
       await until("the session", 10, async () => (await run.state()).session);
-      // the start's own work ends: the bridges, the word lists
+      // the start's own work ends: the bridges, the word lists, and macOS's start of the app
       await sleep(4000);
+      const settleSeconds = await settled(run);
       await run.control("perf.reset");
       const before = (await run.state()).perf;
       await sleep(20000);
@@ -380,7 +401,7 @@ const scenarios = {
       await sleep(3000);
       const stall = (await run.state()).perf.mainStallMaxMs;
       await run.control("perf.reset", { watchMain: false });
-      const result = { live, refused, mainStallMaxMs: stall, series };
+      const result = { live, refused, mainStallMaxMs: stall, settleSeconds, series };
       try {
         within("idle, live", live, IDLE_LIMITS);
         within("idle, refused", refused, REFUSED_LIMITS);
@@ -410,6 +431,7 @@ const scenarios = {
       // the open restarts a refused lend: it is refused again
       await until("the lend refused again", 20, async () => (await run.state()).lend.phase === "not allowed");
       await sleep(1500);
+      await settled(run);
       await run.control("perf.reset", { watchMain: true });
       const before = (await run.state()).perf;
       await sleep(5000);
