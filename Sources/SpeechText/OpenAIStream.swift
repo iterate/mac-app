@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import Security
+import os
 
 /// ONE DICTATION AT OPENAI: the realtime transcription over a WebSocket (README, "Dictation"), in
 /// the session shape that `harness/speech-bench/engines/openai.mjs` measured. A `transcription`
@@ -325,9 +326,20 @@ public struct OpenAIKey: Sendable {
         return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
     }
 
-    /// The key, or nil. macOS may ask the person once when another program wrote the item and did
-    /// not trust this app (`cli.mjs` trusts /Applications/iterate.app).
+    /// The keys read in this process, by service. macOS may ask the person at each read of an item
+    /// another program wrote (`cli.mjs`), so the Keychain is read once a process; `store` and
+    /// `remove` keep this in step.
+    private static let known = OSAllocatedUnfairLock<[String: String]>(initialState: [:])
+
+    /// The key, or nil: from the Keychain at the first call of this process, then from memory.
     public func read() -> String? {
+        if let key = Self.known.withLock({ $0[service] }) { return key }
+        guard let key = readKeychain() else { return nil }
+        Self.known.withLock { $0[service] = key }
+        return key
+    }
+
+    private func readKeychain() -> String? {
         var query = query
         query[kSecReturnData as String] = true
         var result: CFTypeRef?
@@ -345,12 +357,15 @@ public struct OpenAIKey: Sendable {
         var item = query
         item[kSecValueData as String] = Data(key.utf8)
         item[kSecAttrLabel as String] = "iterate Mac app: OpenAI API key"
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        let isStored = SecItemAdd(item as CFDictionary, nil) == errSecSuccess
+        Self.known.withLock { $0[service] = isStored ? key : nil }
+        return isStored
     }
 
     @discardableResult
     public func remove() -> Bool {
         let status = SecItemDelete(query as CFDictionary)
+        Self.known.withLock { $0[service] = nil }
         return status == errSecSuccess || status == errSecItemNotFound
     }
 }
