@@ -91,7 +91,7 @@ private final class Events: @unchecked Sendable {
     private let lock = NSLock()
     private var events: [SpeechRecognizer.Event] = []
     func add(_ event: SpeechRecognizer.Event) { lock.withLock { events.append(event) } }
-    var partials: [String] { lock.withLock { events.compactMap { if case .partial(let text) = $0 { return text } else { return nil } } } }
+    var partials: [String] { lock.withLock { events.compactMap { if case .partial(let said) = $0 { return said.text } else { return nil } } } }
     var notes: [String] { lock.withLock { events.compactMap { if case .note(let note) = $0 { return note } else { return nil } } } }
 }
 

@@ -141,7 +141,7 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
 
     private func said(_ text: String) {
         guard lock.withLock({ local == nil && !isCancelled }) else { return }
-        heard(.partial(words.repair(text.trimmingCharacters(in: .whitespacesAndNewlines))))
+        heard(.partial(HeardText(text, words: words)))
     }
 
     /// The local model hears from now on: what was kept, then what comes. Once; nil after a cancel.
