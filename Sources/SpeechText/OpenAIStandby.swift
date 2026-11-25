@@ -6,14 +6,16 @@ import Foundation
 /// 2026); a standby is ready at once.
 ///
 /// The bounds. The online recognizer opens a standby in the background when each of its listenings
-/// ends (`prepare`), only with a key; the app drops it when the model is no longer online, the key
-/// goes, or the Mac sleeps (`drop`). There is never more than one, held or opening. One that waits
+/// ends (`prepare`), only with a credential (`OpenAIAccess`: a fresh token of the lent mind for each
+/// socket it opens, else this Mac's key); the app drops it when the model is no longer online, the
+/// key goes, the lent mind changes, or the Mac sleeps (`drop`). There is never more than one, held or opening. One that waits
 /// 10 minutes unused is closed, and the next opens only after the next dictation: an idle Mac
 /// holds no socket for long. One that the server or the network closes is dropped with a line in
 /// the log and opened again, within those 10 minutes of the last dictation, at most once in
 /// `renewSpacing` seconds (the owner's Mac, 25 Nov 2026: OpenAI reset idle standbys after 94 and
 /// 101 s, and kept another 262 s). A listening takes it (`take`) when it is open, of the same session
-/// (the word list's keywords, the key) and answers a ping; else it opens a new socket, as before.
+/// (the word list's keywords, the credential's source) and answers a ping; else it opens a new
+/// socket, as before.
 ///
 /// Cost: OpenAI bills realtime transcription by the audio it gets (25 November 2026: $0.017 a
 /// minute of sound), so an open socket with no audio costs nothing.
@@ -47,7 +49,7 @@ public final class OpenAIStandby: @unchecked Sendable {
         let id: Int
         let stream: OpenAIStream
         let setup: OpenAIStream.Setup
-        let key: String
+        let source: OpenAISource
         let opened: Date
     }
 
@@ -61,7 +63,7 @@ public final class OpenAIStandby: @unchecked Sendable {
     private var dropped = 0
     /// The last dictation's session, and when it asked for a standby: a standby that goes is opened
     /// again until `unused` seconds after it.
-    private var wanted: (setup: OpenAIStream.Setup, key: @Sendable () -> String?, at: Date)?
+    private var wanted: (setup: OpenAIStream.Setup, access: OpenAIAccess, at: Date)?
     private var lastRenewal: Date?
 
     public init(clock: Clock = .system, log: @escaping @Sendable (String) -> Void = { _ in }) {
@@ -72,14 +74,20 @@ public final class OpenAIStandby: @unchecked Sendable {
     /// Whether a standby is open and waits.
     var isHeld: Bool { lock.withLock { held != nil } }
 
-    /// Opens a standby for `setup` in the background, unless one is held or opens, or there is no key.
-    public func prepare(_ setup: OpenAIStream.Setup, key: @escaping @Sendable () -> String?) {
-        lock.withLock { wanted = (setup, key, clock.now()) }
-        open(setup, key: key, until: clock.now().addingTimeInterval(Self.unused))
+    /// Opens a standby for `setup` in the background, unless one is held or opens, or there is no
+    /// credential.
+    public func prepare(_ setup: OpenAIStream.Setup, access: OpenAIAccess) {
+        lock.withLock { wanted = (setup, access, clock.now()) }
+        open(setup, access: access, until: clock.now().addingTimeInterval(Self.unused))
     }
 
-    /// Opens one, kept until `until` at the latest.
-    private func open(_ setup: OpenAIStream.Setup, key: @escaping @Sendable () -> String?, until: Date) {
+    /// With this Mac's key alone.
+    public func prepare(_ setup: OpenAIStream.Setup, key: @escaping @Sendable () -> String?) {
+        prepare(setup, access: .ownKey(key))
+    }
+
+    /// Opens one, kept until `until` at the latest, with a credential got for it now.
+    private func open(_ setup: OpenAIStream.Setup, access: OpenAIAccess, until: Date) {
         let id: Int? = lock.withLock {
             guard held == nil, !isOpening else { return nil }
             isOpening = true
@@ -88,18 +96,21 @@ public final class OpenAIStandby: @unchecked Sendable {
         }
         guard let id else { return }
         Task.detached(priority: .utility) { [self] in
-            guard let key = key() else { return lock.withLock { isOpening = false } }
+            // no credential (no mind, no key) opens none, with no line
+            guard await access.source() != nil else { return lock.withLock { isOpening = false } }
             let started = clock.now()
             do {
-                let stream = try await OpenAIStream.open(setup, key: key, text: { _ in }, failed: { [weak self] reason in self?.lost(id, reason) })
+                let credential = try await access.credential()
+                let stream = try await OpenAIStream.open(
+                    setup, key: credential.value, text: { _ in }, failed: { [weak self] reason in self?.lost(id, reason) })
                 let isKept: Bool = lock.withLock {
                     isOpening = false
                     guard id > dropped else { return false }
-                    held = Held(id: id, stream: stream, setup: setup, key: key, opened: clock.now())
+                    held = Held(id: id, stream: stream, setup: setup, source: credential.source, opened: clock.now())
                     return true
                 }
                 guard isKept else { return stream.cancel() }
-                log("a standby socket is ready after \(milliseconds(since: started)) ms, with \(setup.keywords.count) keywords")
+                log("a standby socket is ready after \(milliseconds(since: started)) ms, with \(setup.keywords.count) keywords (\(credential.source.words))")
                 clock.after(max(0, until.timeIntervalSince(clock.now()))) { [weak self] in self?.expire(id) }
             } catch {
                 lock.withLock { isOpening = false }
@@ -108,10 +119,10 @@ public final class OpenAIStandby: @unchecked Sendable {
         }
     }
 
-    /// The standby, for a listening of `setup` and `key`: open, of the same session, unused for
-    /// less than `unused` seconds, and it answers a ping. Else nil, and a standby that does not fit
-    /// is closed. Either way no standby is held after it.
-    func take(_ setup: OpenAIStream.Setup, key: String) async -> OpenAIStream? {
+    /// The standby, for a listening of `setup` whose credential comes from `source`: open, of the
+    /// same session, unused for less than `unused` seconds, and it answers a ping. Else nil, and a
+    /// standby that does not fit is closed. Either way no standby is held after it.
+    func take(_ setup: OpenAIStream.Setup, source: OpenAISource?) async -> (stream: OpenAIStream, source: OpenAISource)? {
         let (taken, isOpening): (Held?, Bool) = lock.withLock {
             defer { held = nil }
             return (held, self.isOpening)
@@ -123,10 +134,11 @@ public final class OpenAIStandby: @unchecked Sendable {
         let why: String? =
             if clock.now().timeIntervalSince(taken.opened) >= Self.unused { "waited \(Int(Self.unused / 60)) min unused" }
             else if taken.setup.keywords != setup.keywords { "has other keywords" }
-            else if taken.setup != setup || taken.key != key { "has another session" }
+            else if taken.source != source { "is of another credential (\(taken.source.words))" }
+            else if taken.setup != setup { "has another session" }
             else if await !taken.stream.ping(within: Self.pingTimeout) { "did not answer a ping" }
             else { nil }
-        guard let why else { return taken.stream }
+        guard let why else { return (taken.stream, taken.source) }
         taken.stream.cancel()
         log("the standby socket \(why): closed, and a new one")
         return nil
@@ -153,20 +165,21 @@ public final class OpenAIStandby: @unchecked Sendable {
             return true
         }
         guard isHeld else { return }
-        let renew: (OpenAIStream.Setup, @Sendable () -> String?, Date, Double)? = lock.withLock {
+        let renew: (OpenAIStream.Setup, OpenAIAccess, Date, Double)? = lock.withLock {
             guard let wanted else { return nil }
             let until = wanted.at.addingTimeInterval(Self.unused)
             guard clock.now() < until else { return nil }
             let wait = lastRenewal.map { max(0, Self.renewSpacing - clock.now().timeIntervalSince($0)) } ?? 0
             lastRenewal = clock.now().addingTimeInterval(wait)
-            return (wanted.setup, wanted.key, until, wait)
+            return (wanted.setup, wanted.access, until, wait)
         }
-        guard let (setup, key, until, wait) = renew else { return log("the standby socket went (\(reason)): dropped") }
+        guard let (setup, access, until, wait) = renew else { return log("the standby socket went (\(reason)): dropped") }
         log("the standby socket went (\(reason)): a new one in \(Int(wait)) s")
         clock.after(wait) { [weak self] in
             // a drop meanwhile (the model, the key, sleep) wants none
             guard let self, self.lock.withLock({ self.wanted != nil }) else { return }
-            self.open(setup, key: key, until: until)
+            // a fresh credential: a token of the last opening is no longer good
+            self.open(setup, access: access, until: until)
         }
     }
 

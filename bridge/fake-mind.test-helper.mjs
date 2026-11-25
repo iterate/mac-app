@@ -11,6 +11,7 @@
 // `itx.r2.put` stores bytes through the connection. Each file is in `files` by its key, as
 // `{ bytes, contentType, via }`, and `stored(key, file)` hears it. `order` has "file <key>" and
 // "event <type>" in the order they came. Its config repo is `repo`: `{ tip, files, reads }`.
+// `itx.fetch` goes to `mind.fetch(request)` (by default the vault's no: no stored secret).
 import { createServer } from "node:http";
 
 export const SIGN_IN_ENDED = "1008 the sign-in for this session ended: authenticate again";
@@ -31,6 +32,8 @@ export function fakeMind({ stored = () => {} } = {}) {
     clock: 0,
     offset: 0,
     reads: [],
+    fetched: [],
+    fetch: async () => Promise.reject(new Error("itx.fetch: no stored mind secret for getSecret(\"/secrets/openai\") in the header authorization")),
   };
   mind.sleep = (ms) => {
     mind.waits.push(ms);
@@ -117,6 +120,12 @@ export function fakeMind({ stored = () => {} } = {}) {
         }),
       },
       ai: { run: async () => Promise.reject(new Error("no model in the fake mind")) },
+      /** `itx.fetch`: `mind.fetch(request)` answers it; each request is in `fetched`. */
+      async fetch(request) {
+        open();
+        mind.fetched.push(request);
+        return mind.fetch(request);
+      },
       cd: (path) => ({
         path,
         async append(...events) {

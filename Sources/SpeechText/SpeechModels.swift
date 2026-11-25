@@ -13,7 +13,8 @@ public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
     /// Where a model runs.
     public enum Runs: Equatable, Hashable, Sendable {
         case onThisMac(AsrModelVersion)
-        /// OpenAI's realtime transcription, with the OpenAI key of this Mac (`OpenAIKey`).
+        /// OpenAI's realtime transcription, with a token of the lent mind (`OpenAIAccess`), else
+        /// the OpenAI key of this Mac (`OpenAIKey`).
         case openAI
     }
 
@@ -50,11 +51,12 @@ public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
     public static let all = local + [gptLiveTranscribe]
 
     /// The model of a stored choice. With no choice (or an id the list does not have) it is
-    /// `gptLiveTranscribe` when this Mac has an OpenAI key, else `default`. A choice of an online
-    /// model with no key is `default` too.
-    public static func chosen(_ id: String?, hasKey: Bool = false) -> SpeechModel {
-        if let model = all.first(where: { $0.id == id }), model.isLocal || hasKey { return model }
-        return hasKey ? gptLiveTranscribe : .default
+    /// `gptLiveTranscribe` when OpenAI can be reached (`isOnline`: the lent mind mints tokens, or
+    /// this Mac has a key of its own), else `default`. A choice of an online model that cannot be
+    /// reached is `default` too.
+    public static func chosen(_ id: String?, isOnline: Bool = false) -> SpeechModel {
+        if let model = all.first(where: { $0.id == id }), model.isLocal || isOnline { return model }
+        return isOnline ? gptLiveTranscribe : .default
     }
 
     /// The local model the app uses until the person chooses another, and the one that hears

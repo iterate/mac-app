@@ -148,8 +148,9 @@ wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the 
   the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
   a trial and a copy are updated by hand), and **Copy Prompt**.
 - **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on, the
-  orange row when macOS acts on 🌐 too, the speech model and its list, the OpenAI key (set or
-  removed; it is never shown), whether the pill shows the
+  orange row when macOS acts on 🌐 too, the speech model and its list, "OpenAI through <mind>:
+  the mind's key" when the lent mind makes tokens, your own OpenAI key (optional; set or removed;
+  it is never shown), whether the pill shows the
   words, where the text goes (where the cursor is, or on the clipboard only), and the default
   expression of the word list (below).
 
@@ -651,13 +652,14 @@ with a lock while it stays on and the time since the start.
 - **One listening at a time.** Dictation and the input bar share one microphone listening
   (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
   are written where they belonged.
-- **GPT Live Transcribe at OpenAI, when this Mac has an OpenAI key; else on this Mac.** Settings ›
+- **GPT Live Transcribe at OpenAI, when the lent mind has an OpenAI key (or this Mac has one);
+  else on this Mac.** Settings ›
   Dictation (the panel's Settings button opens it) chooses the model of dictation and the input
   bar. A capture always uses a local model (the chosen one, or Parakeet v3).
 
   | Model                       | Runs         | Download | License   | Note                                                     |
   | --------------------------- | ------------ | -------- | --------- | -------------------------------------------------------- |
-  | GPT Live Transcribe         | OpenAI       | none     | OpenAI    | The default with a key. $1/hour of talking; the sound leaves this Mac |
+  | GPT Live Transcribe         | OpenAI       | none     | OpenAI    | The default with a key (the mind's or yours). $1/hour of talking; the sound leaves this Mac |
   | Parakeet TDT 0.6B v3        | this Mac     | 480 MB   | CC BY 4.0 | The default with no key, and the model behind OpenAI     |
   | Parakeet Ultra              | this Mac     | 632 MB   | CC BY 4.0 | A post-training of v3, which FluidAudio 0.18.4 recommends |
 
@@ -671,7 +673,7 @@ with a lock while it stays on and the time since the start.
   kept from fn down, so a socket that opens late loses no word (its setup costs about 0.8 s). Each
   delta is the pill's text; at the end a commit asks for the final, which the word list repairs.
   Each socket serves one dictation. When OpenAI fails (no session within 5 s, an error
-  while you talk, no final within 5 s of the end, or no key), Parakeet v3 hears what was kept and
+  while you talk, no final within 5 s of the end, or no token and no key), Parakeet v3 hears what was kept and
   what comes after, and `app.log` says why ("gpt-live-transcribe failed after 0.31 s (…): the local
   model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the socket),
   `StreamRecognizer.swift` (the stream, with the local model behind it).
@@ -681,23 +683,38 @@ with a lock while it stays on and the time since the start.
   and configured with the same session in the background when a dictation ends. fn down takes it
   when it is open, has the word list's current keywords and answers a ping (0.5 s at most); else
   it closes it and opens a new socket, as before. There is at most one standby, and only while
-  GPT Live Transcribe is the model and a key is set; it closes when the model or the key changes,
-  when the Mac sleeps, and after 10 minutes unused (then the next one opens only after the next
+  GPT Live Transcribe is the model and a token or a key opens it; each socket it opens gets a fresh
+  token. It closes when the model, the lent mind or the key changes, when the Mac sleeps, and after 10 minutes unused (then the next one opens only after the next
   dictation, so an idle Mac holds no socket for long). One that the server or the network closes
   is dropped, with a line in the log and nothing else. An open socket with no sound costs nothing:
   OpenAI bills transcription by its audio. The speech log says, for each dictation,
-  `gpt-live-transcribe is ready 12 ms after the start (standby)` or `(new)`. The code:
-  `OpenAIStandby.swift`.
-- **The OpenAI key is in the login Keychain**: a generic password of the service
+  `gpt-live-transcribe is ready 12 ms after the start (standby, mind token)`, or `(new, own key)`:
+  where the socket came from, and what opened it. The code: `OpenAIStandby.swift`.
+- **The OpenAI key is the mind's.** A mind keeps its OpenAI key at `/secrets/openai` in its vault
+  and never hands it out. For each socket the app asks the bridge of the mind it is lent to (the
+  job `openai`, `bridge/openai.mjs`, on the connection that the word list uses) for a token: the
+  job sends `POST https://api.openai.com/v1/realtime/client_secrets` through `itx.fetch` with the
+  header `Authorization: Bearer getSecret("/secrets/openai")`, the vault puts the key in on the way,
+  and OpenAI answers a client secret (`ek_…`) that opens one socket within 60 s, as the mind's own
+  Meet captions do. The socket then gets the usual `session.update`, with the keywords. A mint
+  takes 0.3 to 0.6 s on an open connection (25 November 2026); the standby hides it. It has 5 s;
+  a token is used at once and never kept, logged or written. Whether the lent mind can mint is
+  found out with one mint at each new connection of its bridge and by each dictation's: a mind
+  with no `/secrets/openai` (or a key OpenAI refuses) says no, and then Parakeet v3 is the default,
+  unless this Mac has a key of its own. Settings › Dictation says "OpenAI through <mind>: the
+  mind's key" when the mind can mint. The code: `MindToken.swift`, `SpeechText/OpenAIAccess.swift`.
+- **Your own key is optional, and only behind the mind's.** It is used when this Mac is lent to no
+  mind, the mind said no, or a mint failed (the log says "no token from <mind> (…): your own
+  key"). It is in the login Keychain: a generic password of the service
   `com.iterate.mac-app.openai` and the account `api-key`. It is never in a file, a log, `ui.state`
-  (which says only `speech.openAIKey`: true or false) or a process's arguments. Settings ›
+  (which says only `speech.openAIKey`: true or false, and `speech.openAIMind`: the mind that mints, or null) or a process's arguments. Settings ›
   Dictation says whether it is set, takes a new one in a secure field, and removes it. Or from a
   terminal: `OPENAI_API_KEY=… npx @iterate-com/mac-app --openai-key-from-env` gives the key to
   `security` on its standard input, trusts /Applications/iterate.app to read it, and says only
   "OpenAI key stored". A copy with a home of its own uses the service with `.` and the first 12
   hex digits of the SHA-256 of its home's path, so a test never reads or writes the owner's item.
-  With no stored choice, a key that comes makes GPT Live Transcribe the model, and a key that goes
-  makes it Parakeet v3; a choice in Settings stays.
+  With no stored choice, a mind that mints or a key that comes makes GPT Live Transcribe the model,
+  and when neither is left it is Parakeet v3; a choice in Settings stays.
 - **The local models run on this Mac** as Core ML through
   [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. With
   them no sound and no text leaves the Mac. Each one shows its size and whether it is on this Mac.
@@ -753,10 +770,11 @@ whole dictation is one segment, with no times of its words.
 ## Online and local: what the bench measured, and what is not built
 
 The owner's own voice (`--set owner`, 25 November 2026) confirmed the synthetic set, and
-GPT Live Transcribe is now the default with a key ("Dictation" above), with the key on this Mac
-and Parakeet only when OpenAI fails. What follows is the measure and the proposal before it; the
-parts not built are local always (both models on every dictation), the wait of X for OpenAI's
-final, and the key in the mind.
+GPT Live Transcribe is now the default with a key ("Dictation" above), with the mind's key through
+a token of 60 s (or this Mac's own key) and Parakeet only when OpenAI fails. What follows is the
+measure and the proposal before it; the parts not built are local always (both models on every
+dictation) and the wait of X for OpenAI's final. The key in the mind is built, in another shape
+than proposed below: the token fixes no session, and the app sends its own `session.update`.
 
 What the speech bench measured on 24 November 2026 (`harness/speech-bench`, the synthetic set: 48
 clips of `say -o`, two voices; an M4 Max on a home connection).
@@ -835,6 +853,7 @@ job is on it:
 | `capture` | one capture into the mind, by its id                                         | `Capture`          | `capture.mjs`   |
 | `input`   | one input into the mind, by its id                                           | `MindInput`        | `input.mjs`     |
 | `words`   | the mind's `words.md` into the app's copy                                    | `Words`            | `words.mjs`     |
+| `openai`  | a 60 s token for OpenAI, minted with the mind's own key, by its id           | `MindToken`        | `openai.mjs`    |
 
 stdin and stdout are JSON lines, each tagged with its job (`{ job, … }`); a line with no job is the
 process's own (`{ connected }`, `{ failed }`). `events`, `live` and `record` run from `{ job, start:

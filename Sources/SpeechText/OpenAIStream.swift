@@ -54,7 +54,7 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .noKey: "no OpenAI key"
+            case .noKey: "no token of a mind and no OpenAI key of this Mac"
             case .timedOut(let what): "no \(what) in time"
             case .failed(let reason): reason
             case .cancelled: "cancelled"

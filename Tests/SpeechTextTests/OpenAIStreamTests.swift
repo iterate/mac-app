@@ -5,13 +5,13 @@ import VoiceMeetCore
 import XCTest
 
 /// A fake of OpenAI's realtime transcription on 127.0.0.1: a WebSocket server whose answer to each
-/// message the test writes (`answer`). It records every message it got.
+/// message the test writes (`answer`). It records every message it got, and the Authorization
+/// header of each socket.
 private final class FakeOpenAI: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "fake-openai")
     private let lock = NSLock()
     private var got: [[String: Any]] = []
-    private var authorization: String?
     private var connections: [NWConnection] = []
     /// The answer to one message: the events to send back.
     let answer: @Sendable ([String: Any]) -> [[String: Any]]
@@ -22,6 +22,12 @@ private final class FakeOpenAI: @unchecked Sendable {
         let parameters = NWParameters.tcp
         let options = NWProtocolWebSocket.Options()
         options.autoReplyPing = true
+        let headers = Lines()
+        options.setClientRequestHandler(queue) { _, additional in
+            headers.add(additional.first { $0.name.lowercased() == "authorization" }?.value ?? "none")
+            return NWProtocolWebSocket.Response(status: .accept, subprotocol: nil)
+        }
+        self.headers = headers
         parameters.defaultProtocolStack.applicationProtocols.insert(options, at: 0)
         listener = try NWListener(using: parameters, on: .any)
         let ready = DispatchSemaphore(value: 0)
@@ -33,6 +39,9 @@ private final class FakeOpenAI: @unchecked Sendable {
 
     deinit { listener.cancel() }
 
+    private let headers: Lines
+    /// The Authorization header of each socket, in the order they opened.
+    var authorizations: [String] { headers.all }
     var messages: [[String: Any]] { lock.withLock { got } }
     /// The sockets opened so far.
     var connectionCount: Int { lock.withLock { connections.count } }
@@ -113,12 +122,14 @@ private func loud(_ seconds: Double) -> [Float] { (0..<Int(seconds * 16_000)).ma
 
 private let words = WordList(markdown: "- Beelink: bee link\n- iterate\n")
 
-/// The recognizer of the app, against the fake, with a fake local model behind it.
+/// The recognizer of the app, against the fake, with a fake local model behind it: with this
+/// Mac's `key`, or with `access` (a mind's tokens).
 private func recognizer(
-    _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", connect: Double = 2, final: Double = 2, standby: OpenAIStandby? = nil
+    _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", access: OpenAIAccess? = nil, connect: Double = 2, final: Double = 2,
+    standby: OpenAIStandby? = nil
 ) -> SpeechListening {
     OnlineSpeech.recognizer(
-        .gptLiveTranscribe, words: words, key: { key }, setup: setup(server, connect: connect, final: final),
+        .gptLiveTranscribe, words: words, access: access ?? .ownKey({ key }), setup: setup(server, connect: connect, final: final),
         fallback: { heard in SpeechRecognizer(model: .default, words: words, engine: { LocalEngine() }, heard: heard) }, standby: standby
     ) { heard.add($0) }!
 }
@@ -307,15 +318,15 @@ final class OpenAIStandbyTests: XCTestCase {
         let lines = Lines()
         let standby = OpenAIStandby(log: { lines.add($0) })
         let first = await dictate(server, standby)
-        XCTAssertTrue(first.notes.contains { $0.contains("ready") && $0.contains("ms after the start (new)") }, "\(first.notes)")
+        XCTAssertTrue(first.notes.contains { $0.contains("ready") && $0.contains("ms after the start (new, own key)") }, "\(first.notes)")
         // the end of the first opened the standby, configured with the same session
         try await until("the standby") { standby.isHeld }
         XCTAssertEqual(server.connectionCount, 2)
         XCTAssertEqual(server.types().filter { $0 == "session.update" }.count, 2)
-        XCTAssertTrue(lines.all.contains { $0.hasPrefix("a standby socket is ready after") && $0.hasSuffix("with 2 keywords") }, "\(lines.all)")
+        XCTAssertTrue(lines.all.contains { $0.hasPrefix("a standby socket is ready after") && $0.hasSuffix("with 2 keywords (own key)") }, "\(lines.all)")
 
         let second = await dictate(server, standby)
-        XCTAssertTrue(second.notes.contains { $0.contains("ms after the start (standby)") }, "\(second.notes)")
+        XCTAssertTrue(second.notes.contains { $0.contains("ms after the start (standby, own key)") }, "\(second.notes)")
         XCTAssertEqual(second.text, ["on the standby"])
         XCTAssertFalse(second.notes.contains { $0.contains("failed") }, "\(second.notes)")
         // the second opened no socket: the one after it is the next standby, and the only one
@@ -333,7 +344,7 @@ final class OpenAIStandbyTests: XCTestCase {
         try await until("the standby") { standby.isHeld }
 
         let dictation = await dictate(server, standby)
-        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, own key)") }, "\(dictation.notes)")
         XCTAssertEqual(dictation.text, ["new"])
         XCTAssertTrue(lines.all.contains("the standby socket has other keywords: closed, and a new one"), "\(lines.all)")
     }
@@ -355,7 +366,7 @@ final class OpenAIStandbyTests: XCTestCase {
         try await until("the new standby") { standby.isHeld }
 
         let dictation = await dictate(server, standby)
-        XCTAssertTrue(dictation.notes.contains { $0.contains("(standby)") }, "\(dictation.notes)")
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(standby, own key)") }, "\(dictation.notes)")
         XCTAssertEqual(dictation.text, ["again"])
 
         // 10 minutes after the last dictation's ask, one that goes stays gone
@@ -389,7 +400,7 @@ final class OpenAIStandbyTests: XCTestCase {
         try await until("the standby") { standby.isHeld }
         time.advance(601)
         let dictation = await dictate(server, standby)
-        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, own key)") }, "\(dictation.notes)")
         XCTAssertTrue(lines.all.contains("the standby socket waited 10 min unused: closed, and a new one"), "\(lines.all)")
         // then the end of that dictation opens the next
         try await until("the next standby") { standby.isHeld }
@@ -410,6 +421,124 @@ final class OpenAIStandbyTests: XCTestCase {
     }
 }
 
+/// The mind's tokens (`OpenAIAccess`, `bridge/openai.mjs`): each socket opens with a fresh one,
+/// and this Mac's key is behind them.
+final class OpenAIAccessTests: XCTestCase {
+    /// A mind that mints `ek_1`, `ek_2`, … (or fails), and counts its mints.
+    private final class Mind: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        var mint: MindMint
+        let name: String
+        let fails: Bool
+        init(_ name: String = "example.com", mint: MindMint = .unknown, fails: Bool = false) {
+            self.name = name
+            self.mint = mint
+            self.fails = fails
+        }
+        var mints: Int { lock.withLock { count } }
+        func token() throws -> String {
+            let n = lock.withLock { count += 1; return count }
+            if fails { throw NSError(domain: "mind", code: 1, userInfo: [NSLocalizedDescriptionKey: "no token from the mind in 5 s"]) }
+            return "ek_\(n)"
+        }
+    }
+
+    private func access(_ mind: Mind?, key: String? = nil, log: Lines = Lines()) -> OpenAIAccess {
+        .mindFirst(
+            mind: { mind.map { ($0.name, $0.mint) } }, mint: { try mind!.token() }, key: { key }, log: { log.add($0) })
+    }
+
+    private func dictate(_ server: FakeOpenAI, _ access: OpenAIAccess, standby: OpenAIStandby? = nil) async -> (notes: [String], text: [String]) {
+        let heard = Events()
+        let listening = recognizer(server, heard: heard, access: access, standby: standby)
+        listening.start()
+        await talk(listening, seconds: 0.5)
+        let segments = await listening.finish()
+        return (heard.notes, segments.map(\.text))
+    }
+
+    func testTheOrderIsTheLentMindUnlessItSaidNoThenTheOwnKey() {
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .unknown, hasKey: true), .mindToken("a.com"))
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .yes, hasKey: false), .mindToken("a.com"))
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .no, hasKey: true), .ownKey)
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .no, hasKey: false), nil)
+        XCTAssertEqual(OpenAIAccess.order(mind: nil, mint: .unknown, hasKey: true), .ownKey)
+        XCTAssertEqual(OpenAIAccess.order(mind: nil, mint: .unknown, hasKey: false), nil)
+        XCTAssertEqual(OpenAISource.mindToken("a.com").words, "mind token")
+        XCTAssertEqual(OpenAISource.ownKey.words, "own key")
+    }
+
+    func testTheSocketOpensWithTheMindsTokenNotTheKey() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with the mind's key"))
+        let mind = Mind()
+        let dictation = await dictate(server, access(mind, key: "sk-own"))
+        XCTAssertEqual(server.authorizations, ["Bearer ek_1"])
+        XCTAssertEqual(dictation.text, ["with the mind's key"])
+        XCTAssertTrue(dictation.notes.contains { $0.contains("ms after the start (new, mind token)") }, "\(dictation.notes)")
+        XCTAssertFalse(dictation.notes.contains { $0.contains("ek_") || $0.contains("sk-") }, "no token or key in the log")
+    }
+
+    func testTheStandbyAsksForAFreshTokenForEachSocket() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "on the standby"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        let mind = Mind(mint: .yes)
+        let access = access(mind)
+        _ = await dictate(server, access, standby: standby)
+        try await until("the standby") { standby.isHeld }
+        XCTAssertTrue(lines.all.contains { $0.hasSuffix("with 2 keywords (mind token)") }, "\(lines.all)")
+        let second = await dictate(server, access, standby: standby)
+        XCTAssertTrue(second.notes.contains { $0.contains("(standby, mind token)") }, "\(second.notes)")
+        XCTAssertEqual(second.text, ["on the standby"])
+        try await until("the next standby") { standby.isHeld }
+        // three sockets, three tokens: none is used twice
+        XCTAssertEqual(server.authorizations, ["Bearer ek_1", "Bearer ek_2", "Bearer ek_3"])
+        XCTAssertFalse(lines.all.contains { $0.contains("ek_") }, "no token in the log")
+    }
+
+    func testAStandbyOfAnotherMindIsClosedAndANewSocketOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        standby.prepare(setup(server), access: access(Mind("old.com")))
+        try await until("the standby") { standby.isHeld }
+        let dictation = await dictate(server, access(Mind("new.com")), standby: standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, mind token)") }, "\(dictation.notes)")
+        XCTAssertTrue(lines.all.contains("the standby socket is of another credential (mind token): closed, and a new one"), "\(lines.all)")
+    }
+
+    func testAMintThatFailsFallsBackToTheOwnKey() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with my key"))
+        let log = Lines()
+        let mind = Mind(fails: true)
+        let dictation = await dictate(server, access(mind, key: "sk-own", log: log))
+        XCTAssertEqual(server.authorizations, ["Bearer sk-own"])
+        XCTAssertEqual(dictation.text, ["with my key"])
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, own key)") }, "\(dictation.notes)")
+        XCTAssertEqual(log.all, ["no token from example.com (no token from the mind in 5 s): your own key"])
+    }
+
+    func testAMindThatSaidNoIsNotAskedAndTheOwnKeyOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with my key"))
+        let mind = Mind(mint: .no)
+        _ = await dictate(server, access(mind, key: "sk-own"))
+        XCTAssertEqual(mind.mints, 0)
+        XCTAssertEqual(server.authorizations, ["Bearer sk-own"])
+    }
+
+    func testNoTokenAndNoKeyIsTheLocalModel() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let failing = await dictate(server, access(Mind(fails: true)))
+        XCTAssertEqual(failing.text, ["heard on this Mac"])
+        XCTAssertTrue(failing.notes.contains { $0.contains("no token from the mind in 5 s") && $0.contains("the local model hears it") }, "\(failing.notes)")
+        let none = await dictate(server, access(nil))
+        XCTAssertEqual(none.text, ["heard on this Mac"])
+        XCTAssertTrue(none.notes.contains { $0.contains("no OpenAI key") }, "\(none.notes)")
+        XCTAssertEqual(server.connectionCount, 0)
+    }
+}
+
 final class OpenAIKeyTests: XCTestCase {
     /// A copy with a home of its own never reads or writes the owner's item; cli.mjs's
     /// `openAIService` makes the same name (the hash below is Node's, from `node:crypto`).
@@ -423,12 +552,12 @@ final class OpenAIKeyTests: XCTestCase {
 
 final class SpeechModelChoiceTests: XCTestCase {
     func testGPTLiveTranscribeIsTheDefaultOnlyWithAKey() {
-        XCTAssertEqual(SpeechModel.chosen(nil, hasKey: false), .parakeetV3)
-        XCTAssertEqual(SpeechModel.chosen(nil, hasKey: true), .gptLiveTranscribe)
+        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: false), .parakeetV3)
+        XCTAssertEqual(SpeechModel.chosen(nil, isOnline: true), .gptLiveTranscribe)
         // a stored choice wins; an online one with no key is the local default
-        XCTAssertEqual(SpeechModel.chosen("parakeet-ultra", hasKey: true), .parakeetUltra)
-        XCTAssertEqual(SpeechModel.chosen("gpt-live-transcribe", hasKey: false), .parakeetV3)
-        XCTAssertEqual(SpeechModel.chosen("gone", hasKey: true), .gptLiveTranscribe)
+        XCTAssertEqual(SpeechModel.chosen("parakeet-ultra", isOnline: true), .parakeetUltra)
+        XCTAssertEqual(SpeechModel.chosen("gpt-live-transcribe", isOnline: false), .parakeetV3)
+        XCTAssertEqual(SpeechModel.chosen("gone", isOnline: true), .gptLiveTranscribe)
         XCTAssertEqual(SpeechModel.local.map(\.id), ["parakeet-v3", "parakeet-ultra"], "the bench and captures run only local models")
     }
 }
