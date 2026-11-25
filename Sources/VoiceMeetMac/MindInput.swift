@@ -48,6 +48,19 @@ final class MindInputModel: ObservableObject {
         }
     }
 
+    /// What of a draft sets the bar's height besides its text: the row of files and the status line.
+    struct Height: Equatable {
+        let files: Bool
+        let failure: String?
+        let refusal: Bool
+
+        init(_ draft: InputDraft) {
+            files = !draft.attachments.isEmpty
+            if case .failed(let reason) = draft.phase { failure = reason } else { failure = nil }
+            refusal = draft.refusal != nil
+        }
+    }
+
     /// The person changed the text by hand.
     func edited(_ text: String) {
         draft.text = text
@@ -62,14 +75,16 @@ final class MindInputModel: ObservableObject {
     }
 
     /// An input's id: its time and four random digits, as a capture's.
-    static func newId() -> String {
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "")
-        return "\(stamp)-\(String(format: "%04x", UInt16.random(in: 0...UInt16.max)))"
-    }
+    static func newId() -> String { InputDraft.newId() }
+
+    /// The person chose another mind (its menu, Tab): the bar's listening hears with its words.
+    var mindChanged: () -> Void = {}
 
     func choose(_ mind: String) {
+        guard mind != self.mind else { return }
         self.mind = mind
         AppEnvironment.current.defaults.set(mind, forKey: Self.mindKey)
+        mindChanged()
     }
 
     /// Tab: the next mind of the list (`by` 1), or the one before (-1).
@@ -92,22 +107,28 @@ final class MindInputModel: ObservableObject {
 
     /// A picture with no file (a screenshot on the clipboard, a picture dragged out of a page): it
     /// becomes a PNG file in the app's folder, and that file is attached.
+    /// The decoding and the writing are off the main actor: a picture of a display is many megabytes.
     func attachPicture(_ data: Data) {
-        guard let picture = NSBitmapImageRep(data: data), let png = picture.representation(using: .png, properties: [:]) else {
-            return draft.refuse("That picture could not be read.")
-        }
         pictures += 1
         let clock = DateFormatter()
         clock.dateFormat = "HH.mm.ss"
-        let time = clock.string(from: Date())
-        let file = MindInput.pasted.appendingPathComponent("Pasted picture \(time) \(pictures).png")
-        do {
-            try FileManager.default.createDirectory(at: MindInput.pasted, withIntermediateDirectories: true)
-            try png.write(to: file)
-        } catch {
-            return draft.refuse("The picture was not kept: \(AppLog.describe(error))")
+        let folder = MindInput.pasted
+        let file = folder.appendingPathComponent("Pasted picture \(clock.string(from: Date())) \(pictures).png")
+        Task {
+            let refusal = await Task.detached(priority: .userInitiated) { () -> String? in
+                guard let picture = NSBitmapImageRep(data: data), let png = picture.representation(using: .png, properties: [:]) else {
+                    return "That picture could not be read."
+                }
+                do {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try png.write(to: file)
+                    return nil
+                } catch {
+                    return "The picture was not kept: \(AppLog.describe(error))"
+                }
+            }.value
+            if let refusal { draft.refuse(refusal) } else { attach(file) }
         }
-        attach(file)
     }
 
     /// ⌘V. True when the clipboard held files or a picture, which are attached now; false when it
@@ -160,7 +181,7 @@ final class VoiceLevel: ObservableObject {
 /// the files into that mind's files and appends one event, `device/input-submitted`, to `/devices/<name>`, as the person (the iterate
 /// CLI's own sign-in). The app knows no agent and no backend: what a mind does with an input is the
 /// mind's config. An input that did not go comes back: the bar opens again with the text, the
-/// files and the reason, and Return sends the same input again.
+/// files and the reason, and Return sends the same input again; a changed one is another input (`InputDraft`).
 @MainActor
 final class MindInput: SpeechClient {
     /// The helpers, the minds this Mac knows, and the one it is lent to.
@@ -202,6 +223,7 @@ final class MindInput: SpeechClient {
         model.send = { [weak self] in self?.submit() }
         model.close = { [weak self] in self?.close() }
         model.toggleMicrophone = { [weak self] in self?.toggleMicrophone() }
+        model.mindChanged = { [weak self] in self?.hearWithTheMindsWords() }
     }
 
     /// ⌥⇧Space: open the bar, give it the keyboard when it is open without it, or close it.
@@ -243,6 +265,10 @@ final class MindInput: SpeechClient {
             model.spoken = nil
             model.voice = .failed("iterate may not use the microphone")
             if asking { allow(.microphone) }
+        case .failed(let reason):
+            model.spoken = nil
+            model.voice = .failed(reason)
+            log.error("listening: \(reason)")
         }
     }
 
@@ -270,6 +296,14 @@ final class MindInput: SpeechClient {
             afterLastWords = []
             waiting.forEach { $0() }
         }
+    }
+
+    /// Another mind was chosen while the bar listens: a listening keeps the word list of its start,
+    /// so it ends, its last words are written, and a new one starts with that mind's list.
+    private func hearWithTheMindsWords() {
+        guard isListening else { return }
+        log.info("listening: again, with the words of the mind chosen now")
+        stopListening(keepingLastWords: true) { [weak self] in self?.listen(asking: false) }
     }
 
     /// Closes the microphone. With `keepingLastWords` the words that were said last are still
@@ -343,10 +377,12 @@ final class MindInput: SpeechClient {
         panel.contentView = host
         self.panel = panel
         self.host = host
-        // The bar grows down with its text and its files: its top stays where it is.
-        changes = model.objectWillChange.sink { [weak self] _ in
-            DispatchQueue.main.async { MainActor.assumeIsolated { self?.fit() } }
-        }
+        // The bar grows down with its text and its files: its top stays where it is. It is laid
+        // out again only when what sets its height changed, not at each word.
+        changes = model.$draft.map(MindInputModel.Height.init).combineLatest(model.$textHeight).removeDuplicates { $0 == $1 }
+            .sink { [weak self] _ in
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.fit() } }
+            }
         return panel
     }
 
@@ -722,9 +758,20 @@ private struct AttachmentChip: View {
         attachment.name.count <= 30 ? attachment.name : "\(attachment.name.prefix(16))…\(attachment.name.suffix(11))"
     }
 
+    /// Each file's icon, asked of macOS once, not at each drawing of the bar. A few dozen at most.
+    private static var icons: [String: NSImage] = [:]
+
+    private var icon: NSImage {
+        if let icon = Self.icons[attachment.local] { return icon }
+        if Self.icons.count >= 64 { Self.icons.removeAll() }
+        let icon = NSWorkspace.shared.icon(forFile: attachment.local)
+        Self.icons[attachment.local] = icon
+        return icon
+    }
+
     var body: some View {
         HStack(spacing: 6) {
-            Image(nsImage: NSWorkspace.shared.icon(forFile: attachment.local))
+            Image(nsImage: icon)
                 .resizable()
                 .frame(width: 18, height: 18)
             Text(name)

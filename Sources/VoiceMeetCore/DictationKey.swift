@@ -159,3 +159,59 @@ public struct DictationKey: Equatable, Sendable {
         ignoresRelease = isDown
     }
 }
+
+/// WHAT THE FN TAP DOES WITH A KEY (`FnTap`), on the tap's own thread: pure, so that a test runs it.
+///
+/// The tap knows whether fn is down from the events themselves, not from the main actor: a key
+/// that goes down a moment after fn, before the main actor heard fn, is still fn's combination
+/// (fn-arrow), and goes to the dictation in order after fn. The main actor sets what a dictation
+/// wants (`escape`, `swallowsEscape`); the rest follows from fn.
+///
+/// `wantsKeyDowns` says when key presses matter at all: while fn is down or a dictation goes. The
+/// tap for key presses is on only then, so that the Mac's typing passes no tap of this app the rest
+/// of the time.
+public struct KeyTapRule: Equatable, Sendable {
+    public enum Heard: Equatable, Sendable {
+        case fn(down: Bool)
+        case escape
+        case otherKey
+    }
+
+    /// fn (63, `kVK_Function`), and the 🌐 key of some keyboards (179).
+    public static let fnCodes: Set<Int64> = [63, 179]
+    public static let escapeCode: Int64 = 53
+
+    /// fn is down, as the tap's own events say.
+    public private(set) var fnDown = false
+    /// A dictation goes: Esc matters.
+    public var escape = false
+    /// A dictation is locked: Esc goes to it and to no app.
+    public var swallowsEscape = false
+
+    public init() {}
+
+    public var wantsKeyDowns: Bool { fnDown || escape }
+
+    /// A modifier changed: fn itself, or another one, which is fn's combination while fn is down.
+    public mutating func flagsChanged(code: Int64, fn: Bool) -> Heard? {
+        if Self.fnCodes.contains(code) {
+            fnDown = fn
+            return .fn(down: fn)
+        }
+        return fnDown ? .otherKey : nil
+    }
+
+    /// A key went down. `swallow`: the key goes to no app.
+    public mutating func keyDown(code: Int64) -> (heard: Heard?, swallow: Bool) {
+        if code == Self.escapeCode, escape { return (.escape, swallowsEscape) }
+        return (fnDown ? .otherKey : nil, false)
+    }
+
+    /// macOS switched the tap off a while (it was slow, or a secure input took the keys) and on
+    /// again: fn may have changed meanwhile. `fn` is the keyboard's state now.
+    public mutating func resumed(fn: Bool) -> Heard? {
+        guard fn != fnDown else { return nil }
+        fnDown = fn
+        return .fn(down: fn)
+    }
+}

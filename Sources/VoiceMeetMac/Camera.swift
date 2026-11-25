@@ -111,10 +111,26 @@ final class Camera {
         log.info("camera stopped; the camera is released")
     }
 
-    /// The newest picture of the camera as JPEG bytes; nil before the first frame.
+    /// The newest picture of the camera as JPEG bytes; nil before the first frame. It is made on
+    /// the caller's thread: `picture(maxWidth:)` makes it off the main actor.
     func snapshot(maxWidth: Int) -> (data: Data, width: Int, height: Int)? {
         guard session != nil, let buffer = frames.newest() else { return nil }
         return Snapshot.jpeg(of: CIImage(cvPixelBuffer: buffer), maxWidth: maxWidth)
+    }
+
+    /// The camera has given a frame: a picture can be taken. Nothing is encoded to know it.
+    var hasPicture: Bool { session != nil && frames.newest() != nil }
+
+    /// As `snapshot`, with the JPEG made off the main actor: a camera's frame is megabytes.
+    func picture(maxWidth: Int) async -> (data: Data, width: Int, height: Int)? {
+        guard session != nil, let buffer = frames.newest() else { return nil }
+        let frame = Handed(buffer: buffer)
+        return await Task.detached(priority: .userInitiated) { Snapshot.jpeg(of: CIImage(cvPixelBuffer: frame.buffer), maxWidth: maxWidth) }.value
+    }
+
+    /// A frame handed to the task that encodes it; the camera's queue writes the next one into another buffer.
+    private struct Handed: @unchecked Sendable {
+        let buffer: CVPixelBuffer
     }
 
     private func fail(_ words: String) {

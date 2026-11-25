@@ -5,8 +5,9 @@ import Foundation
 ///
 /// An input is sent whole, by the job `input` of `bridge/mind.mjs`: the files into the mind's
 /// files, then one event. While it goes the draft is `sending`; `done` gives a new, empty draft; a failure keeps
-/// the text and the files with the reason, and the next send has the same id, so an input whose
-/// answer was lost is in the mind once.
+/// the text and the files with the reason. The next send of the same text and files is the same
+/// `input.json`, byte for byte (its id and its time), so an input whose answer was lost is in the
+/// mind once. A send after a change is another input: it has a new id.
 public struct InputDraft: Equatable, Sendable {
     public struct Attachment: Equatable, Sendable, Identifiable {
         public let id: Int
@@ -44,6 +45,19 @@ public struct InputDraft: Equatable, Sendable {
     /// Why the last file was not attached. The next change of the files clears it.
     public private(set) var refusal: String?
     private var nextAttachment = 1
+    /// The last `input.json` that went, and what it was made of: a send of the same goes again as it was.
+    private var sent: (made: Made, input: Data)?
+
+    /// What an input is made of: the text as it goes and each file.
+    private struct Made: Equatable {
+        let text: String
+        let files: [[String]]
+    }
+
+    public static func == (a: InputDraft, b: InputDraft) -> Bool {
+        a.id == b.id && a.text == b.text && a.attachments == b.attachments && a.phase == b.phase && a.refusal == b.refusal
+            && a.nextAttachment == b.nextAttachment && a.sent?.made == b.sent?.made && a.sent?.input == b.sent?.input
+    }
 
     public init(id: String) {
         self.id = id
@@ -98,16 +112,36 @@ public struct InputDraft: Equatable, Sendable {
         attachments.removeAll { $0.id == attachment }
     }
 
+    /// An input's id: its time and four random hex digits, as a capture's.
+    public static func newId(at time: Date = Date()) -> String {
+        let stamp = ISO8601DateFormatter().string(from: time).replacingOccurrences(of: "-", with: "").replacingOccurrences(of: ":", with: "")
+        return "\(stamp)-\(String(format: "%04x", UInt16.random(in: 0...UInt16.max)))"
+    }
+
     /// Return was pressed. The answer is `input.json` for the sender, or nil with the reason in `phase`.
-    public mutating func submit(at: Date) -> Data? {
+    /// The same text and files as the last send that failed: that `input.json` again. Else, after
+    /// such a send, the input has a new id from `newId`.
+    public mutating func submit(at: Date, newId: () -> String = { InputDraft.newId() }) -> Data? {
         guard !isSending else { return nil }
         if let reason = cannotSend {
             phase = .failed(reason)
             return nil
         }
+        let made = Made(
+            text: text.trimmingCharacters(in: .whitespacesAndNewlines),
+            files: attachments.map { [$0.local, $0.name, $0.contentType, String($0.bytes)] })
+        if let sent {
+            if sent.made == made {
+                refusal = nil
+                phase = .sending(progress: 0)
+                return sent.input
+            }
+            // the mind may have the earlier one: this is another input
+            id = newId()
+        }
         let input: [String: Any] = [
             "id": id,
-            "text": text.trimmingCharacters(in: .whitespacesAndNewlines),
+            "text": made.text,
             "at": ISO8601DateFormatter().string(from: at),
             "files": attachments.map { ["local": $0.local, "name": $0.name, "contentType": $0.contentType] },
         ]
@@ -115,6 +149,7 @@ public struct InputDraft: Equatable, Sendable {
             phase = .failed("The input could not be written.")
             return nil
         }
+        sent = (made, data)
         refusal = nil
         phase = .sending(progress: 0)
         return data

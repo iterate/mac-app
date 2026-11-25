@@ -1,6 +1,7 @@
 import AVFoundation
 import AppKit
 import ApplicationServices
+import Record
 import ScreenCaptureKit
 import SpeechText
 import SwiftUI
@@ -47,10 +48,15 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         /// The capture's start on the host clock, which the stream's buffers are stamped with.
         var zero = CMTime.zero
         private let audio = SpeechAudio()
+        /// The format of the last buffer: the stream's buffers all have one, made once.
+        private var format: (description: CMFormatDescription, format: AVAudioFormat)?
 
         func take(_ sampleBuffer: CMSampleBuffer) {
             guard let recognizer, let description = sampleBuffer.formatDescription else { return }
-            let format = AVAudioFormat(cmAudioFormatDescription: description)
+            if format.map({ !CFEqual($0.description, description) }) ?? true {
+                format = (description, AVAudioFormat(cmAudioFormatDescription: description))
+            }
+            guard let format = format?.format else { return }
             let seconds = (sampleBuffer.presentationTimeStamp - zero).seconds
             try? sampleBuffer.withAudioBufferList { list, _ in
                 guard let sound = AVAudioPCMBuffer(pcmFormat: format, bufferListNoCopy: list.unsafePointer) else { return }
@@ -66,7 +72,10 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// A capture ends by itself after this long.
     nonisolated static let maximumSeconds = 600.0
 
-    private(set) var isRunning = false
+    /// Where the capture is: one at a time.
+    private var phase = CapturePhase.idle
+    /// It records now: from its first frame to the press that ends it.
+    var isRunning: Bool { phase == .running }
     /// The last capture's outcome, for the panel.
     private(set) var lastLine: String?
     /// The last capture failed: the panel draws its line in orange.
@@ -87,6 +96,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var zero = Date()
     private var screen: NSScreen?
     private var stream: SCStream?
+    /// The movie of the stream that runs: its end, or the fallback's, is this capture's alone.
+    private var recording: ObjectIdentifier?
+    private var movieFallback: Task<Void, Never>?
     private var observations: [[String: Any]] = []
     private var displayID: CGDirectDisplayID = 0
     private var pictures = 0
@@ -133,29 +145,44 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var pillPanel: NSPanel?
     private var ink: InkView?
     private var timer: Timer?
-    private var ticks = 0
     private var clickMonitor: Any?
+    private var flagsMonitor: Any?
+    /// A launch of an app whose windows are never shown: the movie's filter leaves it out too.
+    private var launches: NSObjectProtocol?
     private var finished: CheckedContinuation<Void, Never>?
-    private var isEnding = false
+    /// A read of the window in front is under way on the Accessibility queue: the next waits.
+    private var isReadingWindow = false
 
     /// For `ui.state` on the control socket.
     func controlState() -> [String: Any] {
-        ["running": isRunning, "pillVisible": pillPanel?.isVisible ?? false, "pill": pill.text, "lastLine": lastLine ?? NSNull()]
+        [
+            "running": isRunning, "phase": "\(phase)", "pillVisible": pillPanel?.isVisible ?? false, "pill": pill.text, "lastLine": lastLine ?? NSNull(),
+            // the pill is in no picture and no movie of the screen
+            "pillShared": pillPanel.map { $0.sharingType != .none } ?? false,
+        ]
     }
 
     /// ⌥⇧S: start, or end and send.
     func toggle() {
-        Task { @MainActor in
-            if isRunning { await end(send: true) } else { await start() }
+        switch phase.toggle {
+        case .start: Task { @MainActor in await start() }
+        case .end: Task { @MainActor in await end(send: true) }
+        case .nothing: log.info("capture: \(phase), the key waits")
         }
     }
 
     // MARK: - Start
 
     private func start() async {
-        guard !isEnding else { return }
+        guard phase == .idle else { return }
         guard Permission.screenRecording.isGranted else { return allow(.screenRecording) }
-        if AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined { _ = await AVCaptureDevice.requestAccess(for: .audio) }
+        // from here a press does nothing until the capture runs, or did not start
+        phase = .starting
+        defer { if phase == .starting { phase = .idle } }
+        let status = AVCaptureDevice.authorizationStatus(for: .audio)
+        var microphone = CapturePhase.microphone(hasOwnHome: AppEnvironment.current.hasOwnHome, isAuthorized: status == .authorized, isUndetermined: status == .notDetermined)
+        if microphone == .ask { microphone = await AVCaptureDevice.requestAccess(for: .audio) ? .on : .off }
+        let hears = microphone == .on
         // the display under the pointer
         let pointer = NSEvent.mouseLocation
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(pointer) }) ?? NSScreen.main,
@@ -171,11 +198,16 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
                 try? FileManager.default.removeItem(at: old)
             }
         }
+        // the ink's window first: the movie shows it, and of this app's windows it alone
+        showOverlay(on: screen)
         do {
             try FileManager.default.createDirectory(at: folder.appendingPathComponent("pictures"), withIntermediateDirectories: true)
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
-            guard let display = content.displays.first(where: { $0.displayID == displayID }) else { return fail("That display is not connected.") }
-            let filter = SCContentFilter(display: display, excludingWindows: [])
+            guard let display = content.displays.first(where: { $0.displayID == displayID }) else {
+                hideOverlay()
+                return fail("That display is not connected.")
+            }
+            let filter = Screen.filter(of: display, in: content, onlyOwn: ownWindows)
             let configuration = SCStreamConfiguration()
             // a small movie: the pictures are the sharp part
             let scale = min(CGFloat(filter.pointPixelScale), 1600 / filter.contentRect.width)
@@ -183,23 +215,26 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             configuration.height = Int(filter.contentRect.height * scale)
             configuration.minimumFrameInterval = CMTime(value: 1, timescale: 10)
             configuration.showsCursor = true
-            configuration.captureMicrophone = Permission.microphone.isGranted
+            configuration.captureMicrophone = hears
             let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
             let recording = SCRecordingOutputConfiguration()
             recording.outputURL = folder.appendingPathComponent("screen.mp4")
             recording.outputFileType = .mp4
             recording.videoCodecType = .hevc
-            try stream.addRecordingOutput(SCRecordingOutput(configuration: recording, delegate: self))
+            let output = SCRecordingOutput(configuration: recording, delegate: self)
+            try stream.addRecordingOutput(output)
             if configuration.captureMicrophone { try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: voice.queue) }
             try await stream.startCapture()
             self.stream = stream
+            self.recording = ObjectIdentifier(output)
         } catch {
+            hideOverlay()
             return fail("The recording did not start: \(AppLog.describe(error))")
         }
         self.screen = screen
         self.displayID = displayID
         zero = Date()
-        startVoice(isOn: Permission.microphone.isGranted)
+        startVoice(isOn: hears)
         observations = []
         pictures = 0
         lastPictureAt = .distantPast
@@ -210,9 +245,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         pictureTasks = []
         trees = 0
         windowKey = ""
-        ticks = 0
-        isRunning = true
-        showOverlay(on: screen)
+        isReadingWindow = false
+        phase = .running
         isInkArmed = false
         say("⇧ and move draws · ⌥⇧S sends", startedAt: zero)
         observeWindow()
@@ -222,14 +256,43 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         }
         // Ink needs no button: while ⇧ alone is down, the pointer's way is a stroke.
         moveMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
-            let isInk = event.modifierFlags.intersection([.shift, .option, .command, .control]) == .shift
-            MainActor.assumeIsolated { self?.moved(isInk: isInk) }
+            let flags = event.modifierFlags.intersection([.shift, .option, .command, .control])
+            MainActor.assumeIsolated { self?.moved(isInk: flags == .shift, isShiftUp: !flags.contains(.shift)) }
         }
-        let timer = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
+        // a stroke ends when ⇧ is let go (macOS tells a global monitor so with Accessibility; the
+        // tick looks once a second too)
+        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            let isShiftUp = !event.modifierFlags.contains(.shift)
+            MainActor.assumeIsolated { if isShiftUp { self?.shiftUp() } }
+        }
+        launches = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main) { [weak self] note in
+            let bundle = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+            MainActor.assumeIsolated { if ExcludeList().excludes(bundle) { self?.refilter() } }
+        }
+        timer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
+        timer.tolerance = 0.2
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        log.info("capture \(id) starts on \"\(screen.localizedName)\", \(configuration(of: screen)), voice \(Permission.microphone.isGranted ? "on" : "off: no Microphone permission")")
+        log.info("capture \(id) starts on \"\(screen.localizedName)\", \(configuration(of: screen)), voice \(hears ? "on" : AppEnvironment.current.hasOwnHome ? "off: a home of its own" : "off: no Microphone permission")")
         onChange()
+    }
+
+    /// This app's windows that the movie and the pictures show: the ink's alone.
+    private var ownWindows: Set<CGWindowID> {
+        Set([overlay].compactMap { $0.map { CGWindowID($0.windowNumber) } })
+    }
+
+    /// An app whose windows are never shown was opened: the movie leaves it out from now.
+    private func refilter() {
+        guard isRunning, let stream else { return }
+        let displayID = displayID, own = ownWindows
+        Task { @MainActor in
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
+                let display = content.displays.first(where: { $0.displayID == displayID })
+            else { return }
+            try? await stream.updateContentFilter(Screen.filter(of: display, in: content, onlyOwn: own))
+        }
     }
 
     private func configuration(of screen: NSScreen) -> String {
@@ -247,53 +310,55 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         observations.append(observation)
     }
 
-    /// 30 times a second: a stroke ends when ⇧ is let go. Once a second: the window in front.
+    /// Once a second: ⇧ let go with no event seen, the window in front, the longest capture's end.
     private func tick() {
-        if !NSEvent.modifierFlags.contains(.shift) {
-            isInkArmed = true
-            endStroke()
-        }
-        ticks += 1
-        if ticks % 30 == 0 {
-            observeWindow()
-            if Date().timeIntervalSince(zero) > Self.maximumSeconds { toggle() }
-        }
+        guard isRunning else { return }
+        if !NSEvent.modifierFlags.contains(.shift) { shiftUp() }
+        observeWindow()
+        if Date().timeIntervalSince(zero) > Self.maximumSeconds { toggle() }
     }
 
-    /// A new observation when the app in front, its window's title or its page changes.
+    /// ⇧ is up: a stroke ends, and the next ⇧ draws.
+    private func shiftUp() {
+        guard isRunning else { return }
+        isInkArmed = true
+        endStroke()
+    }
+
+    /// A new observation when the app in front, its window's title or its page changes. The app
+    /// is asked on the Accessibility queue, one read at a time; a read that ends after its
+    /// capture changes nothing.
     private func observeWindow() {
-        guard let application = NSWorkspace.shared.frontmostApplication, application.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
-        var title: String?
-        var url: String?
-        if AXIsProcessTrusted() {
-            let element = AXUIElementCreateApplication(application.processIdentifier)
-            AXUIElementSetMessagingTimeout(element, 0.3)
-            if let window = Accessibility.attribute(element, kAXFocusedWindowAttribute), CFGetTypeID(window) == AXUIElementGetTypeID() {
-                // The type was checked on the line above.
-                let window = window as! AXUIElement
-                title = Accessibility.attribute(window, kAXTitleAttribute) as? String
-                url = Accessibility.attribute(window, kAXDocumentAttribute) as? String ?? Accessibility.pageURL(in: window)
+        guard isRunning, !isReadingWindow, let app = Accessibility.App.front, app.pid != ProcessInfo.processInfo.processIdentifier else { return }
+        isReadingWindow = true
+        let capture = id, trusted = AXIsProcessTrusted(), seen = windowKey, treesSoFar = trees, folder = folder, t = now
+        Task { @MainActor in
+            let read = try? await Accessibility.read { () -> (key: String, title: String?, url: String?, tree: String?) in
+                let (title, url) = trusted ? Accessibility.window(of: app) : (nil, nil)
+                let key = [app.bundle, title, url].map { $0 ?? "" }.joined(separator: "\n")
+                guard key != seen else { return (key, title, url, nil) }
+                // the window as text, for the first few windows: a tree is large
+                guard trusted, treesSoFar < 6, let window = try? Accessibility.tree(of: app, maxDepth: 12, maxNodes: 1_500),
+                    let data = try? JSONSerialization.data(withJSONObject: window, options: [.sortedKeys])
+                else { return (key, title, url, nil) }
+                let tree = "accessibility/\(treesSoFar).json"
+                try? FileManager.default.createDirectory(at: folder.appendingPathComponent("accessibility"), withIntermediateDirectories: true)
+                return (key, title, url, (try? data.write(to: folder.appendingPathComponent(tree))) == nil ? nil : tree)
             }
+            guard capture == id else { return }
+            isReadingWindow = false
+            guard isRunning, let read, read.key != windowKey else { return }
+            windowKey = read.key
+            if read.tree != nil { trees += 1 }
+            observe("window", at: t, ["application": app.name, "bundleIdentifier": app.bundle, "title": read.title, "url": read.url, "accessibilityTree": read.tree])
+            if now > 1_000 { picture("window", after: 0.5) }
         }
-        let key = [application.bundleIdentifier, title, url].map { $0 ?? "" }.joined(separator: "\n")
-        guard key != windowKey else { return }
-        windowKey = key
-        // the window as text, for the first few windows: a tree is large
-        var tree: String?
-        if trees < 6, let window = try? Accessibility.frontWindow(maxDepth: 12, maxNodes: 1_500),
-            let data = try? JSONSerialization.data(withJSONObject: window, options: [.sortedKeys])
-        {
-            tree = "accessibility/\(trees).json"
-            try? FileManager.default.createDirectory(at: folder.appendingPathComponent("accessibility"), withIntermediateDirectories: true)
-            try? data.write(to: folder.appendingPathComponent(tree!))
-            trees += 1
-        }
-        observe("window", ["application": application.localizedName, "bundleIdentifier": application.bundleIdentifier, "title": title, "url": url, "accessibilityTree": tree])
-        if now > 1_000 { picture("window", after: 0.5) }
     }
 
     /// The pointer moved. With ⇧ down it draws; a stroke ends when ⇧ is let go.
-    private func moved(isInk: Bool) {
+    private func moved(isInk: Bool, isShiftUp: Bool) {
+        guard isRunning else { return }
+        if isShiftUp { isInkArmed = true }
         let point = NSEvent.mouseLocation
         guard isInk, isInkArmed, let screen, screen.frame.contains(point) else { return endStroke() }
         ink?.add(x: point.x - screen.frame.minX, y: screen.frame.maxY - point.y, t: now)
@@ -332,54 +397,33 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             })
     }
 
+    /// The picture is taken by ScreenCaptureKit, and made a JPEG and written off the main actor.
     private func takePicture(_ file: String, _ reason: String, of capture: String, panel: Panel? = nil) async {
         let t = now
-        guard isRunning, capture == id, let image = try? await Screen.image(of: displayID, maxWidth: 2_000),
-            let picture = Snapshot.jpeg(of: CIImage(cgImage: image), maxWidth: 2_000), capture == id,
-            (try? picture.data.write(to: folder.appendingPathComponent(file))) != nil
+        guard phase == .running || phase == .ending, capture == id,
+            let image = try? await Screen.image(of: displayID, maxWidth: 2_000, onlyOwn: ownWindows)
         else { return }
-        observe("picture", at: t, ["file": file, "reason": reason, "pixelWidth": picture.width, "pixelHeight": picture.height])
+        let url = folder.appendingPathComponent(file)
+        let written = await Task.detached(priority: .userInitiated) { () -> (width: Int, height: Int)? in
+            guard let picture = Snapshot.jpeg(of: CIImage(cgImage: image), maxWidth: 2_000), (try? picture.data.write(to: url)) != nil else { return nil }
+            return (picture.width, picture.height)
+        }.value
+        guard capture == id, let written else { return }
+        observe("picture", at: t, ["file": file, "reason": reason, "pixelWidth": written.width, "pixelHeight": written.height])
         upload(["put": file])
-        if let panel { cut(panel, from: image, picture: file) }
+        if let panel, let screen { await cut(panel, from: image, picture: file, display: screen.frame.size) }
     }
 
     /// One numbered picture: the part of the display around a mark or a click, with its number in
     /// the corner. The box is twice the mark's size and at least 640 × 400 points, so that what is
-    /// near the mark can be read.
-    private func cut(_ panel: Panel, from image: CGImage, picture: String) {
-        guard let screen else { return }
-        let display = screen.frame.size
-        let scale = CGFloat(image.width) / display.width
-        let size = CGSize(width: min(display.width, max(640, panel.box.width * 2)), height: min(display.height, max(400, panel.box.height * 2)))
-        let origin = CGPoint(
-            x: max(0, min(display.width - size.width, panel.box.midX - size.width / 2)),
-            y: max(0, min(display.height - size.height, panel.box.midY - size.height / 2)))
-        // a CGImage counts from its top left, as the box does
-        guard let part = image.cropping(to: CGRect(x: origin.x * scale, y: origin.y * scale, width: size.width * scale, height: size.height * scale).integral),
-            let context = CGContext(
-                data: nil, width: part.width, height: part.height, bitsPerComponent: 8, bytesPerRow: 0,
-                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-        else { return }
-        let height = CGFloat(part.height)
-        context.draw(part, in: CGRect(x: 0, y: 0, width: part.width, height: part.height))
-        if let click = panel.click {
-            // a click leaves no ink: a ring says where it was
-            context.setStrokeColor(CGColor(red: 1, green: 0.1, blue: 0.1, alpha: 1))
-            context.setLineWidth(5)
-            context.strokeEllipse(in: CGRect(x: (click.x - origin.x) * scale - 16, y: height - (click.y - origin.y) * scale - 16, width: 32, height: 32))
-        }
-        let badge = CGRect(x: 0, y: height - 56, width: 64, height: 56)
-        context.setFillColor(CGColor(gray: 0, alpha: 1))
-        context.fill(badge)
-        let number = CTLineCreateWithAttributedString(
-            NSAttributedString(string: String(panel.n), attributes: [.font: NSFont.boldSystemFont(ofSize: 40), .foregroundColor: NSColor.white]))
-        let bounds = CTLineGetBoundsWithOptions(number, .useGlyphPathBounds)
-        context.textPosition = CGPoint(x: badge.midX - bounds.midX, y: badge.midY - bounds.midY)
-        CTLineDraw(number, context)
+    /// near the mark can be read. Drawn and written off the main actor.
+    private func cut(_ panel: Panel, from image: CGImage, picture: String, display: CGSize) async {
+        let capture = id
         let file = "\(panel.n).jpg"
-        guard let numbered = context.makeImage(), let jpeg = Snapshot.jpeg(of: CIImage(cgImage: numbered), maxWidth: 2_000),
-            (try? jpeg.data.write(to: folder.appendingPathComponent(file))) != nil
-        else { return }
+        let url = folder.appendingPathComponent(file)
+        let (n, box, click) = (panel.n, panel.box, panel.click)
+        let isWritten = await Task.detached(priority: .userInitiated) { Self.drawCut(n, box: box, click: click, from: image, display: display, to: url) }.value
+        guard isWritten, capture == id else { return }
         var entry: [String: Any] = ["n": panel.n, "did": panel.did, "from": panel.from, "t": panel.t, "file": file, "picture": picture]
         // What was under it, when the app in front names it in a few words (a terminal answers its whole text).
         if let on = panel.on, let words = (on["title"] ?? on["description"]) as? String, !words.isEmpty, words.count <= 60 {
@@ -389,13 +433,54 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         upload(["put": file])
     }
 
-    /// All the numbered pictures on one: an agent reads it first. Two in a row, each 780 pixels wide.
-    private func writeSheet() {
-        let cells = panels.sorted { ($0["n"] as? Int ?? 0) < ($1["n"] as? Int ?? 0) }.compactMap { panel -> CGImage? in
-            guard let file = panel["file"] as? String, let source = CGImageSourceCreateWithURL(folder.appendingPathComponent(file) as CFURL, nil) else { return nil }
+    private nonisolated static func drawCut(_ n: Int, box: CGRect, click: CGPoint?, from image: CGImage, display: CGSize, to url: URL) -> Bool {
+        let scale = CGFloat(image.width) / display.width
+        let size = CGSize(width: min(display.width, max(640, box.width * 2)), height: min(display.height, max(400, box.height * 2)))
+        let origin = CGPoint(
+            x: max(0, min(display.width - size.width, box.midX - size.width / 2)),
+            y: max(0, min(display.height - size.height, box.midY - size.height / 2)))
+        // a CGImage counts from its top left, as the box does
+        guard let part = image.cropping(to: CGRect(x: origin.x * scale, y: origin.y * scale, width: size.width * scale, height: size.height * scale).integral),
+            let context = CGContext(
+                data: nil, width: part.width, height: part.height, bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
+        else { return false }
+        let height = CGFloat(part.height)
+        context.draw(part, in: CGRect(x: 0, y: 0, width: part.width, height: part.height))
+        if let click {
+            // a click leaves no ink: a ring says where it was
+            context.setStrokeColor(CGColor(red: 1, green: 0.1, blue: 0.1, alpha: 1))
+            context.setLineWidth(5)
+            context.strokeEllipse(in: CGRect(x: (click.x - origin.x) * scale - 16, y: height - (click.y - origin.y) * scale - 16, width: 32, height: 32))
+        }
+        let badge = CGRect(x: 0, y: height - 56, width: 64, height: 56)
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(badge)
+        let font = CTFontCreateUIFontForLanguage(.emphasizedSystem, 40, nil)
+        let number = CTLineCreateWithAttributedString(
+            NSAttributedString(string: String(n), attributes: [.font: font as Any, .foregroundColor: CGColor(gray: 1, alpha: 1)]))
+        let bounds = CTLineGetBoundsWithOptions(number, .useGlyphPathBounds)
+        context.textPosition = CGPoint(x: badge.midX - bounds.midX, y: badge.midY - bounds.midY)
+        CTLineDraw(number, context)
+        guard let numbered = context.makeImage(), let jpeg = Snapshot.jpeg(of: CIImage(cgImage: numbered), maxWidth: 2_000) else { return false }
+        return (try? jpeg.data.write(to: url)) != nil
+    }
+
+    /// All the numbered pictures on one: an agent reads it first. Two in a row, each 780 pixels
+    /// wide. Drawn and written off the main actor.
+    private func writeSheet() async {
+        let files = panels.sorted { ($0["n"] as? Int ?? 0) < ($1["n"] as? Int ?? 0) }.compactMap { $0["file"] as? String }.map(folder.appendingPathComponent)
+        let sheet = folder.appendingPathComponent("sheet.jpg")
+        let isWritten = await Task.detached(priority: .userInitiated) { Self.drawSheet(of: files, to: sheet) }.value
+        if isWritten { upload(["put": "sheet.jpg"]) }
+    }
+
+    private nonisolated static func drawSheet(of files: [URL], to url: URL) -> Bool {
+        let cells = files.compactMap { file -> CGImage? in
+            guard let source = CGImageSourceCreateWithURL(file as CFURL, nil) else { return nil }
             return CGImageSourceCreateImageAtIndex(source, 0, nil)
         }
-        guard cells.count > 1 else { return }
+        guard cells.count > 1 else { return false }
         let cellWidth: CGFloat = 780, gap: CGFloat = 6
         let heights = cells.map { CGFloat($0.height) * cellWidth / CGFloat($0.width) }
         let rows = stride(from: 0, to: cells.count, by: 2).map { heights[$0..<min($0 + 2, cells.count)].max() ?? 0 }
@@ -404,7 +489,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             let context = CGContext(
                 data: nil, width: Int(size.width), height: Int(size.height), bitsPerComponent: 8, bytesPerRow: 0,
                 space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)
-        else { return }
+        else { return false }
         context.setFillColor(CGColor(gray: 0.13, alpha: 1))
         context.fill(CGRect(origin: .zero, size: size))
         context.interpolationQuality = .high
@@ -414,59 +499,68 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             context.draw(cell, in: CGRect(x: gap + column * (cellWidth + gap), y: size.height - top - heights[index], width: cellWidth, height: heights[index]))
             if index % 2 == 1 { top += rows[index / 2] + gap }
         }
-        guard let sheet = context.makeImage(), let jpeg = Snapshot.jpeg(of: CIImage(cgImage: sheet), maxWidth: 2_000),
-            (try? jpeg.data.write(to: folder.appendingPathComponent("sheet.jpg"))) != nil
-        else { return }
-        upload(["put": "sheet.jpg"])
+        guard let sheet = context.makeImage(), let jpeg = Snapshot.jpeg(of: CIImage(cgImage: sheet), maxWidth: 2_000) else { return false }
+        return (try? jpeg.data.write(to: url)) != nil
     }
 
     /// A click in another app (a global monitor sees no click in this app's own windows).
     private func clicked() {
-        guard let screen, screen.frame.contains(NSEvent.mouseLocation) else { return }
+        guard isRunning, let screen, screen.frame.contains(NSEvent.mouseLocation) else { return }
         let point = NSEvent.mouseLocation
         let place = CGPoint(x: point.x - screen.frame.minX, y: screen.frame.maxY - point.y)
-        let on = element(at: point)
         let t = now
-        observe("click", at: t, ["x": Int(place.x), "y": Int(place.y), "on": on])
-        picture("click", after: 0.4) { Panel(n: $0, did: "clicked", from: t, t: t, box: CGRect(origin: place, size: .zero), click: place, on: on) }
+        // the end waits for this: the click's element, then its picture
+        pictureTasks.append(
+            Task { @MainActor in
+                let on = await self.element(at: point)
+                self.observe("click", at: t, ["x": Int(place.x), "y": Int(place.y), "on": on])
+                self.picture("click", after: 0.4) { Panel(n: $0, did: "clicked", from: t, t: t, box: CGRect(origin: place, size: .zero), click: place, on: on) }
+            })
     }
 
     private func inked(_ stroke: InkView.Stroke) {
         guard let screen, let first = stroke.points.first, let last = stroke.points.last else { return }
         marks += 1
+        let mark = marks
         let xs = stroke.points.map(\.x), ys = stroke.points.map(\.y)
         // the middle of the mark, as a point of the whole desktop with its origin at the bottom left
         let middle = CGPoint(x: screen.frame.minX + (xs.min()! + xs.max()!) / 2, y: screen.frame.maxY - (ys.min()! + ys.max()!) / 2)
-        let on = element(at: middle)
-        observe("ink", at: first.t, ["to": last.t, "mark": marks, "points": stroke.points.map { [Int($0.x), Int($0.y), $0.t] }, "on": on])
         let box = CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
-        picture("mark \(marks)", after: 0.15, isMark: true) { Panel(n: $0, did: "drew", from: first.t, t: last.t, box: box, on: nil) }
+        let points = stroke.points.map { [Int($0.x), Int($0.y), $0.t] }
+        // the end waits for this: the mark's element, then its picture
+        pictureTasks.append(
+            Task { @MainActor in
+                let on = await self.element(at: middle)
+                self.observe("ink", at: first.t, ["to": last.t, "mark": mark, "points": points, "on": on])
+                self.picture("mark \(mark)", after: 0.15, isMark: true) { Panel(n: $0, did: "drew", from: first.t, t: last.t, box: box, on: nil) }
+            })
     }
 
-    /// The accessibility element of the app in front at a point of the desktop: its role, title and value.
-    private func element(at point: CGPoint) -> [String: Any]? {
-        guard AXIsProcessTrusted(), let application = NSWorkspace.shared.frontmostApplication, let primary = NSScreen.screens.first else { return nil }
-        let root = AXUIElementCreateApplication(application.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.3)
-        var found: AXUIElement?
+    /// The accessibility element of the app in front at a point of the desktop: its role, title
+    /// and value. Asked on the Accessibility queue; nil for an app whose windows are never read.
+    private func element(at point: CGPoint) async -> [String: Any]? {
+        guard AXIsProcessTrusted(), let app = Accessibility.App.front, let primary = NSScreen.screens.first else { return nil }
         // Accessibility counts from the top left of the first display
-        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(primary.frame.maxY - point.y), &found) == .success, let found else { return nil }
-        var budget = 1
-        let described = Accessibility.describe(found, depth: 0, budget: &budget)
-        return described.isEmpty ? nil : described.mapValues { ($0 as? String).map { String($0.prefix(300)) } ?? $0 }
+        let place = CGPoint(x: point.x, y: primary.frame.maxY - point.y)
+        return try? await Accessibility.read { Accessibility.Handed(value: Accessibility.element(of: app, at: place)) }.value
     }
 
     // MARK: - End
 
     private func end(send: Bool) async {
-        guard isRunning, !isEnding else { return }
-        isEnding = true
-        defer { isEnding = false }
-        endVoice(send: send)
+        guard phase == .running else { return }
+        // from here a press does nothing until the last line went to the job
+        phase = .ending
+        defer { phase = .idle }
+        let voiceEnds = endVoice(send: send)
         endStroke()
-        // every mark and click has its picture before the ink goes
-        for task in pictureTasks { await task.value }
-        pictureTasks = []
+        // every mark and click has its picture before the ink goes (a click's own picture is
+        // asked after its element: the list grows while it is waited for)
+        while !pictureTasks.isEmpty {
+            let tasks = pictureTasks
+            pictureTasks = []
+            for task in tasks { await task.value }
+        }
         let durationMs = now
         if send {
             // The last picture, with the ink still on the screen. It is the one numbered picture
@@ -474,32 +568,35 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             pictures += 1
             let whole = panels.isEmpty ? screen.map { Panel(n: 1, did: "the screen at the end", from: 0, t: durationMs, box: CGRect(origin: .zero, size: $0.frame.size)) } : nil
             await takePicture("pictures/\(String(format: "%02d", pictures)).jpg", "end", of: id, panel: whole)
-            writeSheet()
+            await writeSheet()
             // The text is on the clipboard now: nothing below is waited for.
             if (try? writeManifest(durationMs: durationMs)) != nil { upload(["copy": true]) }
         }
         timer?.invalidate()
         timer = nil
-        for monitor in [clickMonitor, moveMonitor] { if let monitor { NSEvent.removeMonitor(monitor) } }
+        for monitor in [clickMonitor, moveMonitor, flagsMonitor] { if let monitor { NSEvent.removeMonitor(monitor) } }
         clickMonitor = nil
         moveMonitor = nil
-        overlay?.orderOut(nil)
-        overlay = nil
-        ink = nil
-        isRunning = false
+        flagsMonitor = nil
+        if let launches { NSWorkspace.shared.notificationCenter.removeObserver(launches) }
+        launches = nil
+        hideOverlay()
         onChange()
         if let stream {
-            // the movie is whole once the recording output says so; a stream that fails says it too
+            // the movie is whole once its recording output says so; a stream that fails says it
+            // too, and after 5 s the end goes on without it. Each is this stream's alone.
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 finished = continuation
-                Task { @MainActor in
+                let recording = recording
+                movieFallback = Task { @MainActor in
                     try? await stream.stopCapture()
-                    try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    self.movieIsWhole()
+                    guard (try? await Task.sleep(nanoseconds: 5_000_000_000)) != nil else { return }
+                    if let recording { self.movieIsWhole(recording) }
                 }
             }
         }
         stream = nil
+        recording = nil
         guard send else {
             upload(["discard": true])
             bridge = nil
@@ -508,56 +605,90 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             return say("Discarded", for: 2)
         }
         say(copiedAt == nil ? "Sending…" : "Copied: paste it to an agent", progress: 0)
-        do {
-            try await writeBundle(durationMs: durationMs)
-        } catch {
-            return fail("The capture was not written: \(AppLog.describe(error))")
+        guard await writeBundle(durationMs: durationMs) else {
+            // the files stay on this Mac, and the job ends
+            upload(["discard": true])
+            bridge = nil
+            return fail("The capture was not written. It is in \(folder.path)", keep: true)
         }
         guard bridge != nil else {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(folder.path, forType: .string)
             return fail("No mind is set up. The capture is in \(folder.path)", keep: true)
         }
+        // the last words before the end: `heard` goes before `finish`
+        await voiceEnds?.value
         upload(["finish": true])
     }
 
-    private func movieIsWhole() {
+    /// The movie's own end, or its stream's failure, or the fallback: of the recording `of` alone.
+    private func movieIsWhole(_ of: ObjectIdentifier) {
+        guard of == recording else { return }
+        movieFallback?.cancel()
+        movieFallback = nil
         finished?.resume()
         finished = nil
     }
 
     nonisolated func recordingOutputDidFinishRecording(_ recordingOutput: SCRecordingOutput) {
-        Task { @MainActor in self.movieIsWhole() }
+        let output = ObjectIdentifier(recordingOutput)
+        Task { @MainActor in self.movieIsWhole(output) }
     }
 
     nonisolated func recordingOutput(_ recordingOutput: SCRecordingOutput, didFailWithError error: Error) {
         let words = AppLog.describe(error)
+        let output = ObjectIdentifier(recordingOutput)
         Task { @MainActor in
+            guard output == self.recording else { return }
             self.log.error("capture \(self.id): the recording failed: \(words)")
-            self.movieIsWhole()
+            self.movieIsWhole(output)
         }
     }
 
     /// The stream ended by itself (the display went away, macOS stopped it): the capture ends with what it has.
     nonisolated func stream(_ stream: SCStream, didStopWithError error: Error) {
         let words = AppLog.describe(error)
+        let ended = ObjectIdentifier(stream)
         Task { @MainActor in
+            guard let current = self.stream, ObjectIdentifier(current) == ended else { return }
             self.log.error("capture \(self.id): the stream stopped: \(words)")
             if self.isRunning { await self.end(send: true) }
         }
     }
 
-    /// Cuts the voice out of the movie, and writes `capture.json` again with both.
-    private func writeBundle(durationMs: Int) async throws {
+    /// Cuts the voice out of the movie, and writes `capture.json` again with both. A part that
+    /// fails (a movie that does not read, a voice that is not cut) is left out and logged: the
+    /// pictures and the movie stay, and the rest goes. False when `capture.json` itself was not
+    /// written.
+    private func writeBundle(durationMs: Int) async -> Bool {
         let movie = AVURLAsset(url: folder.appendingPathComponent("screen.mp4"))
-        let movieMs = Int(try await movie.load(.duration).seconds * 1000)
-        observe("screen", at: 0, ["to": movieMs, "file": "screen.mp4"])
-        if !(try await movie.loadTracks(withMediaType: .audio)).isEmpty, let export = AVAssetExportSession(asset: movie, presetName: AVAssetExportPresetAppleM4A) {
-            try await export.export(to: folder.appendingPathComponent("voice.m4a"), as: .m4a)
-            observe("voice", at: 0, ["to": movieMs, "file": "voice.m4a"])
+        var movieMs: Int?
+        do {
+            movieMs = Int(try await movie.load(.duration).seconds * 1000)
+        } catch {
+            log.error("capture \(id): screen.mp4 does not read: \(AppLog.describe(error))")
         }
-        try writeManifest(durationMs: movieMs)
-        log.info("capture \(id): \(movieMs / 1000) s, \(observations.count) observations, \(pictures) pictures, \(marks) marks")
+        if let movieMs {
+            observe("screen", at: 0, ["to": movieMs, "file": "screen.mp4"])
+            let voice = folder.appendingPathComponent("voice.m4a")
+            do {
+                if !(try await movie.loadTracks(withMediaType: .audio)).isEmpty, let export = AVAssetExportSession(asset: movie, presetName: AVAssetExportPresetAppleM4A) {
+                    try await export.export(to: voice, as: .m4a)
+                    observe("voice", at: 0, ["to": movieMs, "file": "voice.m4a"])
+                }
+            } catch {
+                try? FileManager.default.removeItem(at: voice)
+                log.error("capture \(id): voice.m4a was not cut out of the movie: \(AppLog.describe(error))")
+            }
+        }
+        do {
+            try writeManifest(durationMs: movieMs ?? durationMs)
+        } catch {
+            log.error("capture \(id): capture.json was not written: \(AppLog.describe(error))")
+            return false
+        }
+        log.info("capture \(id): \((movieMs ?? durationMs) / 1000) s, \(observations.count) observations, \(pictures) pictures, \(marks) marks")
+        return true
     }
 
     /// `capture.json`: every observation with its time, and the numbered pictures. Written twice:
@@ -660,19 +791,31 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         }
     }
 
-    /// The voice ends with the capture: the last segments go to the uploader, then `heard`, and the
-    /// text on the clipboard gets the last words.
-    private func endVoice(send: Bool) {
+    /// The most seconds the end waits for the last words: a model that still comes over the network.
+    static let voiceWait = 120.0
+
+    /// The voice ends with the capture. Sent: the answer is the task of its last segments and then
+    /// `heard` (with no voice, `heard` alone), each with this capture's id; the end awaits it
+    /// before `finish`, so the bridge has every word before the movie. Discarded: nil.
+    private func endVoice(send: Bool) -> Task<Void, Never>? {
         voice.queue.async { [voice] in voice.recognizer = nil }
-        guard let recognizer else { return }
+        let recognizer = self.recognizer
         self.recognizer = nil
-        guard send else { return recognizer.cancel() }
+        guard send else {
+            recognizer?.cancel()
+            return nil
+        }
         let capture = id
-        Task { @MainActor in
-            let segments = await recognizer.finish()
+        return Task { @MainActor in
+            if let recognizer {
+                let segments = await recognizer.finish(within: Self.voiceWait)
+                if segments == nil { self.log.error("capture \(capture): the last words did not come within \(Int(Self.voiceWait)) s") }
+                // the end holds the capture until this ends: the id is still this one's
+                guard self.id == capture else { return }
+                self.isVoiceDone = true
+                for segment in (segments ?? []).dropFirst(self.segmentsSent) { self.upload(["segment": segment.transcriptEntry]) }
+            }
             guard self.id == capture else { return }
-            self.isVoiceDone = true
-            for segment in segments.dropFirst(self.segmentsSent) { self.upload(["segment": segment.transcriptEntry]) }
             self.upload(["heard": true])
         }
     }
@@ -754,6 +897,12 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         self.ink = ink
     }
 
+    private func hideOverlay() {
+        overlay?.orderOut(nil)
+        overlay = nil
+        ink = nil
+    }
+
     /// The pill at the top of the display: what the capture does now. With `seconds`, it goes away after them.
     private func say(_ text: String, startedAt: Date? = nil, progress: Double? = nil, for seconds: Double? = nil) {
         pill.text = text
@@ -769,6 +918,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         let frame = NSRect(x: (screen?.frame.midX ?? 400) - width / 2, y: (screen?.visibleFrame.maxY ?? 800) - 48, width: width, height: 36)
         let panel = pillPanel ?? self.panel(frame, level: NSWindow.Level.statusBar.rawValue + 1)
         if pillPanel == nil {
+            // in no picture and no movie of the screen: the ink is, the pill is not
+            panel.sharingType = .none
             panel.contentView = NSHostingView(
                 rootView: CapturePillView(
                     pill: pill,

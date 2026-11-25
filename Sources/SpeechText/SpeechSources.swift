@@ -7,8 +7,9 @@ import VoiceMeetCore
 /// buffers are in any format; `SpeechAudio` makes them 16 kHz mono for a recognizer. A capture
 /// has no source of its own: it pushes the buffers that ScreenCaptureKit gives it.
 public protocol SpeechSource: AnyObject {
-    /// Starts to give buffers to `take`. Throws a reason in words.
-    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws
+    /// Starts to give buffers to `take`. Throws a reason in words when it cannot start; `failed`
+    /// tells the reason when it stops by itself later. Neither comes after `stop`.
+    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws
     func stop()
 }
 
@@ -42,30 +43,74 @@ public final class SpeechAudio: @unchecked Sendable {
 }
 
 /// THE MICROPHONE, through an audio engine of its own: one tap while it runs.
-public final class Microphone: SpeechSource {
+///
+/// The engine starts and stops on a queue that all microphones share, never on the main thread:
+/// a start of the audio hardware takes a moment. `start` throws only when this Mac has no input
+/// now; an engine that does not start is told to `failed`. When the input changes (headphones
+/// in, another microphone chosen), macOS stops the engine: the tap is made again in the new
+/// format and the engine starts again, and when that fails, `failed` says so.
+public final class Microphone: SpeechSource, @unchecked Sendable {
+    /// Every microphone's work, in order: a stop before the next start.
+    private static let queue = DispatchQueue(label: "com.iterate.speech.microphone", qos: .userInitiated)
     private let engine = AVAudioEngine()
+    /// Used on `queue` alone.
     private var isRunning = false
+    private var changes: NSObjectProtocol?
+    private var take: (@Sendable (AVAudioPCMBuffer) -> Void)?
+    private var failed: (@Sendable (String) -> Void)?
 
     public init() {}
 
-    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
+        Self.queue.async { [self] in
+            self.take = take
+            self.failed = failed
+            isRunning = true
+            changes = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
+                guard let self else { return }
+                Self.queue.async { self.run(again: true) }
+            }
+            run(again: false)
+        }
+    }
+
+    /// On `queue`: the tap in the input's format now, and the engine started.
+    private func run(again: Bool) {
+        guard isRunning, let take else { return }
         let input = engine.inputNode
+        if again {
+            input.removeTap(onBus: 0)
+            engine.stop()
+        }
         let format = input.outputFormat(forBus: 0)
-        guard format.sampleRate > 0, format.channelCount > 0 else { throw SpeechSourceError("This Mac has no microphone now.") }
+        guard format.sampleRate > 0, format.channelCount > 0 else { return fail("This Mac has no microphone now.") }
         input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in take(buffer) }
         do {
             engine.prepare()
             try engine.start()
         } catch {
-            input.removeTap(onBus: 0)
-            throw SpeechSourceError("The microphone did not start: \(error.localizedDescription)")
+            fail("The microphone did not start: \(error.localizedDescription)")
         }
-        isRunning = true
+    }
+
+    private func fail(_ reason: String) {
+        let failed = failed
+        end()
+        failed?(reason)
     }
 
     public func stop() {
+        Self.queue.async { [self] in end() }
+    }
+
+    /// On `queue`.
+    private func end() {
         guard isRunning else { return }
         isRunning = false
+        if let changes { NotificationCenter.default.removeObserver(changes) }
+        changes = nil
+        take = nil
+        failed = nil
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
     }
@@ -82,7 +127,7 @@ public final class FixturePlayer: SpeechSource, @unchecked Sendable {
         self.url = url
     }
 
-    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void) throws {
+    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
         let audio: AudioFixture
         do {
             audio = try AudioFixture(url)

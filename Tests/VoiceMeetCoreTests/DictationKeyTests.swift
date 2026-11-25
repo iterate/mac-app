@@ -182,3 +182,65 @@ final class DictationKeyTests: XCTestCase {
         return key
     }
 }
+
+/// The fn tap's own rule, on its thread (`FnTap`).
+final class KeyTapRuleTests: XCTestCase {
+    /// Astra 19, Carbon 12a: fn down, an arrow at once, fn up, while the main actor is busy. The
+    /// tap knows fn is down from its own event, so the arrow is fn's combination; in their order
+    /// the events cancel the dictation that fn started, and its release does nothing.
+    func testAKeyAMomentAfterFnIsItsCombinationBeforeTheMainActorHeardFn() {
+        var rule = KeyTapRule()
+        var queued: [KeyTapRule.Heard] = []
+        XCTAssertFalse(rule.wantsKeyDowns, "idle: no key press passes the tap")
+        queued += [rule.flagsChanged(code: 63, fn: true)].compactMap { $0 }
+        XCTAssertTrue(rule.wantsKeyDowns, "the key tap is on before the next key")
+        let arrow = rule.keyDown(code: 123)
+        XCTAssertFalse(arrow.swallow)
+        queued += [arrow.heard].compactMap { $0 }
+        queued += [rule.flagsChanged(code: 63, fn: false)].compactMap { $0 }
+        XCTAssertFalse(rule.wantsKeyDowns)
+        XCTAssertEqual(queued, [.fn(down: true), .otherKey, .fn(down: false)])
+
+        // the main actor drains them now
+        var key = DictationKey()
+        let zero = Date(timeIntervalSince1970: 0)
+        var acts: [DictationKey.Act] = []
+        for heard in queued {
+            switch heard {
+            case .fn(let down): acts.append(down ? key.down(at: zero) : key.up(at: zero.addingTimeInterval(1)))
+            case .otherKey: acts.append(key.otherKey())
+            case .escape: acts.append(key.escape())
+            }
+        }
+        XCTAssertEqual(acts, [.start, .cancel(quietly: true), .nothing])
+        XCTAssertEqual(key.state, .idle)
+    }
+
+    func testAnotherModifierWhileFnIsDownIsACombinationAndAloneIsNothing() {
+        var rule = KeyTapRule()
+        XCTAssertNil(rule.flagsChanged(code: 56, fn: false), "⇧ alone")
+        XCTAssertEqual(rule.flagsChanged(code: 179, fn: true), .fn(down: true), "the 🌐 key")
+        XCTAssertEqual(rule.flagsChanged(code: 56, fn: true), .otherKey)
+    }
+
+    func testEscGoesToADictationAndIsSwallowedOnlyWhileItIsLocked() {
+        var rule = KeyTapRule()
+        XCTAssertEqual(rule.keyDown(code: KeyTapRule.escapeCode).heard, nil)
+        rule.escape = true
+        XCTAssertTrue(rule.wantsKeyDowns)
+        XCTAssertEqual(rule.keyDown(code: KeyTapRule.escapeCode).heard, .escape)
+        XCTAssertFalse(rule.keyDown(code: KeyTapRule.escapeCode).swallow)
+        rule.swallowsEscape = true
+        XCTAssertTrue(rule.keyDown(code: KeyTapRule.escapeCode).swallow)
+        XCTAssertEqual(rule.keyDown(code: 0).heard, nil, "a letter while a locked dictation goes")
+    }
+
+    /// Carbon 12a: macOS switched the tap off while fn was held and fn went up meanwhile.
+    func testATapOnAgainTellsTheFnReleaseItMissed() {
+        var rule = KeyTapRule()
+        _ = rule.flagsChanged(code: 63, fn: true)
+        XCTAssertEqual(rule.resumed(fn: false), .fn(down: false))
+        XCTAssertFalse(rule.wantsKeyDowns)
+        XCTAssertNil(rule.resumed(fn: false), "nothing changed")
+    }
+}

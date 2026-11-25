@@ -173,7 +173,7 @@ final class Dictation: SpeechClient {
             window?.cancel()
             window = nil
         }
-        tap.want(FnTap.Interest(otherKeys: key.wantsOtherKeys, escape: key.state != .idle, swallowsEscape: key.isLocked))
+        tap.want(FnTap.Interest(escape: key.state != .idle, swallowsEscape: key.isLocked))
     }
 
     /// Hears fn in every app: one event tap, made once macOS gives Accessibility.
@@ -217,6 +217,8 @@ final class Dictation: SpeechClient {
         pill.level = 0
         pill.locked = false
         pill.showsWords = Choices.shared.pillShowsWords
+        // the phase of an earlier dictation (writing) is not this one's
+        pill.phase = .listening
         switch session.start(self, words: words()) {
         case nil:
             pill.clock = .since(Date())
@@ -231,6 +233,9 @@ final class Dictation: SpeechClient {
         case .notAllowed:
             ended()
             allow(.microphone)
+        case .failed(let reason):
+            ended()
+            end("Not started at \(Lend.clock(Date())): \(reason)", failed: reason)
         }
         onChange()
     }
@@ -254,8 +259,10 @@ final class Dictation: SpeechClient {
             ended()
             end("Not written at \(Lend.clock(Date())): \(reason)", failed: reason)
         case .ended(let text):
-            // after this dictation's own end, or when the input bar started to listen
-            ended()
+            // after this dictation's own end, or when the input bar started to listen. A new
+            // dictation may run already (fn went down again before the last words came): the key
+            // is that one's, and only a listening taken by the input bar leaves it to be reset.
+            if !isRunning { ended() }
             write(text)
         }
     }
@@ -300,11 +307,8 @@ final class Dictation: SpeechClient {
             return end("\(words) words are on the clipboard (\(Lend.clock(Date()))): iterate needs Accessibility to write them for you", failed: "On the clipboard: press ⌘V")
         }
         // what the clipboard held, to put it back
-        let kept = (pasteboard.pasteboardItems ?? []).map { item in
-            item.types.compactMap { type in item.data(forType: type).map { (type, $0) } }
-        }
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        let kept = ClipboardCopy(of: pasteboard)
+        let change = ClipboardCopy.put(text, on: pasteboard)
         let source = CGEventSource(stateID: .hidSystemState)
         for isDown in [true, false] {
             let event = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: isDown)
@@ -313,14 +317,8 @@ final class Dictation: SpeechClient {
             event?.post(tap: .cgSessionEventTap)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
-            // the person copied something else meanwhile: that stays
-            guard pasteboard.string(forType: .string) == text else { return }
-            pasteboard.clearContents()
-            pasteboard.writeObjects(kept.map { types in
-                let item = NSPasteboardItem()
-                for (type, data) in types { item.setData(data, forType: type) }
-                return item
-            })
+            // the person copied something else meanwhile, the same text too: that stays
+            kept.restore(on: pasteboard, ifStill: change)
         }
         end("Wrote \(words) words at \(Lend.clock(Date()))", failed: nil)
     }
@@ -331,6 +329,8 @@ final class Dictation: SpeechClient {
         lastLine = line
         ends += 1
         lastFailed = failed != nil
+        // the pill is a newer dictation's now: it stays as it is
+        guard !isRunning else { return onChange() }
         if let failed {
             pill.phase = .failed(failed)
             hidePill(after: 4)

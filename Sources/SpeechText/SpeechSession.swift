@@ -43,6 +43,8 @@ public final class SpeechSession {
         case asking
         /// macOS refused the microphone.
         case notAllowed
+        /// The source did not start: the reason in words. No event comes.
+        case failed(String)
     }
 
     /// The model of dictation, the input bar and capture: the stored choice.
@@ -108,16 +110,19 @@ public final class SpeechSession {
         let source = makeSource()
         let audio = SpeechAudio()
         do {
-            try source.start { [weak self] buffer in
+            try source.start({ [weak self] buffer in
                 let samples = audio.samples(of: buffer)
                 guard !samples.isEmpty else { return }
                 recognizer.push(samples)
                 let level = SpeechAudio.level(of: samples)
                 DispatchQueue.main.async { MainActor.assumeIsolated { if self?.current?.round == round { client.speech(.level(level)) } } }
-            }
+            }, failed: { [weak self] reason in
+                // the source stopped by itself (the microphone went away): as a failed model
+                DispatchQueue.main.async { MainActor.assumeIsolated { self?.heard(.failed(reason), round: round, client: client) } }
+            })
         } catch {
-            client.speech(.failed(error.localizedDescription))
-            return nil
+            recognizer.cancel()
+            return .failed(error.localizedDescription)
         }
         current = Listening(client: client, round: round, source: source, recognizer: recognizer)
         recognizer.start()
@@ -155,6 +160,7 @@ public final class SpeechSession {
         case .partial(let said): client.speech(.text(said))
         case .failed(let reason):
             current?.source.stop()
+            current?.recognizer.cancel()
             current = nil
             log("listening \(round) failed: \(reason)")
             client.speech(.failed(reason))
