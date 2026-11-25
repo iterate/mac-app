@@ -184,6 +184,15 @@ public struct InputDraft: Equatable, Sendable {
         phase = .failed(reason)
     }
 
+    /// The command that fixes a failure, or nil. A reason that says the sign-in is missing or
+    /// refused (the iterate CLI's own words, or the mind's 401) is fixed by `iterate login <address>`,
+    /// where `address` is the one the CLI connects to. `notSignedIn` is what the CLI's own file says.
+    public static func fix(for reason: String, address: String, notSignedIn: Bool = false) -> String? {
+        let signIn = #"not signed in|not logged in|iterate login|sign in again|log in again|unauthori[sz]ed|\b401\b"#
+        guard notSignedIn || reason.range(of: signIn, options: [.regularExpression, .caseInsensitive]) != nil else { return nil }
+        return "iterate login \(address)"
+    }
+
     /// A size in words: "812 bytes", "34 KB", "2.1 MB".
     public static func size(_ bytes: Int) -> String {
         if bytes < 1024 { return "\(bytes) bytes" }

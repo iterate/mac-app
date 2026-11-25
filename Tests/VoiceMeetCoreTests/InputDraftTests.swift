@@ -125,4 +125,13 @@ final class InputDraftTests: XCTestCase {
         XCTAssertEqual(InputDraft.size(35_000), "34 KB")
         XCTAssertEqual(InputDraft.size(2_200_000), "2.1 MB")
     }
+
+    func testASignInFailureIsFixedByTheLoginOfItsAddress() {
+        let address = "iterate.example.com"
+        XCTAssertEqual(InputDraft.fix(for: "Not signed in to iterate.example.com: run `iterate login` once.", address: address), "iterate login iterate.example.com")
+        XCTAssertEqual(InputDraft.fix(for: "HTTP 401 Unauthorized", address: address), "iterate login iterate.example.com")
+        XCTAssertNil(InputDraft.fix(for: "The sender ended with no answer (exit 1).", address: address))
+        XCTAssertNil(InputDraft.fix(for: "Roadmap.pdf: 4010 bytes went", address: address))
+        XCTAssertEqual(InputDraft.fix(for: "no connection to the mind in 30 s", address: address, notSignedIn: true), "iterate login iterate.example.com")
+    }
 }
