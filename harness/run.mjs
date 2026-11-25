@@ -232,6 +232,29 @@ function sampleOf(pid, home, seconds) {
   }
 }
 
+/** A copy's figures each second for its first 30 s, and its log: when a start's cost begins and ends. */
+async function launchSeries(app, minds, args) {
+  const home = mkdtempSync(join(tmpdir(), "itx-"));
+  withMind(home, minds);
+  const t0 = Date.now();
+  const run = await start(app, home, {}, args);
+  const lines = [];
+  try {
+    let last = (await run.state()).perf;
+    while (Date.now() - t0 < 30000) {
+      await sleep(1000);
+      const state = await run.state();
+      const d = perfDelta(last, state.perf);
+      last = state.perf;
+      lines.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${state.lend.phase} ${d.cpuMs}ms ${d.interruptWakeups}w ${d.idleWakeups}i th${state.perf.threads} fd${state.perf.openFiles} ${JSON.stringify(Object.fromEntries(Object.entries(d.counters).filter(([, n]) => n)))}`);
+    }
+  } finally {
+    await run.quit();
+  }
+  const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-80).join("\n");
+  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its log ---\n${log}\n--- end ---\n`;
+}
+
 function within(what, figures, limits) {
   const over = overLimits(figures, limits);
   if (over.length) throw new Error(`${what}: ${over.map(([name, limit]) => `${name} ${figures[name] ?? figures.counters?.[name]} > ${limit}`).join(", ")}; ${JSON.stringify(figures)}`);
@@ -281,17 +304,9 @@ const scenarios = {
           step = now;
         }
         liveSample = sampleOf(run.pid, home, 3);
-        // the cost may be the start's and over by now: a second copy, sampled in the same seconds
-        const second = mkdtempSync(join(tmpdir(), "itx-"));
-        withMind(second, [A, B]);
-        const again = await start(app, second, {}, ["--lend"]);
-        try {
-          await until("the second copy live", 20, async () => (await again.state()).lend.phase === "live");
-          await sleep(4000);
-          liveSample += sampleOf(again.pid, second, 10);
-        } finally {
-          await again.quit();
-        }
+        // the cost may be the start's and over by now: two more copies, with the lend and
+        // without, their figures each second from the start beside their logs
+        for (const args of [["--lend"], []]) liveSample += await launchSeries(app, [A, B], args);
       }
 
       // a refused key: provide says so and ends; the next try is in 5 minutes
