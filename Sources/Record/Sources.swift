@@ -16,6 +16,8 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     private var tracks: [String: VideoTrack] = [:]
     private var restartPending = false
     private var stopped = false
+    /// On `queue`: one stream for each display, whatever asks for an open (`Opens`).
+    private var opens = Opens()
     private var observer: NSObjectProtocol?
 
     init(recorder: Recorder) { r = recorder }
@@ -33,7 +35,16 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
             if let self, self.r.options.exclude.excludes(app?.bundleIdentifier) { Task { await self.refilter() } }
         }
-        Task { await self.open() }
+        openAgain(again: true)
+    }
+
+    /// A new open, unless one runs and `again` is false.
+    private func openAgain(again: Bool) {
+        guard let number = queue.sync(execute: { stopped ? nil : opens.begin(again: again) }) else { return }
+        Task {
+            await self.open(number)
+            self.queue.sync { self.opens.end(number) }
+        }
     }
 
     /// Every app, also those with no window on screen now: their windows may show later.
@@ -51,7 +62,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         log("screens: \(excluded.count) excluded apps left out of the video")
     }
 
-    private func open() async {
+    private func open(_ number: Int) async {
         let content: SCShareableContent, excluded: [SCRunningApplication]
         do {
             (content, excluded) = try await self.content()
@@ -86,7 +97,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             let filter = SCContentFilter(display: display, excludingApplications: excluded, exceptingWindows: [])
             let stream = SCStream(filter: filter, configuration: config, delegate: self)
             guard let track = queue.sync(execute: { () -> VideoTrack? in
-                guard !stopped else { return nil }
+                guard !stopped, opens.keeps(number) else { return nil }
                 let track = tracks[id] ?? VideoTrack(id: id, recorder: r)
                 tracks[id] = track
                 streams[stream] = (track, display.displayID, config)
@@ -97,6 +108,16 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             do {
                 try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
                 try await stream.startCapture()
+                // a stop or a newer open came during the start: this stream goes
+                let kept = queue.sync { () -> Bool in
+                    if !stopped, opens.keeps(number) { return true }
+                    streams.removeValue(forKey: stream)
+                    return false
+                }
+                guard kept else {
+                    try? await stream.stopCapture()
+                    return log("\(id): a newer open or a stop came during the start; this stream stops")
+                }
                 log("\(id): capturing \(config.width)×\(config.height) at up to \(fps) fps")
             } catch {
                 log("\(id): not started, \(error.localizedDescription)")
@@ -138,17 +159,19 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
                 log("screens: displays changed; restarting capture")
                 let old = Array(self.streams.keys)
                 self.streams.removeAll()
+                guard let number = self.opens.begin(again: true) else { return }
                 Task {
                     for stream in old { try? await stream.stopCapture() }
-                    await self.open()
+                    await self.open(number)
+                    self.queue.sync { self.opens.end(number) }
                 }
             }
         }
     }
 
     func resumed() {
-        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { streams.isEmpty && !stopped }) else { return }
-        Task { await open() }
+        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { streams.isEmpty }) else { return }
+        openAgain(again: false)
     }
 
     func stop() {
@@ -156,6 +179,7 @@ final class Screens: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
         let old = queue.sync { () -> [SCStream] in
             stopped = true
+            opens.stop()
             defer { streams.removeAll() }
             return Array(streams.keys)
         }
@@ -344,6 +368,8 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     /// Bounded recovery: a stream that stops is opened again, at most 5 times in a row. A minute
     /// of sound after a restart counts as healthy, and the count starts again.
     private var restarts = 0, openedAt = 0.0
+    /// On `queue`: one stream, whatever asks for an open (`Opens`).
+    private var opens = Opens()
 
     init(recorder: Recorder) {
         r = recorder
@@ -352,10 +378,19 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
 
     func start() {
         guard CGPreflightScreenCaptureAccess() else { return log("speakers: off, no Screen Recording permission") }
-        Task { await open() }
+        openAgain(again: true)
     }
 
-    private func open() async {
+    /// A new open, unless one runs and `again` is false.
+    private func openAgain(again: Bool) {
+        guard let number = queue.sync(execute: { stopped ? nil : opens.begin(again: again) }) else { return }
+        Task {
+            await self.open(number)
+            self.queue.sync { self.opens.end(number) }
+        }
+    }
+
+    private func open(_ number: Int) async {
         let display: SCDisplay
         do {
             let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -382,16 +417,19 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         } catch {
             return log("speakers: off, \(error.localizedDescription)")
         }
+        // a stop or a newer open came during the start: this stream goes
         let keep = queue.sync { () -> Bool in
-            if !stopped { (self.stream, openedAt) = (stream, ProcessInfo.processInfo.systemUptime) }
-            return !stopped
+            guard !stopped, opens.keeps(number), self.stream == nil else { return false }
+            (self.stream, openedAt) = (stream, ProcessInfo.processInfo.systemUptime)
+            return true
         }
         guard keep else { return stopAll([stream]) }
         log("speaker-0: capturing the Mac's sound, 48000 Hz 2 ch")
     }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sample: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .audio, sample.isValid, sample.numSamples > 0 else { return }
+        // on `queue`: a stream that is not the one kept sends nothing
+        guard type == .audio, stream === self.stream, sample.isValid, sample.numSamples > 0 else { return }
         if restarts > 0, ProcessInfo.processInfo.systemUptime - openedAt >= 60 { restarts = 0 }
         r.sound(track.id, sample, hostTime: sample.presentationTimeStamp)
     }
@@ -404,20 +442,24 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
             guard self.restarts <= 5 else { return log("speaker-0: stopped (\(error.localizedDescription)); 5 restarts in a row, staying off") }
             log("speaker-0: stopped (\(error.localizedDescription)); opening again in 1 s (restart \(self.restarts) of 5)")
             self.queue.asyncAfter(deadline: .now() + 1) {
-                guard !self.stopped else { return }
-                Task { await self.open() }
+                guard !self.stopped, let number = self.opens.begin(again: true) else { return }
+                Task {
+                    await self.open(number)
+                    self.queue.sync { self.opens.end(number) }
+                }
             }
         }
     }
 
     func resumed() {
-        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { stream == nil && !stopped }) else { return }
-        Task { await open() }
+        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { stream == nil }) else { return }
+        openAgain(again: false)
     }
 
     func stop() {
         let old = queue.sync { () -> SCStream? in
             stopped = true
+            opens.stop()
             defer { stream = nil }
             return stream
         }

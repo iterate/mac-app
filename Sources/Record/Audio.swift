@@ -19,6 +19,8 @@ final class AudioTrack: Track {
     private let aac: AVAudioFormat
     private let bitrate: Int
     private var resampler: AVAudioConverter?
+    /// The capture's format, made once for each format description it sends (not for each buffer).
+    private var captured: (description: CMFormatDescription, format: AVAudioFormat)?
     private var encoder: AVAudioConverter?
     private var output: AVAudioCompressedBuffer?  // the encoder's packets, used again for each call
     private var origin: Int64 = 0  // sample of the first input to this encoder (the silence)
@@ -64,10 +66,12 @@ final class AudioTrack: Track {
         rewound = rewound || drift < -AudioTrack.maxStep
         if rewound {
             guard -drift < n else { return resynced.dropped += n }
-            (rewound, buffer) = (false, drift < 0 ? remap(buffer, Array(Int(-drift)..<n)) : buffer)
+            let skip = Int(max(0, -drift))
+            (rewound, buffer) = (false, skip > 0 ? remap(buffer, count: n - skip) { skip + $0 } : buffer)
             resynced.dropped += Int(max(0, -drift))
         } else if case let change = Resync.change(drift: drift, count: n), change != 0 {
-            buffer = remap(buffer, Resync.indices(count: n, change: change))
+            let out = max(0, n + change)
+            buffer = remap(buffer, count: out) { Resync.index($0, count: n, out: out) }
             if change > 0 { resynced.added += change } else { resynced.dropped -= change }
         }
         measure(buffer)
@@ -76,14 +80,15 @@ final class AudioTrack: Track {
         drain(end: false)
     }
 
-    /// A copy of `buffer` made of the input samples at `indices`.
-    private func remap(_ buffer: AVAudioPCMBuffer, _ indices: [Int]) -> AVAudioPCMBuffer {
-        guard let out = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(max(1, indices.count))),
+    /// A copy of `buffer` of `count` samples, sample `i` the input sample `index(i)`. (The encoder
+    /// holds the buffers it is given until it took them: each is a new one.)
+    private func remap(_ buffer: AVAudioPCMBuffer, count: Int, index: (Int) -> Int) -> AVAudioPCMBuffer {
+        guard let out = AVAudioPCMBuffer(pcmFormat: pcm, frameCapacity: AVAudioFrameCount(max(1, count))),
             let from = buffer.floatChannelData, let to = out.floatChannelData
         else { return buffer }
-        out.frameLength = AVAudioFrameCount(indices.count)
+        out.frameLength = AVAudioFrameCount(count)
         for c in 0..<Int(pcm.channelCount) {
-            for (i, j) in indices.enumerated() { to[c][i] = from[c][j] }
+            for i in 0..<count { to[c][i] = from[c][index(i)] }
         }
         return out
     }
@@ -91,7 +96,9 @@ final class AudioTrack: Track {
     /// The sample buffer as float PCM at 48 kHz with the track's channels.
     private func convert(_ sample: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard let description = sample.formatDescription else { return nil }
-        let format = AVAudioFormat(cmAudioFormatDescription: description)
+        if let captured, !CMFormatDescriptionEqual(captured.description, otherFormatDescription: description) { self.captured = nil }
+        let format = captured?.format ?? AVAudioFormat(cmAudioFormatDescription: description)
+        if captured == nil { captured = (description, format) }
         let frames = AVAudioFrameCount(sample.numSamples)
         guard frames > 0, let source = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { return nil }
         source.frameLength = frames

@@ -14,6 +14,17 @@ final class LiveTracksTests: XCTestCase {
         XCTAssertTrue(LiveTracks.nothing(asked: false, approved: false).hasPrefix("nothing to show"))
     }
 
+    /// Astra 3: the owner turns the camera off, or a screen to Ask, while they are asked about the
+    /// watch: the offer goes by the choices after the answer.
+    func testTheChoicesAreReadAgainAfterTheQuestion() {
+        let before: [(track: String, gate: UseGate)] = [("screen-1", .go), ("screen-2", .go), ("camera-0", .ask), ("mic-0", .ask)]
+        let now: [(track: String, gate: UseGate)] = [("screen-1", .go), ("screen-2", .ask), ("camera-0", .off), ("mic-0", .ask)]
+        XCTAssertEqual(LiveTracks.offered(asked: before, now: now, approved: true), ["screen-1", "mic-0"], "the camera is off now; screen 2 was not asked")
+        XCTAssertEqual(LiveTracks.offered(asked: before, now: now, approved: false), ["screen-1"])
+        // approved for N minutes meanwhile: the gate is go now
+        XCTAssertEqual(LiveTracks.offered(asked: before, now: [("camera-0", .go), ("mic-0", .notPermitted)], approved: false), ["camera-0"])
+    }
+
     func testSeveralCamerasGoByTheStrictest() {
         XCTAssertEqual(UseGate.strictest([.go, .ask]), .ask)
         XCTAssertEqual(UseGate.strictest([.go, .notPermitted, .ask]), .notPermitted)
@@ -31,7 +42,7 @@ final class LiveWatchersTests: XCTestCase {
     private func connect(_ w: inout LiveWatchers, _ id: String, at t: Date) {
         _ = w.want(from: id, who: "\(id)@example.com", now: t)
         _ = w.decided(id, tracks: ["screen-1", "mic-0"], reason: "")
-        _ = w.offerMade(id, sdp: "offer", mids: ["0": "screen-1", "1": "mic-0"])
+        _ = w.offerMade(id, sdp: "offer", mids: ["0": "screen-1", "1": "mic-0"], now: t)
         _ = w.answer(from: id, sdp: "answer")
         _ = w.connected(id, now: t)
     }
@@ -48,7 +59,7 @@ final class LiveWatchersTests: XCTestCase {
         XCTAssertEqual(w.deviceCandidate("a", c(2)), [])
         XCTAssertEqual(w.candidate(from: "a", c(9)), [])
         XCTAssertEqual(
-            w.offerMade("a", sdp: "offer", mids: ["0": "screen-1", "1": "camera-0"]),
+            w.offerMade("a", sdp: "offer", mids: ["0": "screen-1", "1": "camera-0"], now: t0),
             [.send(.offer(to: "a", sdp: "offer", tracks: ["0": "screen-1", "1": "camera-0"])), .send(.candidate(to: "a", c(1))), .send(.candidate(to: "a", c(2)))])
         XCTAssertEqual(w.deviceCandidate("a", c(3)), [.send(.candidate(to: "a", c(3)))])
         XCTAssertEqual(w.candidate(from: "a", c(10)), [])
@@ -115,6 +126,30 @@ final class LiveWatchersTests: XCTestCase {
                 .close(watcher: "b"), .send(.bye(to: "b", reason: "the device stopped")),
             ])
         XCTAssertEqual(w.tracks, [])
+    }
+
+    /// Astra 3: an offer with no answer, or an answer with no connection, ends after
+    /// `patience`, and its tracks stop being captured. A connected watch stays.
+    func testAnOfferThatNeverConnectsEndsAndLetsItsCaptureGo() {
+        var w = LiveWatchers()
+        connect(&w, "a", at: t0)
+        _ = w.want(from: "b", who: "bob", now: t0)
+        _ = w.decided("b", tracks: ["camera-0"], reason: "")
+        _ = w.offerMade("b", sdp: "offer", mids: ["0": "camera-0"], now: t0)
+        _ = w.want(from: "c", who: "cy", now: t0)  // still deciding: no track, no deadline
+        XCTAssertTrue(w.tracks.contains("camera-0"))
+        XCTAssertEqual(w.expire(now: t0.addingTimeInterval(LiveWatchers.patience - 1)), [])
+        XCTAssertEqual(
+            w.expire(now: t0.addingTimeInterval(LiveWatchers.patience)),
+            [.close(watcher: "b"), .send(.bye(to: "b", reason: "no connection 45 s after the offer"))])
+        XCTAssertFalse(w.tracks.contains("camera-0"), "the camera is no longer captured for it")
+        XCTAssertEqual(w.watches.map(\.id), ["a", "c"])
+        // answered but never connected: the same
+        _ = w.decided("c", tracks: ["mic-0"], reason: "")
+        _ = w.offerMade("c", sdp: "offer", mids: ["0": "mic-0"], now: t0.addingTimeInterval(50))
+        _ = w.answer(from: "c", sdp: "answer")
+        XCTAssertEqual(w.expire(now: t0.addingTimeInterval(95)).first, .close(watcher: "c"))
+        XCTAssertEqual(w.watches.map(\.id), ["a"])
     }
 
     func testSignalsOfAStrangerChangeNothing() {

@@ -49,9 +49,11 @@ public struct RecordOptions: Sendable {
 /// (the job `record` of `bridge/mind.mjs`) takes it from there.
 ///
 /// Who owns what: `lock` guards `sources`, `tracks` and `paused`. `slots` (a queue) owns the open
-/// slots and every write to the spool, in this order: the media file, its picture, the slot's
-/// `.open` file (its entries so far, so that a crash keeps what was written), and at the seal its
-/// rename to `.json`. A slot that is sealed takes nothing more, also after a restart (`sealed`).
+/// slots and the slots' files. A track writes its media file and its picture first, on its own
+/// queue (another track's start does not wait for them), and only while it is open in that slot;
+/// then, on `slots`, the slot's `.open` file (its entries so far, so that a crash keeps what was
+/// written), and at the seal its rename to `.json`. A slot that is sealed takes nothing more, not
+/// a late track's file either, also after a restart (`sealed`).
 public final class Recorder: @unchecked Sendable {
     public let options: RecordOptions
     let clock = HostClock.shared
@@ -100,16 +102,20 @@ public final class Recorder: @unchecked Sendable {
         ] {
             observers.append((center, center.addObserver(forName: name, object: nil, queue: nil) { [weak self] _ in self?.clockChanged(reason) }))
         }
+        // Once a second, with leeway, so that the system can join it with other wakeups: a slot's end
+        // is written with its own time whatever the tick's delay (a video track begins the next
+        // slot at the boundary, an audio track closes its file 2 s after it). A resume does not wait
+        // for the tick.
         let timer = DispatchSource.makeTimerSource(queue: tickQueue)
-        timer.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        timer.schedule(deadline: .now() + 1, repeating: 1, leeway: .milliseconds(250))
         var ticks = 0
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             for track in self.lock.withLock({ self.tracks }) { track.tick() }
             ticks += 1
-            if ticks % 10 == 0 { self.slots.async { self.sealStale() } }
+            self.sealStale()
             // A clock set that came with no notification, or a slow drift of the host clock.
-            if ticks % 100 == 0, abs(self.clock.drift()) > 250 { self.clockChanged("drift") }
+            if ticks % 10 == 0, abs(self.clock.drift()) > 250 { self.clockChanged("drift") }
         }
         timer.resume()
         self.timer = timer
@@ -252,30 +258,43 @@ public final class Recorder: @unchecked Sendable {
 
     /// The file of `track` for `slot` is whole: into the spool with its picture, then its entry.
     /// A file that cannot be written gets no entry.
+    /// Only while `track` is open in `slot`: after the slot was sealed without it (`sealStale`),
+    /// its file is dropped, and the slot's event stays as it was sealed.
     func finished(track: String, slot: Int64, parts: [Data], size: Int, entry: [String: Any], picture: Data?) {
-        slots.sync {
-            defer {
-                open[slot]?.remove(track)
-                if open[slot]?.isEmpty != false { seal(slot) }
-            }
-            let file = Slot.path(device: options.device, track: track, slot: slot, ext: "mp4")
-            guard write(file, parts) else { return }
-            var entry = entry
+        let isOpen = { self.open[slot]?.contains(track) == true }
+        guard slots.sync(execute: isOpen) else { return log("\(track): slot \(slot) was sealed without it; its file is dropped") }
+        let file = Slot.path(device: options.device, track: track, slot: slot, ext: "mp4")
+        let picturePath = Slot.path(device: options.device, track: track, slot: slot, ext: "jpg")
+        let wrote = write(file, parts)
+        var entry = entry
+        if wrote {
             entry["file"] = file
             entry["bytes"] = size
-            let picturePath = Slot.path(device: options.device, track: track, slot: slot, ext: "jpg")
             if let picture, write(picturePath, [picture]) { entry["picture"] = picturePath }
-            entries[slot, default: [:]][track] = entry
-            _ = write("slots/\(slot).open", [Slot.event(t: slot, tracks: entries[slot]!)])
+        }
+        slots.sync {
+            guard isOpen() else {
+                // sealed while the file was written: nothing names it
+                for path in [file, picturePath] { try? FileManager.default.removeItem(at: url(path)) }
+                return log("\(track): slot \(slot) was sealed while its file was written; the file is dropped")
+            }
+            open[slot]?.remove(track)
+            if wrote {
+                entries[slot, default: [:]][track] = entry
+                _ = write("slots/\(slot).open", [Slot.event(t: slot, tracks: entries[slot]!)])
+            }
+            if open[slot]?.isEmpty != false { seal(slot) }
         }
     }
 
     /// On `slots`: the slot's event file is final. Its `.open` file becomes `.json`.
     private func seal(_ slot: Int64) {
         open[slot] = nil
-        guard let tracks = entries.removeValue(forKey: slot) else { return }
+        // also with nothing written: no track begins this slot after its seal
         sealed = max(sealed, slot)
-        _ = write("sealed", [Data("\(sealed)".utf8)])
+        guard let tracks = entries.removeValue(forKey: slot) else { return }
+        // no sync: a restart also takes the newest slot's name in `slots/` (`recover`)
+        _ = write("sealed", [Data("\(sealed)".utf8)], sync: false)
         let from = url("slots/\(slot).open"), to = url("slots/\(slot).json")
         if rename(from.path, to.path) != 0 {
             log("record: slot \(slot): the event file could not be renamed (\(errno)); writing it again")
@@ -283,11 +302,11 @@ public final class Recorder: @unchecked Sendable {
         }
     }
 
-    /// On `slots`, about once a second: a slot that ended more than 10 s ago with a track still
+    /// About once a second: a slot that ended more than 10 s ago with a track still
     /// "open" (a track that began it and never wrote it) is sealed with what it has.
-    private func sealStale() {
-        let limit = Int64(nowMs()) - Slot.ms - 10_000
-        for slot in open.keys.sorted() where slot < limit { seal(slot) }
+    func sealStale(now: Double = nowMs()) {
+        let limit = Int64(now) - Slot.ms - 10_000
+        slots.sync { for slot in open.keys.sorted() where slot < limit { seal(slot) } }
     }
 
     /// On `slots`, at start: what an earlier run left. Its open slots are sealed as they are (its
@@ -314,7 +333,7 @@ public final class Recorder: @unchecked Sendable {
     /// Writes a file whole: its parts in order to `<name>.part`, then a rename. False when it could
     /// not: then nothing may refer to it. It tries twice, because the uploader removes the folders
     /// it empties, and one can go between our making it and our writing into it.
-    func write(_ path: String, _ parts: [Data]) -> Bool {
+    func write(_ path: String, _ parts: [Data], sync: Bool = true) -> Bool {
         let file = url(path), part = file.appendingPathExtension("part")
         func attempt() throws {
             try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -322,7 +341,7 @@ public final class Recorder: @unchecked Sendable {
             let handle = try FileHandle(forWritingTo: part)
             defer { try? handle.close() }
             for data in parts { try handle.write(contentsOf: data) }
-            try handle.synchronize()
+            if sync { try handle.synchronize() }
             guard rename(part.path, file.path) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         }
         do {

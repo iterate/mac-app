@@ -135,4 +135,66 @@ final class MindSessionTests: XCTestCase {
         XCTAssertNil(grants.isApproved("commands", now: at))
         XCTAssertNotNil(grants.isApproved("speaker", now: at))
     }
+
+    // MARK: - Work of one session (Astra 1 to 4)
+
+    func testWorkLandsOnlyInTheSessionItStartedIn() {
+        var work = SessionWork()
+        XCTAssertFalse(work.lands(work.stamp), "with no session nothing lands")
+        work.use(generation: 1)
+        let read = work.stamp
+        XCTAssertTrue(work.lands(read))
+        // a read of the window, held open while the person switches to another mind
+        work.use(generation: 2)
+        XCTAssertFalse(work.lands(read), "the old mind's read lands in neither mind")
+        XCTAssertTrue(work.lands(work.stamp))
+        // and back to the first mind: a new session, the old read still lands nowhere
+        work.use(generation: 1)
+        XCTAssertFalse(work.lands(read))
+        work.use(generation: nil)
+        XCTAssertFalse(work.lands(work.stamp))
+    }
+
+    func testTheEndOfAFeaturesWorkKeepsTheSessionAndStopsWhatRuns() {
+        var work = SessionWork()
+        work.use(generation: 1)
+        let read = work.stamp
+        // Window text turned off: the queued read must not publish
+        work.end()
+        XCTAssertFalse(work.lands(read))
+        XCTAssertEqual(work.stamp.generation, 1)
+        XCTAssertTrue(work.lands(work.stamp), "turned on again: new reads land")
+    }
+
+    func testTheOutboxDeliversInOrderAndDropsAnOldSessionsItems() {
+        var work = SessionWork()
+        work.use(generation: 1)
+        var box = SessionOutbox<String>()
+        XCTAssertTrue(box.put("bye", at: work.stamp), "the first item asks for a drain")
+        XCTAssertFalse(box.put("ended", at: work.stamp), "one drain takes the rest")
+        // the switch drains first: the old mind gets its bye and its watch's end, once each
+        XCTAssertEqual(box.take(for: work), ["bye", "ended"])
+        XCTAssertEqual(box.take(for: work), [])
+        let old = work.stamp
+        work.use(generation: 2)
+        // a late signal of the old session, made on the peer's queue
+        _ = box.put("late candidate", at: old)
+        _ = box.put("offer", at: work.stamp)
+        XCTAssertEqual(box.take(for: work), ["offer"], "the next mind gets only its own")
+        XCTAssertTrue(box.isEmpty)
+    }
+
+    func testAQueuedQuestionOfAnOldRoundNeitherAsksNorUsesTheNewGrant() {
+        var grants = ApprovalGrants()
+        grants.use(generation: 1)
+        // a second caller queues behind the first question in the first mind's round
+        let queued = grants.round
+        grants.use(generation: 2)
+        grants.approve(["commands"], round: grants.round, until: at.addingTimeInterval(1800))
+        XCTAssertNotNil(grants.isApproved("commands", now: at), "the new mind approved commands")
+        XCTAssertFalse(grants.holds(queued), "the queued caller of the old mind ends with no use")
+        XCTAssertTrue(grants.holds(grants.round))
+        grants.refuse()
+        XCTAssertFalse(grants.holds(queued))
+    }
 }

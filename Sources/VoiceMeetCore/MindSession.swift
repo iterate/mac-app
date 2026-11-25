@@ -78,25 +78,85 @@ public struct MindSessions: Equatable, Sendable {
     }
 }
 
+/// WORK THAT STARTED IN ONE SESSION LANDS IN THAT SESSION ONLY. A read of the window, a live
+/// signal, a question to the person, a listing of the spool: each takes the stamp when it starts and
+/// is let land (published, sent, applied) only while the stamp is still the current one. Another
+/// session, or none, makes every older stamp stale (`use`), and so does the end of a feature's work
+/// in a session: a setting turned off, a refusal of this Mac's key (`end`). With no session nothing
+/// lands. The one rule for every late answer: a check where the work lands, not a cancel at each
+/// place that starts it.
+public struct SessionWork: Equatable, Sendable {
+    public struct Stamp: Hashable, Sendable {
+        /// The session's generation; nil while there is none.
+        public let generation: Int?
+        let turn: Int
+    }
+
+    public private(set) var stamp = Stamp(generation: nil, turn: 0)
+
+    public init() {}
+
+    /// Another session (its generation), or none: the work of every earlier stamp lands nowhere.
+    public mutating func use(generation: Int?) {
+        stamp = Stamp(generation: generation, turn: stamp.turn + 1)
+    }
+
+    /// The work of this session so far ends; the session stays.
+    public mutating func end() {
+        stamp = Stamp(generation: stamp.generation, turn: stamp.turn + 1)
+    }
+
+    /// Whether work that started at `started` may land now.
+    public func lands(_ started: Stamp) -> Bool {
+        started.generation != nil && started == stamp
+    }
+}
+
+/// What a session's work sends from other queues, in order, to the main queue: each item with the
+/// stamp of the moment it was made. `take` gives the items that still land, in their order, and
+/// drops those of an older stamp. `put` is true when the box was empty: one drain is enough for
+/// everything put until it runs.
+public struct SessionOutbox<Item> {
+    private var items: [(stamp: SessionWork.Stamp, item: Item)] = []
+
+    public init() {}
+
+    public var isEmpty: Bool { items.isEmpty }
+
+    public mutating func put(_ item: Item, at stamp: SessionWork.Stamp) -> Bool {
+        items.append((stamp, item))
+        return items.count == 1
+    }
+
+    public mutating func take(for work: SessionWork) -> [Item] {
+        defer { items = [] }
+        return items.filter { work.lands($0.stamp) }.map(\.item)
+    }
+}
+
 /// The person's approvals "for N minutes" (`approval.minutes`), each for one thing in one round: one session, until
 /// the mind refuses this Mac's key. A new session or a refusal ends them all, and an approval
 /// given in an older round is not kept.
 public struct ApprovalGrants: Equatable, Sendable {
-    /// A session (none while there is none), and the refusals of the lend so far.
-    public struct Round: Equatable, Sendable {
-        public let generation: Int?
-        public let refusals: Int
-    }
+    /// A session (none while there is none), until the mind refuses this Mac's key: a stamp of
+    /// `SessionWork`, which a refusal ends.
+    public typealias Round = SessionWork.Stamp
 
     private struct Key: Hashable, Sendable {
         let generation: Int
         let thing: String
     }
 
-    public private(set) var round = Round(generation: nil, refusals: 0)
+    private var work = SessionWork()
     private var until: [Key: Date] = [:]
 
     public init() {}
+
+    public var round: Round { work.stamp }
+
+    /// Whether a use that began in `round` may still go on: no session and no refusal came since.
+    /// (A use with no session is asked and goes on once; only `approve` needs a session.)
+    public func holds(_ round: Round) -> Bool { round == work.stamp }
 
     /// Until when `thing` is approved in this round; nil when it is not.
     public func isApproved(_ thing: String, now: Date) -> Date? {
@@ -107,7 +167,7 @@ public struct ApprovalGrants: Equatable, Sendable {
     /// False, and nothing kept, when `round` is not this one.
     @discardableResult
     public mutating func approve(_ things: [String], round: Round, until date: Date) -> Bool {
-        guard round == self.round, let generation = round.generation else { return false }
+        guard work.lands(round), let generation = round.generation else { return false }
         for thing in things { until[Key(generation: generation, thing: thing)] = date }
         return true
     }
@@ -118,13 +178,13 @@ public struct ApprovalGrants: Equatable, Sendable {
 
     /// Another session, or none: every approval ends.
     public mutating func use(generation: Int?) {
-        round = Round(generation: generation, refusals: round.refusals)
+        work.use(generation: generation)
         until = [:]
     }
 
     /// The mind refused this Mac's key: every approval ends, and the session stays.
     public mutating func refuse() {
-        round = Round(generation: round.generation, refusals: round.refusals + 1)
+        work.end()
         until = [:]
     }
 }
