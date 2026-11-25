@@ -69,7 +69,7 @@ enum VoiceMeetMacApp {
         if let flag = CommandLine.arguments.firstIndex(of: "--render-log"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(ActivityWindowView.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
         }
-        // The menu-bar mark in each state of the lend: `--render-icons <folder>`.
+        // The menu-bar mark and the mind's face in each state: `--render-icons <folder>`.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-icons"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(IterateIcon.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
         }

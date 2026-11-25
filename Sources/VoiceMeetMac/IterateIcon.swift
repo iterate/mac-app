@@ -58,8 +58,11 @@ enum IterateIcon {
 
     @MainActor private static var testMarks: [String: NSImage] = [:]
 
-    private static func makeTestImage(_ mark: MenuBarMark) -> NSImage {
-        let base = image(mark)
+    private static func makeTestImage(_ mark: MenuBarMark) -> NSImage { testImage(of: image(mark)) }
+
+    /// A test copy's image of `base`, a mark or a face (`FaceIcon`): a template image in grey, a
+    /// face as it is, then the orange "test".
+    static func testImage(of base: NSImage) -> NSImage {
         let words = NSAttributedString(string: "test", attributes: [.font: NSFont.systemFont(ofSize: 9, weight: .heavy), .foregroundColor: NSColor.systemOrange])
         let size = NSSize(width: base.size.width + 2 + ceil(words.size().width), height: base.size.height)
         return NSImage(size: size, flipped: false) { _ in
@@ -158,7 +161,8 @@ enum IterateIcon {
     /// its size, one PNG each in `folder` (`--render-icons <folder>`), for a look with no Mac bar.
     /// And `marks-light.png`, `marks-dark.png`: each ink (a row: plain, dimmed, slashed, red,
     /// orange, green) with each record's dot (a column: none, recording, paused).
-    static func render(to folder: URL) -> Bool {
+    /// With them, the mind's face in every state (`FaceIcon.render`).
+    @MainActor static func render(to folder: URL) -> Bool {
         let zoom: CGFloat = 8
         let cell = NSSize(width: 40 * zoom, height: 24 * zoom)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -199,7 +203,15 @@ enum IterateIcon {
                 })
             else { return false }
         }
-        return true
+        // the face of the drawings' first mind (`Rendering.fixFaces`)
+        Rendering.fixFaces()
+        guard let icon = MindFaces.shared.face(of: Rendering.minds[0].mind).icon else { return false }
+        return FaceIcon.render(
+            to: folder, icon: icon,
+            bars: [
+                ("light", NSAppearance(named: .aqua)!, NSColor(white: 0.93, alpha: 1), .black),
+                ("dark", NSAppearance(named: .darkAqua)!, NSColor(white: 0.16, alpha: 1), .white),
+            ])
     }
 
     /// One mark, centred in `cell`, `zoom` times its size: a template image in the bar's `ink`, a
@@ -208,24 +220,29 @@ enum IterateIcon {
         let image = image(mark)
         let size = NSSize(width: image.size.width * zoom, height: image.size.height * zoom)
         let place = NSRect(x: cell.midX - size.width / 2, y: cell.midY - size.height / 2, width: size.width, height: size.height)
-        let tinted = NSImage(size: size, flipped: false) { rect in
-            image.draw(in: rect)
-            if image.isTemplate {
-                ink.setFill()
-                rect.fill(using: .sourceAtop)
-            }
-            return true
-        }
-        tinted.draw(in: place)
+        tinted(image, ink: ink).draw(in: place)
         // the image's y runs down; the bitmap's runs up
         drawDot(mark.dot, at: NSPoint(x: place.minX + dotCenter.x * zoom, y: place.maxY - dotCenter.y * zoom), scale: zoom)
     }
 
-    private static func write(size: NSSize, to file: URL, draw: () -> Void) -> Bool {
+    /// `image` as the bar draws it: a template image in the bar's `ink`, a coloured one as it is.
+    static func tinted(_ image: NSImage, ink: NSColor) -> NSImage {
+        guard image.isTemplate else { return image }
+        return NSImage(size: image.size, flipped: false) { rect in
+            image.draw(in: rect)
+            ink.setFill()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+    }
+
+    /// A PNG of `size` points, `scale` pixels to a point, drawn by `draw` in points.
+    static func write(size: NSSize, scale: CGFloat = 1, to file: URL, draw: () -> Void) -> Bool {
         guard let bitmap = NSBitmapImageRep(
-            bitmapDataPlanes: nil, pixelsWide: Int(size.width), pixelsHigh: Int(size.height), bitsPerSample: 8,
+            bitmapDataPlanes: nil, pixelsWide: Int(size.width * scale), pixelsHigh: Int(size.height * scale), bitsPerSample: 8,
             samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
         else { return false }
+        bitmap.size = size
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
         draw()
