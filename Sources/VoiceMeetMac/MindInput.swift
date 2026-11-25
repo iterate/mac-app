@@ -415,7 +415,7 @@ final class MindInput: SpeechClient {
                 panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.maxY - visible.height * 0.3 - panel.frame.height))
             }
         }
-        if takingKeys { panel.makeKeyAndOrderFront(nil) } else { panel.orderFrontRegardless() }
+        OffScreen.orderFront(panel) { if takingKeys { panel.makeKeyAndOrderFront(nil) } else { panel.orderFrontRegardless() } }
         if appears { appear(panel) }
         guard takingKeys else { return }
         focus()
@@ -447,7 +447,7 @@ final class MindInput: SpeechClient {
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0.1
             context.timingFunction = CAMediaTimingFunction(name: .easeOut)
-            panel.animator().alphaValue = 1
+            panel.animator().alphaValue = OffScreen.shown
         }
     }
 

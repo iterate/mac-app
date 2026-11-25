@@ -892,7 +892,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         overlay.ignoresMouseEvents = true
         let ink = InkView(frame: NSRect(origin: .zero, size: screen.frame.size))
         overlay.contentView = ink
-        overlay.orderFrontRegardless()
+        OffScreen.orderFront(overlay) { overlay.orderFrontRegardless() }
         self.overlay = overlay
         self.ink = ink
     }
@@ -925,7 +925,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             pillPanel = panel
         }
         panel.setFrame(frame, display: true)
-        panel.orderFrontRegardless()
+        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
         guard let seconds else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
             // a newer line stays

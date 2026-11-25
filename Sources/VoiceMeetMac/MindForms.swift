@@ -155,8 +155,8 @@ enum FormWindow {
         window.level = .floating
         window.center()
         current = window
-        NSApp.activate(ignoringOtherApps: true)
-        window.makeKeyAndOrderFront(nil)
+        OffScreen.activate()
+        OffScreen.orderFront(window) { window.makeKeyAndOrderFront(nil) }
     }
 
     static func close() {

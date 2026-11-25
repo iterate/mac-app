@@ -409,7 +409,7 @@ final class Dictation: SpeechClient {
         if let visible = screen?.visibleFrame {
             panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 90))
         }
-        panel.orderFrontRegardless()
+        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
     }
 
     private func hidePill(after seconds: Double) {

@@ -1004,8 +1004,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
             window.center()
             self.window = window
         }
-        NSApp.activate(ignoringOtherApps: true)
-        window?.makeKeyAndOrderFront(nil)
+        OffScreen.activate()
+        if let window { OffScreen.orderFront(window) { window.makeKeyAndOrderFront(nil) } }
     }
 
     func close() {

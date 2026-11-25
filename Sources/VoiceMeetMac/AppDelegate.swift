@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The panel under the mark (`MenuBarPanel`).
     private let panelWindow = MenuBarPanel()
     private var statusItem: NSStatusItem?
+    /// The mark: the status item's button, or a test copy's own (`OffScreen.markButton`).
+    private var markButton: NSStatusBarButton?
     private var recordDot: RecordDotView?
     /// What the mark shows now: it is written again only when it changes.
     private var shownMark: MenuBarMark?
@@ -68,14 +70,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         if environment.controlSocket != nil { ControlSocket.makeAccessibilityElements() }
 
-        let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.target = self
-        statusItem.button?.action = #selector(togglePanel)
+        // a test copy's mark is in a window of its own, off the menu bar (`OffScreen`)
+        if OffScreen.isOn {
+            markButton = OffScreen.markButton()
+            // a plain button is its own accessibility element
+            markButton?.setAccessibilityIdentifier("statusItem")
+        } else {
+            let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+            self.statusItem = statusItem
+            markButton = statusItem.button
+        }
+        markButton?.target = self
+        markButton?.action = #selector(togglePanel)
         // the button's cell is its accessibility element
-        statusItem.button?.cell?.setAccessibilityIdentifier("statusItem")
-        self.statusItem = statusItem
+        markButton?.cell?.setAccessibilityIdentifier("statusItem")
         let markSize = environment.hasOwnHome ? IterateIcon.testImage(MenuBarMark(ink: .live, dot: .none)).size : IterateIcon.plain.size
-        if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: markSize) }
+        if let markButton { recordDot = RecordDotView.attach(to: markButton, imageSize: markSize) }
         // after the mark: the first lines look for the cameras, which can take a moment
         logRunStart()
 
@@ -711,7 +721,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// red dot at its lower right, filled while it records, a ring while it is paused, and does not
     /// change the ink (`MenuBarMark`).
     private func updateStatusButton() {
-        guard let button = statusItem?.button else { return }
+        guard let button = markButton else { return }
         let use = MenuBarMark.inUse(lastUse: model.lastUse?.at, now: Date())
         // one look again, at the end of the red: a newer use moves it, and none is left behind
         useEnds?.cancel()
@@ -746,7 +756,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @objc private func togglePanel() {
-        guard let button = statusItem?.button else { return }
+        guard let button = markButton else { return }
         if panelWindow.isShown {
             panelWindow.performClose(nil)
         } else {
@@ -754,7 +764,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             lend.panelOpened()
             stateDidChange()
             refreshPanel()
-            NSApp.activate(ignoringOtherApps: true)
+            OffScreen.activate()
             panelWindow.show(under: button)
         }
     }
@@ -883,7 +893,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "Continue")
         alert.addButton(withTitle: "Not Now")
-        NSApp.activate(ignoringOtherApps: true)
+        OffScreen.activate()
         guard alert.runModal() == .alertFirstButtonReturn else {
             return log.info("the guide for \(permission.title): the person chose Not Now")
         }

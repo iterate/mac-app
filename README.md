@@ -913,10 +913,25 @@ the app keeps in that folder: config.json, the endpoint's socket, the log (`logs
 captures, inputs, word lists and faces, and the choices (`defaults.plist`). Such a copy registers no
 global key, touches no login item, never updates itself, and lends only with `--lend`. It opens no
 microphone, and dictation writes its text nowhere (no clipboard, no ⌘V), unless an audio fixture is
-set. Its panel closes by its mark alone. Its mark in the menu bar is grey with an orange "test"
-beside it, and its tooltip says `iterate test copy: <home>`, so it is never taken for the installed
-app. `Sources/VoiceMeetMac/AppEnvironment.swift` resolves all of
-it at launch.
+set. Its panel closes by its mark alone. Its mark is grey with an orange "test" beside it, and its
+label says `iterate test copy: <home>`, so it is never taken for the installed app.
+`Sources/VoiceMeetMac/AppEnvironment.swift` resolves all of it at launch.
+
+**Off the screen.** A test copy shows nothing to the person at the Mac
+(`Sources/VoiceMeetMac/OffScreen.swift`). Each window, panel, pill and banner it orders in is
+transparent (alpha 0) and lets every click through, at its usual frame, with its views laid out and
+drawn; none becomes key, so the app in front keeps the keyboard, and the copy never activates
+itself. It has no status item: its mark is the same button in a transparent window of its own.
+The control socket reads, presses and types into those windows as before, and `ui.key` gives its
+keys to the front window when none is key. The capture's ink is transparent too, so a test copy's
+capture has none. `--on-screen` shows a test copy as the installed app shows itself, for a person
+who wants to watch it. The drawings (`--render-*`, `snapshots.mjs`, `design-diff.mjs`) order no
+window in: each view is laid out in a window that is never on the screen and drawn with
+`cacheDisplay`. `node harness/run.mjs` checks it: while a scenario runs, it reads the window
+server's list every 200 ms (`harness/on-screen.js`, `CGWindowListCopyWindowInfo` through `osascript
+-l JavaScript`) and fails the scenario when a window of a copy is on the screen with an alpha above
+0 and a frame that meets a display, when a copy is the active app, or when `ui.state` has a window
+of it that is key. `node harness/run.mjs boot --on-screen` shows that the check fails without it.
 
 **The control socket**, `<home>/control.sock`, is open in a copy with a home of its own, and only
 there: the installed app has none, and always asks with its alert and Touch ID. One line of JSON a
@@ -1018,9 +1033,9 @@ mind, Esc closes it, ⌘W closes the Add a Mind form through the main menu), `lo
 5 minutes; limits on CPU, wake-ups and counters, and the figures in the result's `perf`) and
 `panel-open` (5 s with the panel open and a countdown: the panel's body is drawn at most once,
 its countdown row each second). The fake iterate CLI answers `provide` with the state in
-`fake-iterate/provide.json`, live by default. The approval scenario presses Return and Esc in the
-question's panel only while it is key (not while the screen is locked); else its result says
-`skipped`. Then the local ones, which need the speech models in
+`fake-iterate/provide.json`, live by default. The approval scenario presses Return and Esc through `ui.key`,
+which gives them to the question's panel (never key in a test copy); when its shortcuts do not take
+them, its result says `skipped`. Then the local ones, which need the speech models in
 `~/Library/Application Support/FluidAudio`: `dictation-fixture` (a sentence from `say -o` is
 written with the word list's Herdr, Beelink and Doppler; its `perf` has the seconds from the start to the first word and the model's load. Core ML
 compiles the model for the Neural Engine once for each build of the executable, in
