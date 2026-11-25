@@ -27,6 +27,7 @@ import VoiceMeetCore
 /// - `perf.reset {watchMain?}`: the counters and the main queue's longest delay start again from
 ///   zero; `watchMain` starts the watch of the main queue (it wakes the app 20 times a second, so
 ///   it is off until asked, and false stops it). `ui.state`'s `perf` has the figures (`Perf`).
+/// - `perf.threads`: each thread of the app, its name and its time so far (`Perf.threads`).
 @MainActor
 final class ControlSocket {
     var state: () -> [String: Any] = { [:] }
@@ -100,6 +101,8 @@ final class ControlSocket {
             }
             mainWatch.reset()
             return ["figures": Perf.figures().dictionary]
+        case "perf.threads":
+            return ["threads": Perf.threads().map { ["id": $0.id, "name": $0.name, "cpuMs": $0.cpuMs] }]
         case "ui.key":
             guard let name = parameters["key"] as? String, let code = Self.keyCodes[name.lowercased()] else {
                 throw EndpointRefusal("ui.key needs key: one of \(Self.keyCodes.keys.sorted().joined(separator: ", ")).")

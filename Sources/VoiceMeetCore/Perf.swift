@@ -62,6 +62,34 @@ public enum Perf {
         return figures
     }
 
+    /// A thread of this process: its system-wide id, its name (empty when it has none) and its
+    /// user and system time so far, in milliseconds.
+    public struct Thread: Equatable, Sendable {
+        public var id: UInt64
+        public var name: String
+        public var cpuMs: Double
+    }
+
+    /// Every thread of this process now: which one works when the process's figures say that it
+    /// works. Empty where the system gives none.
+    public static func threads() -> [Thread] {
+        var found: [Thread] = []
+        #if canImport(Darwin)
+        let pid = getpid()
+        var ids = [UInt64](repeating: 0, count: 512)
+        let bytes = proc_pidinfo(pid, PROC_PIDLISTTHREADS, 0, &ids, Int32(ids.count * MemoryLayout<UInt64>.stride))
+        guard bytes > 0 else { return [] }
+        for handle in ids.prefix(Int(bytes) / MemoryLayout<UInt64>.stride) {
+            var info = proc_threadinfo()
+            guard proc_pidinfo(pid, PROC_PIDTHREADINFO, handle, &info, Int32(MemoryLayout<proc_threadinfo>.stride)) > 0 else { continue }
+            let name = withUnsafeBytes(of: info.pth_name) { String(decoding: $0.prefix { $0 != 0 }, as: UTF8.self) }
+            // the times are in nanoseconds
+            found.append(Thread(id: handle, name: name, cpuMs: Double(info.pth_user_time + info.pth_system_time) / 1_000_000))
+        }
+        #endif
+        return found
+    }
+
     // MARK: - Counters
 
     /// Whether `count` counts: a test copy's (the control socket is open), and a test's.

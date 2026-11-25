@@ -241,12 +241,21 @@ async function launchSeries(app, minds, args) {
   const lines = [];
   try {
     let last = (await run.state()).perf;
+    let threads = new Map();
     while (Date.now() - t0 < 30000) {
       await sleep(1000);
       const state = await run.state();
       const d = perfDelta(last, state.perf);
       last = state.perf;
-      lines.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${state.lend.phase} ${d.cpuMs}ms ${d.interruptWakeups}w ${d.idleWakeups}i th${state.perf.threads} fd${state.perf.openFiles} ${JSON.stringify(Object.fromEntries(Object.entries(d.counters).filter(([, n]) => n)))}`);
+      // each thread that worked in the second, by its name (or its id), and its milliseconds
+      const now = new Map(((await run.control("perf.threads")).threads ?? []).map((t) => [t.id, t]));
+      const worked = [...now.values()]
+        .map((t) => [t.name || `#${t.id}`, t.cpuMs - (threads.get(t.id)?.cpuMs ?? 0), !threads.has(t.id)])
+        .filter(([, ms, isNew]) => ms >= 0.5 || isNew)
+        .map(([name, ms, isNew]) => `${isNew ? "+" : ""}${name}:${ms.toFixed(1)}`);
+      const gone = [...threads.values()].filter((t) => !now.has(t.id)).map((t) => `-${t.name || `#${t.id}`}`);
+      threads = now;
+      lines.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${state.lend.phase} ${d.cpuMs}ms ${d.interruptWakeups}w ${d.idleWakeups}i th${state.perf.threads} fd${state.perf.openFiles} ${JSON.stringify(Object.fromEntries(Object.entries(d.counters).filter(([, n]) => n)))} ${[...worked, ...gone].join(" ")}`);
     }
   } finally {
     await run.quit();
