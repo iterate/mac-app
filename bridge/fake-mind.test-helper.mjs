@@ -12,6 +12,7 @@
 // `{ bytes, contentType, via }`, and `stored(key, file)` hears it. `order` has "file <key>" and
 // "event <type>" in the order they came. Its config repo is `repo`: `{ tip, files, reads }`.
 // `itx.fetch` goes to `mind.fetch(request)` (by default the vault's no: no stored secret).
+// `mind.facets[name](path, connection)` answers a facet of a context, when a test sets one.
 import { createServer } from "node:http";
 
 export const SIGN_IN_ENDED = "1008 the sign-in for this session ended: authenticate again";
@@ -170,7 +171,10 @@ export function fakeMind({ stored = () => {} } = {}) {
           return { [Symbol.dispose]: () => (subscription.alive = false) };
         },
         facets: {
-          get: () => ({ iceServers: async () => ({ iceServers: [{ urls: "stun:test" }], ttlSeconds: 3600 }) }),
+          // `mind.facets[name]`, when a test gives one (a call's `join`, `signal`, `leave`), called with
+          // the path and the connection; else the record's ICE servers
+          get: (name) =>
+            mind.facets?.[name]?.(path, connection) ?? { iceServers: async () => ({ iceServers: [{ urls: "stun:test" }], ttlSeconds: 3600 }) },
         },
       }),
     };

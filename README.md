@@ -238,6 +238,8 @@ await mac.banner.show({
 }); // { pressed: "Join" }, or { pressed: null, why: "no answer" | "dismissed" | "replaced" | "off", words }
 await mac.call.ring({ agent: "/agents/lunch", from: "Lunch planner", reason: "Friday's table" });
 // { accepted: true }, or { accepted: false, why: "declined" | "no answer" | "replaced" | "off", words }
+await mac.call.publish({ context: "/agents/meet/x", source: "screen:0" }); // or "camera": into that call
+await mac.call.unpublish({ context: "/agents/meet/x" }); // or { publication }; call.state() lists them
 await mac.record.state(); // { sources: { screens, cameras, mics, speakers }, windowText, recording, paused, line, tracks, … }
 await mac.record.set({ screens: true, mics: false }); // the new state; "on" is a use, as a snapshot is
 await mac.http({ path: "/state.json" }); // { status, headers, body }: this Mac's own pages (below)
@@ -526,6 +528,59 @@ its connection as you, subscribes to `device/live-signal`, appends the Mac's sig
 asks the facet `record` for the ICE servers (STUN alone when it has none). It subscribes again on
 each new connection, and once a minute it checks that its subscription still hears (an ephemeral
 `device/live-ping` that only it hears); watches that run go on through a reconnect, peer to peer.
+
+## A call's camera or screen from this Mac
+
+A member in a call on meet.iterate.com (any agent's call that uses the kit's call) opens **Devices**.
+When this Mac is lent to that mind now, and lent by that member, the Camera list also has "Your Mac
+“jane.mac” (iterate app): <camera>", and a Screen list shows each display of this Mac that is not
+Off. Without such a lend the picker is as it was. A choice asks the Mac:
+
+```js
+await mac.call.publish({ context: "/agents/meet/x", source: "screen:0", as: "<the page's row>" });
+// { publications: [{ publication, context, source, since, connected: true, who }] } once the SFU has it
+await mac.call.unpublish({ publication }); // or { context, source? }: always allowed
+await mac.call.state(); // { publications }
+```
+
+- **Your choices decide.** A publication is a use of that display or the camera, as a snapshot
+  is: Off refuses with your words, Ask asks once (Touch ID) for the whole publication, Shared
+  sends. Turning the thing Off later ends it. Activity shows "Showing <thing> in a call" as a
+  running act until it ends.
+- **Everyone sees a tile.** The Mac joins the call as a participant of its own, as you (the
+  mind's process signs in as you), so the call shows a tile "Jonas's Mac" beside your own. Pages
+  without this app see it as any other tile; nothing changes for them.
+- **One capture.** The record's capture feeds the call (`CaptureSink`), as it feeds live: a
+  source that only the call wants starts with it. A screen goes at its own aspect within 1920×1200,
+  at most 15 frames a second; the camera goes as three layers (full, half, quarter) so that each
+  page takes what it can show. H.264 in hardware (VideoToolbox).
+- **It ends** with `call.unpublish`, when the page that asked leaves the call (its row is un-set),
+  when you choose a browser device again, when the connection to the mind ends, when the Mac is
+  lent to another mind, or when the app quits. At most 4 at once; one screen and one camera for
+  each call (a second screen for the same call replaces the first).
+
+How it is built: the job `call` of the mind's process (`bridge/call.mjs`) calls the call facet's
+person methods (`join`, `signal`, `leave`) as a member's page does. The facet knows a page by its
+subscription row on the agent's context, so each publication subscribes a row of its own,
+`mac-call-<device>-<id>`; the kit reads that prefix and names the tile "<name>'s Mac". The app's
+own peer connection (`CallSender` in `Sources/Live`, beside `LivePeer`) makes the offer; the
+facet passes it to Cloudflare's SFU and gives back the answer and the TURN servers (fresh ones at
+three quarters of their life). The rules (sources, the gate's words, the list, the size, no TCP
+candidate) are `CallRule.swift` in `VoiceMeetCore`, tested on their own. `DeviceCall` holds the
+steps of each publication; `AppModel.publishToCall` is the gate. The picker is in
+`@iterate-com/ui` (`call-rules.ts`: `liveMacs`, `macSources`; `call-engine.ts`: `chooseMac`).
+
+Measured with `call-run` (below) against iterate.com, a synthetic 1280×720 screen, sender and
+receiver on this Mac through the SFU: the first decoded frame on the other page came 4.4 s, 6.9 s
+and 4.4 s after the choice (the SFU's answer at 1.2–2.7 s, the sender connected at 1.7–3.4 s; the
+6.9 s run waited for a key frame); then 15 frames a second, the picture 130–350 ms behind (p50).
+A browser page subscribes when the call's state reaches it, so add that step; Touch ID under Ask is
+not in these numbers.
+
+What v0 does not do: the Mac's picture is not in your own tile (that needs the facet to take a
+publication from a second peer connection for one page); a publication does not come back after
+the mind's process connects again; no sound from the Mac; a guest has no Mac to choose; and the
+SFU's data channels (remote control, `control.input`) are not used yet.
 
 ## Control: somebody drives this Mac
 
@@ -1170,6 +1225,7 @@ job is on it:
 | --------- | ---------------------------------------------------------------------------- | ------------------ | --------------- |
 | `events`  | the events of `/devices/<name>`, the acts and presence read back, and every event while the Activity window is open | `DeviceEvents` | `events.mjs` |
 | `live`    | the signalling of live                                                       | `DeviceLive`       | `live.mjs`      |
+| `call`    | a publication into a call: its row, the call facet's join, signal and leave  | `DeviceCall`       | `call.mjs`      |
 | `record`  | the record's spool into the mind                                             | `DeviceRecord`     | `record.mjs`    |
 | `capture` | one capture into the mind, by its id                                         | `Capture`          | `capture.mjs`   |
 | `input`   | one input into the mind, by its id                                           | `MindInput`        | `input.mjs`     |
@@ -1235,6 +1291,13 @@ until Ctrl-D ends its stdin.
 test picture and beep (no switch is asked); `--record <spool>` records them too; `--screens
 --cameras --mics` are the real sources (through the app's `run` method), and `--loopback-only
 --no-stun` keeps the media on this Mac for a watcher here. stderr has a line of statistics a second.
+
+`swift build --product call-run` measures a call from a terminal: `.build/debug/call-run --context
+/agents/meet/<call> --node $(which node) --bridge bridge/mind.mjs --iterate <iterate.js> --mind
+<address> --device test.mac --seconds 15` joins a receiving page, publishes the synthetic picture
+(it carries the wall time in a strip) as a screen, subscribes to it, and writes a JSON line for
+each step and each second: frames, the picture's delay, the first frame after the choice. No
+switch, camera, microphone or screen is used.
 
 `.build/release/VoiceMeetMac --render-panel panel.png` draws the panel to a file without opening
 anything, with fixed minds, things and clock (see "Testing with no hand"). A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or

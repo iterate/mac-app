@@ -63,6 +63,12 @@ final class DeviceRecord: ObservableObject {
     var sink: CaptureSink? {
         didSet { if let sink, let recorder { recorder.add(sink: sink) } }
     }
+    /// The sources this Mac's publications into calls send (`DeviceCall`), and their sink
+    /// (`CallSender`): the same capture again, as live's.
+    var call: Set<RecordSource> = []
+    var callSink: CaptureSink? {
+        didSet { if let callSink, let recorder { recorder.add(sink: callSink) } }
+    }
     /// The device's presence: "active", "idle", "locked", "asleep" (`DeviceEvents.presence`).
     var presence: () -> String? = { nil }
     /// Always listen is on (`Listening`): the transcript is recorded, as with the Microphone switch.
@@ -208,7 +214,7 @@ final class DeviceRecord: ObservableObject {
         // the record's switches, and live's watchers: the capture runs for both. The transcript
         // (README, "Listening") is recorded with the Microphone switch, and with Always listen.
         var wanted = permitted(on)
-        let watched = permitted(live)
+        let watched = permitted(live.union(call))
         if session != nil, wanted.contains(.mics) || alwaysListens() { wanted.insert(.transcript) }
         if wanted.union(watched).isEmpty { stopRecorder() }
         if let session, !wanted.union(watched).isEmpty {
@@ -221,6 +227,7 @@ final class DeviceRecord: ObservableObject {
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.sealed(t, stamp: stamp) } }
                 }
                 if let sink { recorder.add(sink: sink) }
+                if let callSink { recorder.add(sink: callSink) }
                 lifecycle.async { recorder.start() }
                 self.recorder = recorder
                 paused = false
@@ -242,7 +249,7 @@ final class DeviceRecord: ObservableObject {
                 }
             }
         }
-        lookForPermissions(session != nil && (wanted.subtracting([.transcript]) != on || watched != live))
+        lookForPermissions(session != nil && (wanted.subtracting([.transcript]) != on || watched != live.union(call)))
         showState(waiting: session == nil ? 0 : waiting, isLent: session != nil)
     }
 

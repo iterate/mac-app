@@ -35,6 +35,8 @@ final class AppModel {
     let deviceWindow = DeviceWindow()
     /// Live: a member's page watches this Mac now (`DeviceLive`).
     let live = DeviceLive()
+    /// This Mac's screens and camera in calls on agents (`DeviceCall`, `call.publish`).
+    let call = DeviceCall()
     /// The lent mind's OpenAI sockets, for dictation (`MindSockets`).
     let mindSockets = MindSockets()
     /// Control: somebody of the mind drives this Mac (`RemoteControl`).
@@ -94,6 +96,14 @@ final class AppModel {
             self?.acts.began(.live, doing: "Watched live by \(who)", did: "Watched live by \(who)", detail: LiveSection.words(tracks)) ?? ""
         }
         live.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
+        call.senderMade = { [weak self] sender in self?.record.callSink = sender }
+        call.sourcesChanged = { [weak self] sources in
+            guard let self, sources != self.record.call else { return }
+            self.record.call = sources
+            self.record.tick()
+        }
+        call.began = { [weak self] thing, doing, did in self?.acts.began(thing, doing: doing, did: did) ?? "" }
+        call.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
         control.began = { [weak self] who, display in
             self?.acts.began(.control, doing: "Controlled by \(who)", did: "Controlled by \(who)", detail: "the display “\(display)”") ?? ""
         }
@@ -122,6 +132,7 @@ final class AppModel {
         // live first: its watches end, and their byes, their records and their acts' ends go to
         // the old mind, before the device's events turn to the new one
         live.use(session, bridge: bridge)
+        call.use(session, bridge: bridge)
         approval.use(session)
         deviceWindow.use(session)
         deviceEvents.use(session, bridge: bridge)
@@ -139,6 +150,7 @@ final class AppModel {
         endPageStreams(why: "the app quits")
         control.endAll(why: "the app quits")
         live.stop()
+        call.stop()
         acts.stop()
         deviceEvents.stop()
         deviceWindow.stop()
@@ -284,6 +296,14 @@ final class AppModel {
             return try await shown(parameters, did: "Rang a call") { try await self.banners.ring(parameters) }
         case "pages.state", "pages.live.start", "pages.live.frame", "pages.live.stop":
             return try await pages(method, parameters)
+        case "call.publish":
+            return try await publishToCall(parameters)
+        case "call.unpublish":
+            // Ending a publication is no use of the Mac: always allowed.
+            let ids = call.publications.named(publication: parameters["publication"] as? String, context: parameters["context"] as? String, source: parameters["source"] as? String)
+            return call.unpublish(ids, why: "ended by a call to call.unpublish")
+        case "call.state":
+            return call.state()
         case "control.start":
             return try await startControl(parameters)
         case "control.input":
@@ -306,7 +326,7 @@ final class AppModel {
             return control.state()
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
             )
         }
     }
@@ -360,6 +380,48 @@ final class AppModel {
             let off = watch.tracks.first { track in things(track).contains { $0.sharing == .off || !$0.isPermitted } }
             if let off { live.end(watch.id, why: "the owner turned \(off) off") }
         }
+        call.choicesChanged { source in callThings(source).contains { $0.sharing == .off || !$0.isPermitted } }
+    }
+
+    // MARK: - Calls
+
+    /// The things a call's source uses: a display, or every camera (as live goes by every camera's
+    /// choice: the call sends the first that delivers).
+    private func callThings(_ source: CallSource) -> [Shareable] {
+        switch source {
+        case .camera: return Camera.devices.map(Shareable.camera)
+        case .screen(let index): return Screen.displays.indices.contains(index) ? [Shareable.display(Screen.displays[index])] : []
+        }
+    }
+
+    /// `call.publish`: a use of the display or the cameras under their choices (`use`: Off refuses,
+    /// Ask asks once, Shared goes), then `DeviceCall` sends it into the call.
+    private func publishToCall(_ parameters: [String: Any]) async throws -> [String: Any] {
+        guard let context = parameters["context"] as? String, context.hasPrefix("/"), context.count <= 300 else {
+            throw EndpointRefusal("call.publish needs the agent's path whose call it is: { context: \"/agents/…\" }.")
+        }
+        guard let source = CallSource(parameters["source"] as? String ?? "") else {
+            throw EndpointRefusal("call.publish takes a source: \"camera\", or \"screen:<display>\" with the number of state().things.")
+        }
+        let things = callThings(source)
+        guard !things.isEmpty else { throw EndpointRefusal("This Mac has no \(source.kind == "camera" ? "camera" : "display \(source.text.dropFirst(7))") now.") }
+        let gates = things.map { UseGate.decide(sharing: $0.sharing.rawValue, permitted: $0.isPermitted, approved: approval.isApproved($0) != nil) }
+        let strictest = UseGate.strictest(gates)
+        let thing = things[0]
+        let title = source == .camera ? "the camera" : "the display “\(thing.title)”"
+        if let refusal = CallGate.refusal(strictest, thing: title) { throw EndpointRefusal(refusal) }
+        if strictest == .ask {
+            let round = approval.round
+            try await approval.ask(for: things, does: "show \(title) in a call", what: "A call on \(context) wants \(title). It lasts until the call ends it or you end it in the panel.")
+            for thing in things { try stillAllowed(thing, in: round) }
+        }
+        things.forEach(count)
+        let track: String
+        switch source {
+        case .camera: track = "camera-0"
+        case .screen: track = "screen-\(Screen.id(of: thing))"
+        }
+        return try await call.publish(context: context, source: source, asker: parameters["as"] as? String, track: track, thing: thing)
     }
 
     /// The tracks a watcher gets: a watch is a use of each display, the cameras and the
