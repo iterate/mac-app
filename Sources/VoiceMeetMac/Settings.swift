@@ -460,6 +460,11 @@ private struct GeneralPage: View {
                 SettingsRow(title: "Dictate") {
                     Text(choices.dictationOnFn ? "fn, under Dictation" : "⌥⇧D, under Dictation").font(.system(size: 12)).foregroundStyle(Theme.t2)
                 }
+                SettingsRow(title: "Write what I just said", detail: "The last stretch of speech, where the cursor is.") {
+                    KeyRecorder(id: HotKey.Combo.writeSaid.id, combo: choices.writeSaidKey, problem: state.keyProblems[HotKey.Combo.writeSaid.id], actions: actions)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityIdentifier("settings.key.writeSaid")
+                }
             }
             SettingsGroup(title: "Version") {
                 SettingsRow(title: state.update.title, detail: state.update.detail, isFirst: true) {
@@ -582,6 +587,12 @@ private struct DictationPage: View {
                 SettingsRow(title: "Double-tap to keep it on", detail: "The next press of fn writes the text. Esc throws it away.") {
                     SettingsSwitch(id: "settings.doubleTap", label: "Double-tap to keep it on", isOn: choices.doubleTap) { choices.doubleTap = $0 }
                         .disabled(!choices.dictationOnFn)
+                }
+                SettingsRow(
+                    title: "Always listen",
+                    detail: "The microphone stays open, and this Mac puts each stretch of your speech into words, for \(choices.writeSaidKey?.words ?? "Write what I just said") and the record."
+                ) {
+                    SettingsSwitch(id: "settings.alwaysListen", label: "Always listen", isOn: choices.alwaysListen) { choices.alwaysListen = $0 }
                 }
                 ForEach(state.fnLines, id: \.self) { line in
                     if line.contains("Accessibility") {

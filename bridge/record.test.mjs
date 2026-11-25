@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { eventually, fakeMind } from "./fake-mind.test-helper.mjs";
 import { createServer } from "node:http";
 import { mindBridge, mindLink } from "./mind.mjs";
-import { recordUploads } from "./record.mjs";
+import { filesOf, recordUploads } from "./record.mjs";
 
 /** A slot as the recorder seals it: an audio file and the event's payload. */
 function slot(spool, t, bytes = "x".repeat(1000)) {
@@ -189,4 +189,21 @@ test("an attempt with no answer is aborted: its PUT ends, the next try sends the
     server.close();
     rmSync(spool, { recursive: true, force: true });
   }
+});
+
+test("a slot's transcript is JSON lines, beside its audio, video and pictures", () => {
+  const files = filesOf({
+    t: 1,
+    tracks: {
+      "mic-0": { kind: "audio", file: "/devices/a/record/mic-0/x.mp4" },
+      "screen-1": { kind: "video", file: "/devices/a/record/screen-1/x.mp4", picture: "/devices/a/record/screen-1/x.jpg" },
+      transcript: { kind: "transcript", file: "/devices/a/record/transcript/x.jsonl" },
+    },
+  });
+  assert.deepEqual(files, [
+    ["/devices/a/record/mic-0/x.mp4", "audio/mp4"],
+    ["/devices/a/record/screen-1/x.mp4", "video/mp4"],
+    ["/devices/a/record/screen-1/x.jpg", "image/jpeg"],
+    ["/devices/a/record/transcript/x.jsonl", "application/x-ndjson"],
+  ]);
 });

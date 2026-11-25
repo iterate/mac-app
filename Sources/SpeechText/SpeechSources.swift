@@ -3,13 +3,14 @@ import FluidAudio
 import Foundation
 import VoiceMeetCore
 
-/// Where a listening's sound comes from: the microphone, or the audio fixture in its place. Its
-/// buffers are in any format; `SpeechAudio` makes them 16 kHz mono for a recognizer. A capture
-/// has no source of its own: it pushes the buffers that ScreenCaptureKit gives it.
+/// THE DEVICE OF THE MICROPHONE STREAM (`MicStream`): the microphone, or the audio fixture in its
+/// place. Its buffers are in any format, each with the host time of its first frame; the stream
+/// makes them 16 kHz mono once for every reader. A capture has no source of its own: it pushes the
+/// buffers that ScreenCaptureKit gives it.
 public protocol SpeechSource: AnyObject {
     /// Starts to give buffers to `take`. Throws a reason in words when it cannot start; `failed`
     /// tells the reason when it stops by itself later. Neither comes after `stop`.
-    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws
+    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws
     func stop()
 }
 
@@ -17,7 +18,7 @@ public protocol SpeechSource: AnyObject {
 public let environmentFixture: URL? = ProcessInfo.processInfo.environment["ITERATE_MAC_AUDIO_FIXTURE"]
     .flatMap { $0.isEmpty ? nil : URL(fileURLWithPath: $0) }
 
-/// The source of a listening: the audio fixture when one is set, else the microphone.
+/// The device of the stream: the audio fixture when one is set, else the microphone.
 public func speechSource(fixture: URL? = environmentFixture) -> SpeechSource {
     fixture.map(FixturePlayer.init) ?? Microphone()
 }
@@ -42,7 +43,8 @@ public final class SpeechAudio: @unchecked Sendable {
     }
 }
 
-/// THE MICROPHONE, through an audio engine of its own: one tap while it runs.
+/// THE MICROPHONE, through an audio engine of its own: one tap while it runs. The stream
+/// (`MicStream`) is its only user: one engine for the whole app.
 ///
 /// The engine starts and stops on a queue that all microphones share, never on the main thread:
 /// a start of the audio hardware takes a moment. `start` throws only when this Mac has no input
@@ -56,12 +58,12 @@ public final class Microphone: SpeechSource, @unchecked Sendable {
     /// Used on `queue` alone.
     private var isRunning = false
     private var changes: NSObjectProtocol?
-    private var take: (@Sendable (AVAudioPCMBuffer) -> Void)?
+    private var take: (@Sendable (AVAudioPCMBuffer, UInt64) -> Void)?
     private var failed: (@Sendable (String) -> Void)?
 
     public init() {}
 
-    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
+    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
         Self.queue.async { [self] in
             self.take = take
             self.failed = failed
@@ -84,7 +86,9 @@ public final class Microphone: SpeechSource, @unchecked Sendable {
         }
         let format = input.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0 else { return fail("This Mac has no microphone now.") }
-        input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in take(buffer) }
+        input.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, when in
+            take(buffer, when.isHostTimeValid ? when.hostTime : mach_absolute_time())
+        }
         do {
             engine.prepare()
             try engine.start()
@@ -127,7 +131,7 @@ public final class FixturePlayer: SpeechSource, @unchecked Sendable {
         self.url = url
     }
 
-    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
+    public func start(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
         let audio: AudioFixture
         do {
             audio = try AudioFixture(url)
@@ -136,7 +140,7 @@ public final class FixturePlayer: SpeechSource, @unchecked Sendable {
         }
         DispatchQueue.global(qos: .userInitiated).async { [self] in
             while !lock.withLock({ isStopped }), let buffer = audio.next() {
-                take(buffer)
+                take(buffer, mach_absolute_time())
                 Thread.sleep(forTimeInterval: Double(buffer.frameLength) / buffer.format.sampleRate)
             }
         }

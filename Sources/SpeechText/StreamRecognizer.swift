@@ -126,7 +126,8 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
         guard let stream else { return [] }
         let ended = Date()
         do {
-            let text = words.repair(try await stream.finish().trimmingCharacters(in: .whitespacesAndNewlines))
+            let heardText = try await stream.finish().trimmingCharacters(in: .whitespacesAndNewlines)
+            let text = words.repair(heardText)
             heard(.note("\(name): the final came \(seconds(since: ended)) s after the end of \(String(format: "%.1f", duration)) s, \(Spoken.wordCount(text)) words"))
             if let openAI = stream as? OpenAIStream {
                 // what this dictation costs: OpenAI's own count, against the sound and the socket's age
@@ -134,7 +135,7 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
                 heard(.note("\(name): OpenAI billed \(billed) for \(String(format: "%.1f", duration)) s of sound; the socket was open \(Int(Date().timeIntervalSince(openAI.made))) s"))
             }
             guard !text.isEmpty else { return [] }
-            let segment = SpeechSegment(start: 0, end: duration, text: text)
+            let segment = SpeechSegment(start: 0, end: duration, text: text, heard: heardText)
             heard(.segment(segment))
             return [segment]
         } catch {

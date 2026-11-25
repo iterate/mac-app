@@ -311,3 +311,43 @@ final class RecordDotView: NSView {
         return view
     }
 }
+
+/// THE SIGN OF ALWAYS LISTEN on the mark (README, "Listening"): a small orange dot at the mark's
+/// upper left, where the 𝑖 leaves the image empty, while the microphone is open with no key. Orange
+/// is macOS's own colour of a microphone in use. The mark itself does not change; the sign is a
+/// view over it, as the record's dot is.
+final class ListenSignView: NSView {
+    /// The sign's centre in the mark's image (y down), and its radius.
+    static let center = NSPoint(x: 1.6, y: 2.2)
+    static let radius: CGFloat = 1.6
+
+    var isOn = false {
+        didSet { if isOn != oldValue { isHidden = !isOn } }
+    }
+
+    override var isFlipped: Bool { true }
+
+    /// Clicks go to the button under it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let r = Self.radius
+        NSColor.systemOrange.setFill()
+        NSBezierPath(ovalIn: NSRect(x: bounds.midX - r, y: bounds.midY - r, width: 2 * r, height: 2 * r)).fill()
+    }
+
+    static func attach(to button: NSStatusBarButton, imageSize: NSSize) -> ListenSignView {
+        let view = ListenSignView()
+        view.isHidden = true
+        view.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(view)
+        let side = radius * 2 + 2
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalToConstant: side),
+            view.heightAnchor.constraint(equalToConstant: side),
+            view.centerXAnchor.constraint(equalTo: button.centerXAnchor, constant: center.x - imageSize.width / 2),
+            view.centerYAnchor.constraint(equalTo: button.centerYAnchor, constant: center.y - imageSize.height / 2),
+        ])
+        return view
+    }
+}

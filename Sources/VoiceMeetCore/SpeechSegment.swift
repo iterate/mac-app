@@ -19,12 +19,15 @@ public struct SpeechSegment: Equatable, Sendable {
     public let start: Double
     public let end: Double
     public let text: String
+    /// The text as the model heard it, before the word list's repair.
+    public let heard: String
     public let words: [Word]
 
-    public init(start: Double, end: Double, text: String, words: [Word] = []) {
+    public init(start: Double, end: Double, text: String, heard: String? = nil, words: [Word] = []) {
         self.start = start
         self.end = end
         self.text = text
+        self.heard = heard ?? text
         self.words = words
     }
 

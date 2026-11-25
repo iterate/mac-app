@@ -176,7 +176,8 @@ public final class SpeechRecognizer: @unchecked Sendable {
             let timed = heard.words.map { SpeechSegment.Word(start: offset + $0.start, end: offset + $0.end, text: $0.text) }
             // the words' own times, where the model gave them: the stretch starts before the voice
             let segment = SpeechSegment(
-                start: timed.first?.start ?? offset, end: timed.last?.end ?? offset + Double(count) / rate, text: text, words: timed)
+                start: timed.first?.start ?? offset, end: timed.last?.end ?? offset + Double(count) / rate, text: text, heard: corrected.heard,
+                words: timed)
             return (segment, corrected)
         }
         func ended(_ count: Int) async {

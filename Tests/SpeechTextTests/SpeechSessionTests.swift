@@ -124,14 +124,14 @@ final class SpeechRecognizerTests: XCTestCase {
 private final class Speech: SpeechSource {
     var stopped = false
     var failed: (@Sendable (String) -> Void)?
-    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
+    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws {
         self.failed = failed
         let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
         let samples = loud(1)
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count))!
         buffer.frameLength = buffer.frameCapacity
         for (index, sample) in samples.enumerated() { buffer.floatChannelData![0][index] = sample }
-        take(buffer)
+        take(buffer, mach_absolute_time())
     }
 
     func stop() { stopped = true }
@@ -140,7 +140,7 @@ private final class Speech: SpeechSource {
 /// A source that does not start.
 private final class Broken: SpeechSource {
     struct Refused: LocalizedError { var errorDescription: String? { "no microphone" } }
-    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer) -> Void, failed: @escaping @Sendable (String) -> Void) throws { throw Refused() }
+    func start(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws { throw Refused() }
     func stop() {}
 }
 

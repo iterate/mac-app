@@ -144,11 +144,11 @@ wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the 
 - **General**: open at login (config.json's `login`), show each act on the screen (the same tick
   as on the Activity page), how long an approval lasts (5, 15, 30, 60 or 120 minutes; the Ask
   question's second button says it: "Approve for 30 Minutes"), the keys of capture and the input
-  (a click records a new one, with ⌘, ⌥ or ⌃; × removes it; a key that macOS refuses says so and
-  the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
+  and of "write what I just said" (⌥⇧W) (a click records a new one, with ⌘, ⌥ or ⌃; × removes
+  it; a key that macOS refuses says so and the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
   a trial and a copy are updated by hand), and **Copy Prompt**.
-- **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on, the
-  orange row when macOS acts on 🌐 too, the speech model and its list, "OpenAI through <mind>:
+- **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on,
+  Always listen (off unless set; "Listening"), the orange row when macOS acts on 🌐 too, the speech model and its list, "OpenAI through <mind>:
   the mind's key" when the lent mind makes tokens, your own OpenAI key (optional; set or removed;
   it is never shown), whether the pill shows the
   words, where the text goes (where the cursor is, or on the clipboard only), and the default
@@ -167,7 +167,7 @@ when it ended and the CLI renews it at its next connection; "Not signed in" with
 
 The app writes config.json only through `cli.mjs` (`set`, `add`; `use` and `remove` as the panel
 does), and `cli.mjs` keeps every key it does not know, at the top and in each mind. The choices
-of this Mac are in the app's defaults: `approval.minutes`, `key.capture`, `key.input`,
+of this Mac are in the app's defaults: `approval.minutes`, `key.capture`, `key.input`, `key.writeSaid`, `listen.always`,
 `dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.sounds`, `dictation.write`, `update.byItself`.
 `--render-settings <folder>` draws the pages (General, Dictation, a mind lent with the default
 list, a mind whose own expression fails), light and dark.
@@ -397,7 +397,9 @@ window text's. Off refuses, Ask asks you with Touch ID, Shared does it, and Acti
 
 Time is cut into **slots** of 30 seconds on the UTC clock. For each slot each **track**
 (`screen-<display>`, `camera-0`, `mic-0`, `speaker-0`) is one file in the mind's files, named by
-the clock, that plays by itself, and a video track has a small picture of the slot's start:
+the clock, that plays by itself, and a video track has a small picture of the slot's start. The
+track `transcript` is the words that were said, as JSON lines ("Listening"). `mic-0` is the
+default input, read from the app's one microphone stream:
 
 ```
 /devices/<name>/record/<track>/<YYYY-MM-DD>/<HH>/<MM>-<SS>.mp4   HEVC or AAC, fragmented MP4, time zero at the slot's start
@@ -650,8 +652,8 @@ with a lock while it stays on and the time since the start.
   no setting. Settings › Dictation can turn fn off (⌥⇧D stays) and the double tap off (a short
   tap then does nothing).
 - **One listening at a time.** Dictation and the input bar share one microphone listening
-  (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
-  are written where they belonged.
+  (`SpeechSession`), which reads the one microphone stream ("Listening" below). When one starts
+  while the other listens, the other ends first: its last words are written where they belonged.
 - **GPT Live Transcribe at OpenAI, when the lent mind has an OpenAI key (or this Mac has one);
   else on this Mac.** Settings ›
   Dictation (the panel's Settings button opens it) chooses the model of dictation and the input
@@ -767,6 +769,68 @@ With a local model, while you talk, the text is written again twice a second fro
 speech that is going. A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment;
 then its text is final: one segment, with its times from the start. With GPT Live Transcribe the
 whole dictation is one segment, with no times of its words.
+
+## Listening: one microphone, in layers
+
+Dictation, the input bar, Always listen and the record's microphone are layers on ONE stream of
+the microphone. Each layer has its events, and the layer above reads them.
+
+| Layer | What it is | Its events | Who reads them |
+| --- | --- | --- | --- |
+| 1. The microphone stream | `MicStream`: the one owner of the input device (an `AVAudioEngine` tap, or the audio fixture) | `frame`: 16 kHz mono samples and the wall time of the first one; the device's own buffers and their host time; `failed` | `SpeechSession` (dictation, the input bar), Always listen, the record's `mic-0` |
+| 2. Speech detection | `SpeechGate` on Silero VAD | `speech started` (its time), `speech ended` (its start and end) | Always listen |
+| 3. The transcription stream | A transcriber for each stretch of speech | `partial` (ephemeral: the stretch's words so far, as heard and with the word list's corrections); `segment` (final: the text, the heard words, the corrections, the start and end, the model, the stretch and what heard it) | The pill and the input bar (the partials of their own stretch); `Listening` (the segments: the transcript in memory and the record's `transcript` track) |
+| 4. The features | Dictation, the input bar, "write what I just said", Always listen | | The person |
+
+- **The stream** (`Sources/SpeechText/MicStream.swift`) runs while anyone reads it, and only then.
+  The first reader starts the device, the last one stops it. A change of device (headphones in,
+  another microphone chosen) is handled once, by the device. The 16 kHz samples are made once for
+  all readers, through one converter for each run of the device. A reader is called on the
+  device's thread and does its work elsewhere. The record's `mic-0` reads the device's own buffers
+  (48 kHz, as before) through `MicrophoneFeed`, so the record opens no microphone of its own. The
+  capture still hears through ScreenCaptureKit, which also puts the voice into its movie.
+- **Speech detection** runs only for Always listen: with a key, the key says where speech is. A
+  silent room costs one loudness for each buffer, on the device's thread: a buffer under −46 dBFS
+  is not resampled and wakes nothing. A louder one wakes the gate for 1.5 s, with the 0.6 s before
+  it. Then each 256 ms piece gets the speech probability of Silero VAD (FluidAudio 0.18.4's
+  `VadManager`; its model, 1 MB, downloads into `~/Library/Application Support/FluidAudio` at its
+  first use). While Silero loads, and when it fails, the probability is the energy gate's
+  (`SpeechGate.energy`: −50 to −30 dBFS, hiss at half). The gate (`SpeechGate`, in
+  `VoiceMeetCore`) starts a stretch at a piece of 0.5 or more, 0.2 s before it, and ends it after
+  0.8 s under 0.35, 0.2 s after the last piece of speech. A stretch of 30 s ends there and the
+  next one starts.
+- **The transcription stream.** A key's listening is one stretch (`dictation-<n>`, `input-<n>`):
+  the chosen model hears it as before (GPT Live Transcribe with the mind's token, or the local
+  model), and each final segment gets its wall times from the stretch's first sample. Always
+  listen's stretches (`listen-<n>`) go to the LOCAL model alone, once, when the stretch ends: no
+  sound leaves the Mac without a key. While a key listens, Always listen holds: the stretch that
+  goes on ends at that moment, so a stretch is never put into words twice.
+- **The segments are recorded** as a record track of their own, `transcript`: one JSON line for
+  each segment, in a file for each slot, `/devices/<name>/record/transcript/<YYYY-MM-DD>/<HH>/<MM>-<SS>.jsonl`
+  (`application/x-ndjson`). A line is `{ t, to, text, heard, corrections: [{ heard, term }], model,
+  by, stretch }`, its times in Unix milliseconds; `by` is `dictation`, `input` or `listen`. A line
+  goes into the slot in which it came (its own times can be in the slot before), and a slot with
+  no line has no file. The slot's event has `transcript: { kind: "transcript", codec: "jsonl",
+  file, bytes, segments }`. The track records while the Mac is lent and **Microphone** or Always
+  listen is on; with neither, no text goes into the record.
+- **The features read the stream.** The pill and the input bar show their stretch's partials. A
+  dictation writes the words of its stretch between its key's down and up, taken from the stream;
+  the sound is kept from fn down, as before. **"Write what I just said"** (⌥⇧W; Settings › General
+  sets another key, or none; `listen.write` on the control socket) writes the last finished
+  stretch where the cursor is: with Always listen, also what you said with no key held.
+- **Always listen** (Settings › Dictation; `listen.always` in the defaults) is OFF unless you turn
+  it on. On, the microphone stays open with no key, each stretch of speech is put into words on
+  this Mac, and the segments go into the record. The mark in the menu bar has a small orange dot at
+  its upper left while it listens; the rest of the mark does not change. Off, nothing listens
+  without a key, and everything works as before, through the same layers.
+
+`ui.state`'s `listening` has the counts: whether Always listen runs, the stretches it found, the
+stream's readers and starts, and the last stretch (its id, seconds and text, for a test copy).
+
+Not built yet: the capture on the stream (its movie needs the voice), the other microphones in the
+record (`mic-0` is the default input now; a Bluetooth input is not opened for it, as before), the
+sound of an Always-listen stretch that began before fn down given to that dictation, and Always
+listen's partials.
 
 ## Online and local: what the bench measured, and what is not built
 
@@ -1008,7 +1072,7 @@ connection, as the endpoint's; a mind never reaches it.
 
 | Method | What it does |
 | --- | --- |
-| `ui.state` | `perf` (`Perf`: CPU seconds, `rss` as the physical footprint, wake-ups, open files, threads, `mainStallMaxMs` while its watch runs, and `counters`: `stateChanges`, `statusWrites`, `panelBodies`, `lendTicks`, `presenceLooks`, `recordLooks`, `windowChanges`, `grantProbes`, `cameraSearches`), the lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
+| `ui.state` | `perf` (`Perf`: CPU seconds, `rss` as the physical footprint, wake-ups, open files, threads, `mainStallMaxMs` while its watch runs, and `counters`: `stateChanges`, `statusWrites`, `panelBodies`, `lendTicks`, `presenceLooks`, `recordLooks`, `windowChanges`, `grantProbes`, `cameraSearches`), the lend, the minds, the mind session (generation, mind, name), the windows on the screen, the panel, the input bar, the dictation (with its last text), the listening layers (`listening`), the capture, the activity (its context, and each row's act id and whether it is in the mind), the Activity window's log (`log`: how many events it holds and shows, their types, whether older ones are left), the banner, the record, the choices, the question that waits |
 | `ui.tree` | The accessibility tree of the app's own windows: role, `id`, label, value, frame |
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) or a pop-up button's item (`{"id":"settings.approvalMinutes","label":"1 hour"}`) |
 | `ui.type {id, text, replace?}` | Types into it (`input.text`), at its end or in place of its text |
@@ -1018,6 +1082,7 @@ connection, as the endpoint's; a mind never reaches it.
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
 | `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
 | `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
+| `listen.write` | ⌥⇧W: the last finished stretch of speech is written ("Listening") |
 | `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for `approval.minutes` (30 unless set). While the socket is open, the question's panel shows and its buttons answer too (`ui.press` on `approval.once`, `approval.minutes`, `approval.deny`), and no Touch ID is asked |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
@@ -1029,7 +1094,7 @@ The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copy
 `capture.discard`, `speech.model.<id>` (a model in the list of Settings › Dictation), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
 `settings.showsPill`, `settings.approvalMinutes`, `settings.key.capture`, `settings.key.input`,
-`settings.doubleTap`, `settings.dictationKey`, `settings.pillWords`, `settings.write`, `settings.speechWhere`,
+`settings.doubleTap`, `settings.dictationKey`, `settings.alwaysListen`, `settings.key.writeSaid`, `settings.pillWords`, `settings.write`, `settings.speechWhere`,
 `settings.openAIKey` (and `.set`, `.remove`),
 `settings.wordsExpression`, `settings.mind.name`, `settings.mind.wordsSource`,
 `settings.mind.expression` (and `.save`), `settings.mind.fetch`, `settings.mind.use`, `settings.mind.remove`. The tree is read in the app's own process and needs no permission of macOS; to
@@ -1042,9 +1107,9 @@ printf '{"method":"ui.press","id":"statusItem"}\n' | nc -U /tmp/mac-test/control
 printf '{"method":"ui.tree"}\n' | nc -U /tmp/mac-test/control.sock
 ```
 
-**The audio fixture.** With `ITERATE_MAC_AUDIO_FIXTURE=<file.wav|.aiff|.m4a>`, every listening
-(dictation, the input bar) hears that file in place of the microphone, at the pace of the clock,
-then silence; no audio device opens, and the copy loads the speech model in the background as the
+**The audio fixture.** With `ITERATE_MAC_AUDIO_FIXTURE=<file.wav|.aiff|.m4a>`, the microphone
+stream (dictation, the input bar, Always listen) hears that file in place of the microphone, at
+the pace of the clock, from each start of the stream, then silence; no audio device opens, and the copy loads the speech model in the background as the
 installed app does. A Swift test passes the file to `FixturePlayer`, or its own source and engine
 to `SpeechSession`.
 
@@ -1114,5 +1179,8 @@ build waits 12 to 24 s, every later process of that build about 0.2 s), `dictati
 listens until its window ends and leaves no line; a hold writes the sentence; a double tap locks
 it until the next press of fn, which writes it; a lock that Esc ends writes nothing), `capture-transcript-fixture` (the
 sentence after 2 s of silence, pushed as a capture's buffers with their times, gives segments with
-the terms that start after the silence) and `speech-model` (Ultra chosen through `ui.press` is
-the stored choice). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.
+the terms that start after the silence), `listen-always` (Always listen on, the fixture and no
+key: the sentence is one stretch with the terms, `listen.write` writes it, the fake mind gets it
+as one line of a slot's `transcript` track, and the mark's label says that the microphone is open;
+then 20 s of the fixture's silence, its figures in the result) and `speech-model` (Ultra chosen
+through `ui.press` is the stored choice). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.
