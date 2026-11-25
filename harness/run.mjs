@@ -206,8 +206,10 @@ function watchScreens() {
     if (stopped) return;
     if (!pids.length) return void setTimeout(look, 200);
     execFile("/usr/bin/osascript", ["-l", "JavaScript", join(root, "harness/on-screen.js"), ...pids.map(String)], { timeout: 10000 }, (error, stdout) => {
-      if (!error) {
-        const { windows, front } = JSON.parse(stdout);
+      // osascript may end with no error and no output (a busy window server): no look this time
+      const seenNow = error ? null : (() => { try { return JSON.parse(stdout); } catch { return null; } })();
+      if (seenNow) {
+        const { windows, front } = seenNow;
         for (const w of windows)
           saw(`window ${w.number} "${w.name}" (layer ${w.layer}, alpha ${w.alpha}) at ${w.frame.X},${w.frame.Y} ${w.frame.Width}×${w.frame.Height}`);
         if (front) saw(`the copy (pid ${front}) is the active app`);
