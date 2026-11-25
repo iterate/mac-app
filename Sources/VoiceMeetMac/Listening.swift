@@ -11,8 +11,9 @@ import VoiceMeetCore
 /// 1. The microphone stream (`MicStream.shared`) is the one owner of the input. `SpeechSession`
 ///    (dictation, the input bar), Always listen and the record's `mic-0` (`StreamFeed`) read it.
 /// 2. Speech detection runs only for Always listen: a key says itself when speech starts.
-/// 3. The transcription stream: `heard` takes each partial and segment, of the session and of Always
-///    listen. A final segment is kept here and goes to the record's `transcript` track.
+/// 3. The transcription stream: the one `Transcriber` hears each stretch (OpenAI when it can be
+///    reached, else the local model); `heard` takes each partial and segment, of the session and of
+///    Always listen. A final segment is kept here and goes to the record's `transcript` track.
 /// 4. The features read it: a dictation's text is the words of its stretch between its key's down
 ///    and up (`said`). Each stretch of Always listen goes into the history (`History`), where
 ///    "Paste the last transcript" (⌥⇧W) finds the newest of it and of the dictations.
@@ -20,8 +21,8 @@ import VoiceMeetCore
 final class Listening {
     /// False in a home of its own with no audio fixture: Always listen opens no microphone there.
     var mayOpenMicrophone = true
-    /// The local model of Always listen: no sound leaves the Mac without a key.
-    var localModel: () -> SpeechModel = { .default }
+    /// The one transcriber: Always listen's stretches go to it, as a key's do.
+    var transcriber: Transcriber?
     /// The word list of the lent mind.
     var words: () -> WordList = { .empty }
     /// A final segment, as a line of the record's `transcript` track (`DeviceRecord.transcribed`).
@@ -101,7 +102,7 @@ final class Listening {
         }
         let wanted = Choices.shared.alwaysListen && mayOpenMicrophone && status == .authorized
         if wanted, let listener {
-            return listener.use(localModel(), words: words())
+            return listener.use(words())
         }
         guard wanted != isAlwaysListening else { return }
         if wanted { start() } else { stop() }
@@ -109,10 +110,11 @@ final class Listening {
     }
 
     private func start() {
-        let made = StretchListener(stream: .shared) { [weak self] event in
+        guard let transcriber else { return }
+        let made = StretchListener(stream: .shared, transcriber: transcriber) { [weak self] event in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.listenerSaid(event) } }
         }
-        made.use(localModel(), words: words())
+        made.use(words())
         do {
             try made.start()
         } catch {
@@ -121,7 +123,8 @@ final class Listening {
         if keyListens { made.hold(true) }
         listener = made
         (stretches, segments) = (0, 0)
-        log.info("always listen: on, with \(localModel().id); each stretch of speech is put into words on this Mac")
+        let route = transcriber.current
+        log.info("always listen: on; each stretch of speech goes to the transcriber (now \(route.route.provider == .openAI ? "OpenAI" : route.local.id): \(route.route.why.words))")
     }
 
     private func stop() {
@@ -136,8 +139,8 @@ final class Listening {
         switch event {
         case .started:
             isSpeaking = true
-            // the stretch is put into words with the model and the word list of its end
-            listener?.use(localModel(), words: words())
+            // the stretch is put into words with the word list of its end
+            listener?.use(words())
         case .ended:
             isSpeaking = false
             stretches += 1

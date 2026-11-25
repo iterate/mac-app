@@ -7,7 +7,7 @@ import XCTest
 /// A fake of OpenAI's realtime transcription on 127.0.0.1: a WebSocket server whose answer to each
 /// message the test writes (`answer`). It records every message it got, and the Authorization
 /// header of each socket.
-private final class FakeOpenAI: @unchecked Sendable {
+final class FakeOpenAI: @unchecked Sendable {
     private let listener: NWListener
     private let queue = DispatchQueue(label: "fake-openai")
     private let lock = NSLock()
@@ -76,7 +76,7 @@ private final class FakeOpenAI: @unchecked Sendable {
 
 /// OpenAI as the bench saw it: the session is updated, a delta comes at each append, and the
 /// commit gets its item's final.
-private func openAI(deltas: [String], final: String, answersCommit: Bool = true, error: String? = nil) -> @Sendable ([String: Any]) -> [[String: Any]] {
+func openAI(deltas: [String], final: String, answersCommit: Bool = true, error: String? = nil) -> @Sendable ([String: Any]) -> [[String: Any]] {
     let count = Counter()
     return { message in
         switch message["type"] as? String {
@@ -96,10 +96,11 @@ private func openAI(deltas: [String], final: String, answersCommit: Bool = true,
     }
 }
 
-private final class Counter: @unchecked Sendable {
+final class Counter: @unchecked Sendable {
     private let lock = NSLock()
     private var value = 0
     func next() -> Int { lock.withLock { defer { value += 1 }; return value } }
+    var peek: Int { lock.withLock { value } }
 }
 
 private final class Events: @unchecked Sendable {
@@ -111,7 +112,7 @@ private final class Events: @unchecked Sendable {
 }
 
 /// The local model behind OpenAI: it always "hears" `text`.
-private struct LocalEngine: SpeechEngine {
+struct LocalEngine: SpeechEngine {
     var text = "heard on this Mac"
     func hear(_ samples: [Float], final: Bool) async throws -> Heard {
         samples.contains { abs($0) > 0.05 } ? Heard(text: text) : Heard(text: "")
@@ -122,19 +123,28 @@ private func loud(_ seconds: Double) -> [Float] { (0..<Int(seconds * 16_000)).ma
 
 private let words = WordList(markdown: "- Beelink: bee link\n- iterate\n")
 
-/// The recognizer of the app, against the fake, with a fake local model behind it: with this
-/// Mac's `key`, or with `access` (a mind's sockets).
-private func recognizer(
-    _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", access: OpenAIAccess? = nil, connect: Double = 2, final: Double = 2,
-    standby: OpenAIStandby? = nil
-) -> SpeechListening {
-    OnlineSpeech.recognizer(
-        .gptLiveTranscribe, words: words, access: access ?? .ownKey({ key }), setup: setup(server, connect: connect, final: final),
-        fallback: { heard in SpeechRecognizer(model: .default, words: words, engine: { LocalEngine() }, heard: heard) }, standby: standby
-    ) { heard.add($0) }!
+/// The app's one transcriber against the fake, with the rule's answer `route` and a fake local
+/// model behind it: with this Mac's `key`, or with `access` (a mind's sockets).
+func transcriber(
+    _ server: FakeOpenAI, key: String? = "sk-test", access: OpenAIAccess? = nil, connect: Double = 2, final: Double = 2,
+    standby: OpenAIStandby? = nil, route: SpeechRoute = SpeechRoute(.openAI, .reachable),
+    local: @escaping @Sendable (SpeechModel, WordList) async throws -> SpeechEngine = { _, _ in LocalEngine() }
+) -> Transcriber {
+    let made = Transcriber(access: access ?? .ownKey({ key }), standby: standby, setup: setup(server, connect: connect, final: final), engines: .fixed(local))
+    made.set(route, local: .default)
+    return made
 }
 
-/// The setup of `recognizer`, with the word list's keywords as `OnlineSpeech` sets them.
+/// A key's listening of the transcriber (dictation, the input bar), or another use.
+private func recognizer(
+    _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", access: OpenAIAccess? = nil, connect: Double = 2, final: Double = 2,
+    standby: OpenAIStandby? = nil, use: Transcriber.Use = .live
+) -> SpeechListening {
+    transcriber(server, key: key, access: access, connect: connect, final: final, standby: standby)
+        .listening(use, words: words) { heard.add($0) }.listening
+}
+
+/// The setup of `recognizer`, with the word list's keywords as the transcriber sets them.
 private func setup(_ server: FakeOpenAI, connect: Double = 2, final: Double = 2, keywords: [String] = words.entries.map(\.term)) -> OpenAIStream.Setup {
     var setup = OpenAIStream.Setup(keywords: keywords)
     setup.url = server.url
@@ -165,7 +175,7 @@ private final class TestClock: @unchecked Sendable {
     func fireTimers() { lock.withLock { defer { timers = [] }; return timers }.forEach { $0.1() } }
 }
 
-private final class Lines: @unchecked Sendable {
+final class Lines: @unchecked Sendable {
     private let lock = NSLock()
     private var lines: [String] = []
     func add(_ line: String) { lock.withLock { lines.append(line) } }
@@ -295,9 +305,21 @@ final class OpenAIStreamTests: XCTestCase {
         XCTAssertFalse(server.types().contains("input_audio_buffer.commit"))
     }
 
-    func testOnlyTheOnlineModelGetsAStreamRecognizer() {
-        XCTAssertNil(OnlineSpeech.recognizer(.parakeetV3, words: .empty, key: { "sk" }) { _ in })
-        XCTAssertNotNil(OnlineSpeech.recognizer(.gptLiveTranscribe, words: .empty, key: { "sk" }) { _ in })
+    func testTheRulesProviderHearsAndTheLocalModelWhenItPicksIt() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "from OpenAI"))
+        let online = transcriber(server)
+        XCTAssertTrue(online.listening(.live, words: words) { _ in }.listening is StreamRecognizer)
+        XCTAssertEqual(online.listening(.capture, words: words) { _ in }.model, .gptLiveTranscribe)
+        let offline = transcriber(server, route: SpeechRoute(.local, .offline))
+        let (listening, model) = offline.listening(.live, words: words) { _ in }
+        XCTAssertTrue(listening is SpeechRecognizer)
+        XCTAssertEqual(model, .default)
+        listening.start()
+        await talk(listening, seconds: 1)
+        let segments = await listening.finish()
+        XCTAssertEqual(segments.map(\.text), ["heard on this Mac"])
+        XCTAssertEqual(segments.map(\.model), ["oruk-fourier-2b"])
+        XCTAssertTrue(server.messages.isEmpty, "offline, no socket opens")
     }
 }
 

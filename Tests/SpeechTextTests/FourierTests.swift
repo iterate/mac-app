@@ -158,10 +158,9 @@ final class FourierChoiceTests: XCTestCase {
     func testWhenOpenAIFailsFourierHearsItAtItsPace() async {
         let model = FakeFourier(takes: 0.05)
         let heard = Events()
-        let listening = OnlineSpeech.recognizer(
-            .gptLiveTranscribe, words: .empty, key: { nil },
-            fallback: { heard in SpeechRecognizer(model: SpeechModel.default, words: .empty, engine: { PacedEngine(model) }, heard: heard) }
-        ) { heard.add($0) }!
+        let transcriber = Transcriber(access: .ownKey({ nil }), engines: .fixed { _, _ in PacedEngine(model) })
+        transcriber.set(SpeechRoute(.openAI, .reachable), local: .fourier2b)
+        let listening = transcriber.listening(.live, words: .empty) { heard.add($0) }.listening
         listening.start()
         await talk(listening, seconds: 2.5)
         let segments = await listening.finish()
@@ -209,31 +208,21 @@ final class FourierChoiceTests: XCTestCase {
         return runtime
     }
 
-    /// Unused, the process ends after the idle time; a pass starts the time again; kept warm, it stays.
-    func testAnUnusedProcessEndsAfterItsIdleTimeUnlessItIsKeptWarm() async throws {
-        let model = FourierModel(runtime: try fakeRuntime(), idleSeconds: 0.6)
-        let engine = try await model.engine(words: .empty)
-        let loaded = await model.isLoaded
-        XCTAssertTrue(loaded)
-        try await Task.sleep(nanoseconds: 400_000_000)
-        let text = try await engine.hear(loud(1), final: true).text
-        XCTAssertEqual(text, "heard")
-        // 0.8 s after the load, 0.4 s after the pass: it stays
-        try await Task.sleep(nanoseconds: 400_000_000)
+    /// `letGo` (`LocalSpeech` unloads it) ends the process once no engine holds it; the next use
+    /// starts it again.
+    func testALetGoEndsTheProcessAndTheNextUseStartsItAgain() async throws {
+        let model = FourierModel(runtime: try fakeRuntime())
+        var engine: SpeechEngine? = try await model.engine(words: .empty)
         var isLoaded = await model.isLoaded
-        XCTAssertTrue(isLoaded, "a pass starts the idle time again")
-        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertTrue(isLoaded)
+        let text = try await engine?.hear(loud(1), final: true).text
+        XCTAssertEqual(text, "heard")
+        await model.letGo()
+        engine = nil
         isLoaded = await model.isLoaded
-        XCTAssertFalse(isLoaded, "unused for its idle time: let go")
-
-        await model.keepWarm(true)
-        _ = try await model.load()
-        try await Task.sleep(nanoseconds: 1_000_000_000)
+        XCTAssertFalse(isLoaded, "let go")
+        engine = try await model.engine(words: .empty)
         isLoaded = await model.isLoaded
-        XCTAssertTrue(isLoaded, "kept warm: it stays")
-        await model.keepWarm(false)
-        try await Task.sleep(nanoseconds: 1_000_000_000)
-        isLoaded = await model.isLoaded
-        XCTAssertFalse(isLoaded, "no longer warm: it ends after its idle time")
+        XCTAssertTrue(isLoaded, "the next use loads it again")
     }
 }

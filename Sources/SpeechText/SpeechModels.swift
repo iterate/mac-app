@@ -137,7 +137,8 @@ public protocol SpeechEngine: Sendable {
     func hear(_ samples: [Float], final: Bool) async throws -> Heard
 }
 
-/// THE SPEECH MODELS, loaded for the app: one model at a time is held, the chosen one.
+/// THE SPEECH MODELS, loaded for the app: one local model at a time is held, and only while it
+/// must hear (`LocalSpeech`).
 public actor SpeechModels {
     public static let shared = SpeechModels()
 
@@ -174,7 +175,7 @@ public actor SpeechModels {
     }
 
     /// Loads `model` (downloads it first when it is not on this Mac) and holds it, in place of any
-    /// other. For the picker, and for a load at the app's start.
+    /// other. `LocalSpeech` calls it when the rule needs the local model.
     public func load(_ model: SpeechModel, progress: @escaping @Sendable (SpeechLoad) -> Void = { _ in }) async throws {
         if model.runs == .mlx {
             try await FourierModel.shared.load(progress: progress)
@@ -230,15 +231,19 @@ public actor SpeechModels {
         }
     }
 
-    /// Loads `model` when its files are on this Mac, at a low priority: the first use is then
-    /// at once (README, "Dictation"). Downloads nothing.
-    public nonisolated func preload(_ model: SpeechModel) -> Task<Double?, Never>? {
-        guard model.isLocal, model.isOnDisk else { return nil }
-        return Task.detached(priority: .background) {
-            let started = Date()
-            guard (try? await self.load(model)) != nil else { return nil }
-            return Date().timeIntervalSince(started)
-        }
+    /// Unloads `model`: Fourier's process ends, the Core ML model goes. An engine that still hears
+    /// keeps it until it ends. `LocalSpeech` decides when (README, "Listening").
+    public func unload(_ model: SpeechModel) async {
+        if model.runs == .mlx { return await FourierModel.shared.letGo() }
+        if loading?.id == model.id { letGo() }
+    }
+
+    /// Gets the files of `model` when they are not on this Mac, and loads nothing that is not
+    /// needed: Fourier's process does not start (a Core ML model loads, as FluidAudio downloads it
+    /// with its load). For a download in the background or a choice in Settings.
+    public func download(_ model: SpeechModel, progress: @escaping @Sendable (SpeechLoad) -> Void = { _ in }) async throws {
+        if model.runs == .mlx { return try await FourierModel.shared.prepare(progress: progress) }
+        try await loadCoreML(model, progress: progress)
     }
 }
 

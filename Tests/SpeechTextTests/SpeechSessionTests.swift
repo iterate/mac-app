@@ -20,6 +20,11 @@ private struct Engine: SpeechEngine {
 private func loud(_ seconds: Double) -> [Float] { (0..<Int(seconds * 16_000)).map { 0.3 * sin(Float($0) * 0.2) } }
 private func quiet(_ seconds: Double) -> [Float] { [Float](repeating: 0, count: Int(seconds * 16_000)) }
 
+/// The transcriber of a test with no OpenAI: the local model is `make`'s engine.
+func localTranscriber(_ make: @escaping @Sendable (SpeechModel, WordList) async throws -> SpeechEngine) -> Transcriber {
+    Transcriber(access: nil, engines: .fixed(make))
+}
+
 final class SpeechRecognizerTests: XCTestCase {
     private final class Heard: @unchecked Sendable {
         var events: [SpeechRecognizer.Event] = []
@@ -167,7 +172,7 @@ final class SpeechSessionTests: XCTestCase {
             let source = Speech()
             sources.append(source)
             return source
-        }, engine: { _, _ in Engine(text: "for the first") })
+        }, transcriber: localTranscriber { _, _ in Engine(text: "for the first") })
         session.authorization = { .authorized }
         let dictation = Client()
         let input = Client()
@@ -191,7 +196,7 @@ final class SpeechSessionTests: XCTestCase {
     }
 
     func testACancelledListeningEndsWithNoWords() async throws {
-        let session = SpeechSession(source: { Speech() }, engine: { _, _ in Engine() })
+        let session = SpeechSession(source: { Speech() }, transcriber: localTranscriber { _, _ in Engine() })
         session.authorization = { .authorized }
         let client = Client()
         XCTAssertNil(session.start(client, words: .empty))
@@ -202,7 +207,7 @@ final class SpeechSessionTests: XCTestCase {
     }
 
     func testAHomeOfItsOwnOpensNoMicrophone() {
-        let session = SpeechSession(source: { Speech() }, engine: { _, _ in Engine() })
+        let session = SpeechSession(source: { Speech() }, transcriber: localTranscriber { _, _ in Engine() })
         session.mayOpenMicrophone = false
         XCTAssertEqual(session.start(Client(), words: .empty), .ownHome)
         XCTAssertFalse(session.isListening)
@@ -210,7 +215,7 @@ final class SpeechSessionTests: XCTestCase {
 
     /// Fable 11: a source that does not start is a refusal, with no event: the pill is not shown.
     func testASourceThatDoesNotStartIsARefusalWithNoEvent() {
-        let session = SpeechSession(source: { Broken() }, engine: { _, _ in Engine() })
+        let session = SpeechSession(source: { Broken() }, transcriber: localTranscriber { _, _ in Engine() })
         session.authorization = { .authorized }
         let client = Client()
         XCTAssertEqual(session.start(client, words: .empty), .failed("no microphone"))
@@ -225,7 +230,7 @@ final class SpeechSessionTests: XCTestCase {
             let made = Speech()
             source = made
             return made
-        }, engine: { _, _ in Engine() })
+        }, transcriber: localTranscriber { _, _ in Engine() })
         session.authorization = { .authorized }
         let client = Client()
         XCTAssertNil(session.start(client, words: .empty))
@@ -239,7 +244,7 @@ final class SpeechSessionTests: XCTestCase {
     /// Astra 16: the client starts again before the last words of its first listening came. They
     /// come once, and while the second listening runs: the client must not take them as the end of that one.
     func testAStartBeforeTheLastWordsCameKeepsTheNewListening() async {
-        let session = SpeechSession(source: { Speech() }, engine: { _, _ in Engine(text: "first") })
+        let session = SpeechSession(source: { Speech() }, transcriber: localTranscriber { _, _ in Engine(text: "first") })
         session.authorization = { .authorized }
         @MainActor final class Again: SpeechClient {
             weak var session: SpeechSession?

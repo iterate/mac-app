@@ -539,10 +539,12 @@ If you cannot read that folder (you are an agent of the mind example.com, or you
 ```
 
 Each mark and each click gets a numbered picture: the part of the display around it, cut out
-while you talk. `sheet.jpg` is all of them on one. While you talk the pictures go up, and this Mac
-puts your voice into words at each pause, with the local speech model of dictation ("Dictation" below)
-and the `words.md` list of the capture's mind; no sound leaves the Mac for it, and no cloud model
-hears it. The pill shows the last words: the sign that the microphone hears you. So at the end
+while you talk. `sheet.jpg` is all of them on one. While you talk the pictures go up, and your
+voice is put into words at each pause by the one transcriber of every feature ("Listening" below:
+GPT Live Transcribe at OpenAI when it can be reached, else the local model on this Mac), with the
+`words.md` list of the capture's mind. At OpenAI one socket serves the capture: each pause of
+0.7 s commits the sound so far, and its text is a segment with its times. The pill shows the last
+words: the sign that the microphone hears you. So at the end
 only your last words can be missing: the first text says so, and the same text with all the words
 takes its place on the clipboard a moment later, unless you copied something else.
 
@@ -571,7 +573,7 @@ path, with two events: `capture/ready` (the words, the marks and the pictures ar
 | `1.jpg` …, `sheet.jpg` | The numbered pictures, at most 12, and all of them on one. A capture with no mark and no click has one: the display at the end                                                                                                                                                                                                |
 | `context.json`         | What the text's script answers: the words, the marks, and the pictures under `"itx/images"`                                                                                                                                                                                                                                   |
 | `seen.json`            | What a model read under each mark, for a reader that gets no picture: a model's claim                                                                                                                                                                                                                                         |
-| `transcript.json`      | The words with their times (`segments`: `t`, `to`, `text`, `words`), as this Mac's speech model heard them (`by`): a model's claim, not an observation                                                                                                                                                                         |
+| `transcript.json`      | The words with their times (`segments`: `t`, `to`, `text`, `words`), as the speech model heard them (`by`: the one the rule picked at the start): a model's claim, not an observation                                                                                                                                                       |
 | `capture.json`         | The observations: `screen` and `voice` (the two files below), `window` (the app in front, its window's title, a browser's page URL, its accessibility tree: a new one at each change), `click` and `ink` (the points, and the accessibility element under them), `picture`; the numbered pictures (`panels`); and the display |
 | `pictures/01.jpg` …    | At most 12 sharp stills of the whole display: at each mark, at the start and the end, at a change of window, at a click                                                                                                                                                                                                       |
 | `screen.mp4`           | The display under the pointer, with the ink on it and your voice: small (1600 pixels wide, 10 pictures a second)                                                                                                                                                                                                              |
@@ -601,7 +603,7 @@ listens: talk, type, or both, and press **Return**. That is all the bar knows: i
 and no list of actions. What happens with your words is the mind's own matter.
 
 - **The microphone.** The bar starts by listening. What you say is written into the text as you
-  say it, with the model of dictation ("Dictation" below: at OpenAI with a key, else on this Mac),
+  say it, by the one transcriber ("Listening" below: at OpenAI when it can be reached, else on this Mac),
   with the word list of the mind the input goes to. The
   button at the right shows the loudness; a click, or **⌘D**, turns the microphone off, and again
   on. Words that you change by hand stay as you made them: only what you say after that comes in.
@@ -677,9 +679,9 @@ with a lock while it stays on and the time since the start.
   (`SpeechSession`), which reads the one microphone stream ("Listening" below). When one starts
   while the other listens, the other ends first: its last words are written where they belonged.
 - **GPT Live Transcribe at OpenAI, when the lent mind has an OpenAI key (or this Mac has one);
-  else on this Mac.** Settings ›
-  Dictation (the panel's Settings button opens it) chooses the model of dictation and the input
-  bar. A capture always uses a local model (the chosen one, or Oruk Fourier 2B).
+  else on this Mac.** One rule picks who hears for every use: dictation, the input bar, the
+  capture and Always listen ("Listening" below). Settings › Dictation (the panel's Settings button
+  opens it) shows the model; "On this Mac" there makes the local model hear every use.
 
   | Model                       | Runs         | Download | License   | Note                                                     |
   | --------------------------- | ------------ | -------- | --------- | -------------------------------------------------------- |
@@ -772,19 +774,17 @@ with a lock while it stays on and the time since the start.
   and when neither is left it is the local default (Oruk Fourier 2B); a choice in Settings stays.
 - **The local models run on this Mac.** With them no sound and no text leaves the Mac. Each one
   shows its size and whether it is on this Mac. A model that is not on this Mac downloads when you
-  choose it, with its progress in its row of Settings › Dictation, and is the model once it loaded.
+  choose it, with its progress in its row of Settings › Dictation, and is the model once its files are here.
   The choice is kept in the app's defaults (`speechModel`). They need Apple silicon.
   - **Oruk Fourier 2B** (the default) is a fine-tune of Qwen3-ASR, 2.04B parameters, as Oruk's
     MLX 8-bit form (`mlx/8bit`, 2.46 GB). It runs on the GPU through
     [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.6.7, in a Python process of its own that
     the app starts: it loads the model once, then hears each stretch that the app sends it as JSON
-    lines on its stdin (`Sources/SpeechText/Fourier.swift`). The process holds 2.6 GB, so it stays
-    only while it is needed all the time: with Always listen on, or with a local model chosen for
-    dictation. With GPT Live Transcribe chosen, it starts at its first use (a capture, a failure of
-    OpenAI, which waits for it) and ends 5 minutes after its last pass; the next use starts it
-    again. A start takes 0.9 to 2.1 s once its files were read before (measured three times on
-    25 November 2026, M4 Max, from the start of the process to its "ready"). It also ends when the
-    app ends or another local model is chosen. The word list's terms go into its prompt. Its files
+    lines on its stdin (`Sources/SpeechText/Fourier.swift`). The process holds 2.6 GB, so it is
+    loaded only when it must hear (`LocalSpeech`; "Listening" below): on a normal day online it is
+    never loaded. A load took 0.92 to 1.38 s once its files were read before (measured three times
+    on 25 November 2026, M4 Max, `speech-bench`, from the start of the load to a ready engine). It
+    also ends when the app ends or another local model is chosen. The word list's terms go into its prompt. Its files
     are in `~/Library/Application Support/iterate-speech/oruk-fourier-2b` (2.85 GB), shared by
     every copy of the app on this Mac (`ITERATE_MAC_FOURIER_FOLDER` names another folder): a
     pinned uv (0.11.28) makes a venv with its own Python 3.12, installs the 47 packages of
@@ -794,7 +794,8 @@ with a lock while it stays on and the time since the start.
     each step. The first use downloads 2.68 GB in all (about 2.5 minutes on the owner's line).
     On a Mac that had Parakeet v3 before Fourier became the default, v3 stays the model until
     Fourier is on this Mac: the installed app gets Fourier in the background a few seconds after
-    its start, with its progress in its row, and uses it once it loaded.
+    its start, with its progress in its row (it downloads, and does not load), and uses it once its
+    files are here.
   - **Why Fourier, and why 8-bit.** On the bench's synthetic set with no word list (25 November
     2026), Fourier 8-bit had WER 16.3 (plain sentences 3.3), Parakeet v3 27.4 (13.3), Parakeet
     Ultra 29.2. Fourier's BF16 checkpoint (4.08 GB, converted to MLX by
@@ -809,15 +810,15 @@ with a lock while it stays on and the time since the start.
     [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex, from
     `~/Library/Application Support/FluidAudio`. Ultra got more terms wrong than v3 on the owner's
     own captures and a fixture of the list's hard terms (`harness/speech-bench`, 24 November 2026).
-- **No wait on first use.** Core ML prepares a model for the Neural Engine at its first load after
-  each start of the app (about 25 s on a MacBook Pro); Fourier's process reads its model and makes
-  a warm-up pass (1.0 s once its files were read before). The app loads the chosen local model
-  in the background a few seconds after it starts, when its files are on this Mac, so the first
-  dictation is at once. With GPT Live Transcribe chosen, the local default (for captures and for a
-  failure of OpenAI) loads there too when it is Parakeet; Oruk Fourier loads at its first use, as
-  above. You can talk during a load: the microphone is open and what you say is
-  kept (the last 60 s). The pill says "Getting the speech model: N%" only while files download,
-  and "Loading the speech model" while they only load.
+- **The local model is ready when it must hear.** It loads at once when the rule picks it: the
+  network drops (`NWPathMonitor`), no mind opens OpenAI and this Mac has no key, or "On this Mac"
+  is chosen; so an offline dictation finds it ready. A stretch whose OpenAI fails loads it too,
+  and waits for it. A load comes 3 s after the app's start at the earliest, and a home of its own
+  loads nothing before a use unless an audio fixture is set. Core ML prepares a Parakeet model for
+  the Neural Engine at its first load (24.9 s, then 0.25 s while macOS keeps what it prepared;
+  measured on 25 November 2026). You can talk during a load: the microphone is open and what you
+  say is kept (the last 60 s). The pill says "Getting the speech model: N%" only while files
+  download, and "Loading the speech model" while they only load.
 - **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
   `words.md`, at the root of its config repo: one list item for each term, and after a colon the
   wrong forms that a transcript showed (`- Templestein: temple stein, temple steen`). The app reads
@@ -889,20 +890,22 @@ hears the whole stretch at each pass, at most once a second, and never sooner th
 pass's time (`PacedEngine`). A pass took 0.08 s for 1 s of speech, 0.15 s for 4 s, 0.38 s for
 10 s and 0.45 s for 12 s (25 November 2026, an M4 Max). A stretch ends at a pause of 0.7 s, or
 after 14 s at its quietest moment; then its text is final: one more pass, one segment, with its
-times from the start (Fourier gives no times of its words). With GPT Live Transcribe the
-whole dictation is one segment, with no times of its words.
+times from the start (Fourier gives no times of its words). With GPT Live Transcribe a
+dictation is one segment, with no times of its words; a capture is a segment at each pause.
 
 ## Listening: one microphone, in layers
 
 Dictation, the input bar, Always listen and the record's microphone are layers on ONE stream of
-the microphone. Each layer has its events, and the layer above reads them.
+the microphone. Each layer has its events, and the layer above reads them. Speech-to-text is ONE
+capability (`Transcriber`), and two providers satisfy it: OpenAI and the local model. The
+features are built on what it writes, and none of them chooses a model.
 
 | Layer | What it is | Its events | Who reads them |
 | --- | --- | --- | --- |
 | 1. The microphone stream | `MicStream`: the one owner of the input device (an `AVAudioEngine` tap, or the audio fixture) | `frame`: 16 kHz mono samples and the wall time of the first one; the device's own buffers and their host time; `failed` | `SpeechSession` (dictation, the input bar), Always listen, the record's `mic-0` |
 | 2. Speech detection | `SpeechGate` on Silero VAD | `speech started` (its time), `speech ended` (its start and end) | Always listen |
-| 3. The transcription stream | A transcriber for each stretch of speech | `partial` (ephemeral: the stretch's words so far, as heard and with the word list's corrections); `segment` (final: the text, the heard words, the corrections, the start and end, the model, the stretch and what heard it) | The pill and the input bar (the partials of their own stretch); `Listening` (the segments: the transcript in memory and the record's `transcript` track) |
-| 4. The features | Dictation, the input bar, the history and "Paste the last transcript", Always listen | | The person |
+| 3. The transcription stream | The one `Transcriber`: OpenAI or the local model, as the rule picks, for each stretch of speech | `partial` (ephemeral: the stretch's words so far, as heard and with the word list's corrections); `segment` (final: the text, the heard words, the corrections, the start and end, the model, the stretch and what heard it) | The pill and the input bar (the partials of their own stretch); `Listening` (the segments: the transcript in memory and the record's `transcript` track) |
+| 4. The features | Dictation, the input bar, the capture, the history and "Paste the last transcript", Always listen, the record's `transcript` track | | The person |
 
 - **The stream** (`Sources/SpeechText/MicStream.swift`) runs while anyone reads it, and only then.
   The first reader starts the device, the last one stops it. A change of device (headphones in,
@@ -921,12 +924,36 @@ the microphone. Each layer has its events, and the layer above reads them.
   `VoiceMeetCore`) starts a stretch at a piece of 0.5 or more, 0.2 s before it, and ends it after
   0.8 s under 0.35, 0.2 s after the last piece of speech. A stretch of 30 s ends there and the
   next one starts.
-- **The transcription stream.** A key's listening is one stretch (`dictation-<n>`, `input-<n>`):
-  the chosen model hears it as before (GPT Live Transcribe through the mind, or the local
-  model), and each final segment gets its wall times from the stretch's first sample. Always
-  listen's stretches (`listen-<n>`) go to the LOCAL model alone, once, when the stretch ends: no
-  sound leaves the Mac without a key. While a key listens, Always listen holds: the stretch that
-  goes on ends at that moment, so a stretch is never put into words twice.
+- **The transcription stream.** One transcriber (`Sources/SpeechText/Transcriber.swift`) turns
+  a stretch of the microphone stream, a growing stretch with its partials, or a capture's buffers
+  with their times, into segments with words and times. ONE rule picks its provider for every
+  use (`SpeechRoute`, in `VoiceMeetCore`):
+
+  | The rule's inputs | Who hears |
+  | --- | --- |
+  | "On this Mac" chosen in Settings › Dictation | The local model, always |
+  | No network (`NWPathMonitor`) | The local model |
+  | A lent mind that did not say no to OpenAI, or this Mac's own key | OpenAI (GPT Live Transcribe), through the mind's socket (`RelaySocket`), else the key |
+  | Neither: no mind, or it said no (`refused`), and no key | The local model |
+
+  A stretch whose OpenAI fails (no session in 5 s, an error while you talk, no final in 5 s) goes
+  to the local model whole, as dictation's fallback always did; a capture's goes from the end of
+  the last segment OpenAI answered. A key's listening is one stretch (`dictation-<n>`,
+  `input-<n>`), and each final segment gets its wall times from the stretch's first sample.
+  Always listen's stretches (`listen-<n>`) go to the transcriber once, when the stretch ends. While
+  a key listens, Always listen holds: the stretch that goes on ends at that moment, so a stretch is
+  never put into words twice. Each segment names the model that heard it. The log says the rule's
+  answer at each change ("speech: OpenAI hears every use (oruk-fourier-2b behind it): OpenAI can
+  be reached"), and each listening's provider and why.
+- **The local model loads only when it must hear** (`LocalSpeech`, and `LocalModelLife` in
+  `VoiceMeetCore`). It loads at once when the rule picks it (so an offline dictation finds it
+  ready), and for a stretch whose OpenAI failed. It is unloaded once the rule picks OpenAI again
+  and nothing used it for 5 minutes; a stretch that it hears keeps it. On a normal day online it is
+  never loaded. Each load and unload is a line of the speech log, with its reason and its seconds
+  (`oruk-fourier-2b loads: the network is down`, `oruk-fourier-2b is loaded in 0.9 s: …`,
+  `oruk-fourier-2b is unloaded after 412.3 s: OpenAI hears again and the local model was unused
+  for 300 s`). A load of Oruk Fourier took 0.92 to 1.38 s (above). `ui.state`'s `speech` has
+  `network` and `route` (`provider`, `why`, `local`).
 - **The segments are recorded** as a record track of their own, `transcript`: one JSON line for
   each segment, in a file for each slot, `/devices/<name>/record/transcript/<YYYY-MM-DD>/<HH>/<MM>-<SS>.jsonl`
   (`application/x-ndjson`). A line is `{ t, to, text, heard, corrections: [{ heard, term }], model,
@@ -942,8 +969,11 @@ the microphone. Each layer has its events, and the layer above reads them.
   socket) writes its newest entry where the cursor is: with Always listen, also what you said with
   no key held.
 - **Always listen** (Settings › Dictation; `listen.always` in the defaults) is OFF unless you turn
-  it on. On, the microphone stays open with no key, each stretch of speech is put into words on
-  this Mac, and the segments go into the record. The mark (or the mind's face) in the menu bar has a
+  it on. On, the microphone stays open with no key, each stretch of speech is put into words by
+  the transcriber, and the segments go into the record. Online that is OpenAI: about $0.017 a
+  minute of SPEECH. Speech detection gates it, so only the stretches go and silence costs nothing;
+  each stretch opens a socket of its own (the standby stays for the next key). Offline, or with "On
+  this Mac", the local model hears it and no sound leaves the Mac. The mark (or the mind's face) in the menu bar has a
   small orange dot at its upper left while it listens; the rest of it does not change. Off, nothing listens
   without a key, and everything works as before, through the same layers.
 
@@ -959,7 +989,8 @@ listen's partials.
 
 The owner's own voice (`--set owner`, 25 November 2026) confirmed the synthetic set, and
 GPT Live Transcribe is now the default with a key ("Dictation" above), with the mind's key on a
-socket opened through the mind (or this Mac's own key) and a local model only when OpenAI fails. What follows is the
+socket opened through the mind (or this Mac's own key) and a local model only when OpenAI cannot
+be reached or fails, for every use ("Listening"). What follows is the
 measure and the proposal before it; the parts not built are local always (both models on every
 dictation) and the wait of X for OpenAI's final. The key in the mind is built, in another shape
 than proposed below: no client secret, the socket itself opens through the mind, and the app sends

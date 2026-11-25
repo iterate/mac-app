@@ -40,13 +40,22 @@ public final class SpeechRecognizer: @unchecked Sendable {
     private let words: WordList
     private let heard: @Sendable (Event) -> Void
     private let engine: (@Sendable () async throws -> SpeechEngine)?
+    private let done: @Sendable () -> Void
 
-    /// `engine` stands in for the model, for a test.
-    public init(model: SpeechModel, words: WordList, engine: (@Sendable () async throws -> SpeechEngine)? = nil, heard: @escaping @Sendable (Event) -> Void) {
+    /// `engine` gives the model's engine (the transcriber's: `LocalSpeech` counts its use; a test's
+    /// stands in for the model); with none, `SpeechModels` loads it. `start` is the time in seconds
+    /// of the first sample: a capture's fallback starts where OpenAI's last segment ended. `done`
+    /// runs once, when it wrote its last segment or was cancelled.
+    public init(
+        model: SpeechModel, words: WordList, start: Double = 0, engine: (@Sendable () async throws -> SpeechEngine)? = nil,
+        done: @escaping @Sendable () -> Void = {}, heard: @escaping @Sendable (Event) -> Void
+    ) {
         self.model = model
         self.words = words
         self.engine = engine
+        self.done = done
         self.heard = heard
+        given = Int((start * Double(SpeechStretch.rate)).rounded())
     }
 
     /// Starts to load the model and to write. Call it once.
@@ -91,32 +100,6 @@ public final class SpeechRecognizer: @unchecked Sendable {
         return await work?.value ?? []
     }
 
-    /// `finish`, waiting at most `seconds`: nil when the time ran out (a model that still comes over
-    /// a slow network). Then the recognizer is cancelled, and no segment comes after the answer.
-    public func finish(within seconds: Double) async -> [SpeechSegment]? {
-        final class Once: @unchecked Sendable {
-            let lock = NSLock()
-            var continuation: CheckedContinuation<[SpeechSegment]?, Never>?
-            func resume(_ answer: [SpeechSegment]?) {
-                lock.withLock {
-                    continuation?.resume(returning: answer)
-                    continuation = nil
-                }
-            }
-        }
-        let once = Once()
-        let answer = await withCheckedContinuation { continuation in
-            once.lock.withLock { once.continuation = continuation }
-            Task { once.resume(await self.finish()) }
-            Task {
-                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
-                once.resume(nil)
-            }
-        }
-        if answer == nil { cancel() }
-        return answer
-    }
-
     /// Ends the input. What was not yet written is dropped.
     public func cancel() {
         end(dropped: true)
@@ -142,6 +125,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
     }
 
     private func write() async -> [SpeechSegment] {
+        defer { done() }
         let started = Date()
         let engine: SpeechEngine
         do {
@@ -177,7 +161,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
             // the words' own times, where the model gave them: the stretch starts before the voice
             let segment = SpeechSegment(
                 start: timed.first?.start ?? offset, end: timed.last?.end ?? offset + Double(count) / rate, text: text, heard: corrected.heard,
-                words: timed)
+                words: timed, model: model.id)
             return (segment, corrected)
         }
         func ended(_ count: Int) async {

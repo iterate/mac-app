@@ -1067,8 +1067,9 @@ const scenarios = {
 
   /**
    * Always listen (README, "Listening"), with the fixture in place of the microphone and no key:
-   * the sentence after 1.5 s of silence is one stretch, put into words on this Mac with the word
-   * list; `listen.write` (⌥⇧W, "write what I just said") writes it; the stretch reaches the fake
+   * the sentence after 1.5 s of silence is one stretch, put into words by the one transcriber with
+   * the word list. The rule picks the local model: the fake mind refuses OpenAI and the copy has no
+   * key (a stretch that comes before the mind said no tries it, is refused, and falls back); `listen.write` (⌥⇧W, "write what I just said") writes it; the stretch reaches the fake
    * mind as one line of the record's `transcript` track. Then 20 s of the fixture's silence with
    * Always listen on: its figures are in the result (`perf.on`).
    */
@@ -1116,7 +1117,9 @@ const scenarios = {
         const on = perfDelta(before, (await run.state()).perf);
         const log = readFileSync(join(home, "logs/app.log"), "utf8");
         const detector = /always listen: listens: (.+)/.exec(log)?.[1] ?? null;
-        const timing = /always listen: stretch \d+: ([^\n]+)/.exec(log)?.[1] ?? null;
+        const timing = /always listen: stretch \d+: ([\d.]+ s, \d+ words[^\n]+)/.exec(log)?.[1] ?? null;
+        // who heard it follows the rule: no OpenAI here, so the local model
+        if (!/, by (oruk-fourier-2b|parakeet-v3|parakeet-ultra)$/.test(timing ?? "")) throw new Error(`the stretch was not heard by the local model: ${timing}`);
         return { on, detector, timing, stretchSeconds };
       } finally {
         await run.quit();
@@ -1126,7 +1129,8 @@ const scenarios = {
 
   /**
    * A capture's voice, as pushed buffers with their times: the fixture, with 2 s of silence first,
-   * through the recognizer that a capture uses (speech-bench), gives timed segments with the terms.
+   * through the local provider of the transcriber (speech-bench's recognizer: what hears a capture
+   * when OpenAI cannot be reached or fails), gives timed segments with the terms.
    */
   "capture-transcript-fixture": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",

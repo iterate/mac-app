@@ -22,13 +22,17 @@ public struct SpeechSegment: Equatable, Sendable {
     /// The text as the model heard it, before the word list's repair.
     public let heard: String
     public let words: [Word]
+    /// The model that heard it (`gpt-live-transcribe`, `oruk-fourier-2b`): the transcriber's rule
+    /// picks it, and a stretch whose OpenAI failed is the local model's.
+    public let model: String
 
-    public init(start: Double, end: Double, text: String, heard: String? = nil, words: [Word] = []) {
+    public init(start: Double, end: Double, text: String, heard: String? = nil, words: [Word] = [], model: String = "") {
         self.start = start
         self.end = end
         self.text = text
         self.heard = heard ?? text
         self.words = words
+        self.model = model
     }
 
     /// The segment as the transcript of a capture holds it, and as the app sends it to the job

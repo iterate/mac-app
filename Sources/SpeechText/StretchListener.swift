@@ -66,10 +66,12 @@ actor SpeechProbability {
     }
 }
 
-/// ALWAYS LISTEN: layers 2 and 3 with no key (README, "Listening"). It reads the microphone stream,
-/// finds each stretch of speech (`SpeechGate` on `SpeechProbability`), and when a stretch ends it is
-/// put into words by the LOCAL model, once, with the word list: no sound leaves the Mac. Each
-/// stretch is one final segment (`listen-<n>`) of the transcription stream.
+/// ALWAYS LISTEN: layer 2 with no key, and a feature on the transcription stream (README,
+/// "Listening"). It reads the microphone stream, finds each stretch of speech (`SpeechGate` on
+/// `SpeechProbability`), and when a stretch ends the one `Transcriber` puts it into words, once,
+/// with the word list: OpenAI while it can be reached (speech detection gates it: silence costs
+/// nothing), else the local model. Each stretch is one final segment (`listen-<n>`) of the
+/// transcription stream.
 ///
 /// While a key listens (dictation, the input bar) it is held: the stretch that goes on is cut at
 /// that moment and put into words, and nothing is detected until the hold ends, so that one stretch
@@ -95,24 +97,19 @@ public final class StretchListener: @unchecked Sendable {
     private let stream: MicStream
     private let heard: @Sendable (Event) -> Void
     private let probability: SpeechProbability
-    private let engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)?
+    private let transcriber: Transcriber
     private let lock = NSLock()
-    private var model = SpeechModel.default
     private var words = WordList.empty
     private var subscription: MicSubscription?
     private var inputs: AsyncStream<Input>.Continuation?
     private var work: Task<Void, Never>?
     private var count = 0
 
-    /// `useModel`: Silero (false in a test: the energy gate alone). `engine` stands in for the
-    /// speech model, for a test.
-    public init(
-        stream: MicStream, useModel: Bool = true, engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)? = nil,
-        heard: @escaping @Sendable (Event) -> Void
-    ) {
+    /// `useModel`: Silero (false in a test: the energy gate alone).
+    public init(stream: MicStream, transcriber: Transcriber, useModel: Bool = true, heard: @escaping @Sendable (Event) -> Void) {
         self.stream = stream
         self.heard = heard
-        self.engine = engine
+        self.transcriber = transcriber
         probability = SpeechProbability(useModel: useModel)
     }
 
@@ -189,12 +186,9 @@ public final class StretchListener: @unchecked Sendable {
 
     private let wake = Wake()
 
-    /// The local model and the word list of the next stretches.
-    public func use(_ model: SpeechModel, words: WordList) {
-        lock.withLock {
-            self.model = model
-            self.words = words
-        }
+    /// The word list of the next stretches.
+    public func use(_ words: WordList) {
+        lock.withLock { self.words = words }
     }
 
     /// Reads the stream. Throws when the microphone does not start.
@@ -323,22 +317,18 @@ public final class StretchListener: @unchecked Sendable {
         await transcribing?.value
     }
 
-    /// One stretch into words by the local model: one segment, or none when it heard no words.
+    /// One stretch into words by the transcriber: one segment, or none when it heard no words.
     private func transcribe(_ samples: [Float], start: Double, number: Int) async {
-        let (model, words) = lock.withLock { (self.model, self.words) }
+        let words = lock.withLock { self.words }
         let began = Date()
-        let engine = self.engine.map { make in { @Sendable in try await make(model, words) } }
-        let recognizer = SpeechRecognizer(model: model, words: words, engine: engine) { _ in }
-        recognizer.start()
-        recognizer.push(samples)
-        let segments = await recognizer.finish()
+        let segments = await transcriber.transcribe(samples, words: words) { [heard] in heard(.note("stretch \(number): \($0)")) }
         let seconds = Double(samples.count) / Double(SpeechStretch.rate)
         guard let first = segments.first, let last = segments.last else {
             return heard(.note("stretch \(number): \(String(format: "%.1f", seconds)) s, no words"))
         }
         let said = segments.reduce(HeardText.empty) { HeardText.join($0, HeardText($1.heard, words: words)) }
         heard(.segment(TranscriptSegment(
-            stretch: "listen-\(number)", origin: .listen, start: start + first.start, end: start + last.end, heard: said, model: model.id)))
-        heard(.note("stretch \(number): \(String(format: "%.1f", seconds)) s, \(Spoken.wordCount(said.text)) words in \(String(format: "%.2f", Date().timeIntervalSince(began))) s"))
+            stretch: "listen-\(number)", origin: .listen, start: start + first.start, end: start + last.end, heard: said, model: last.model)))
+        heard(.note("stretch \(number): \(String(format: "%.1f", seconds)) s, \(Spoken.wordCount(said.text)) words in \(String(format: "%.2f", Date().timeIntervalSince(began))) s, by \(last.model)"))
     }
 }

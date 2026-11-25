@@ -12,9 +12,9 @@ public protocol SpeechClient: AnyObject {
 /// (README, "Dictation"). One at a time: a second start, by the other feature, ends the first
 /// cleanly (its last words are written and go where they belonged) and then starts. It reads the
 /// microphone stream (`MicStream`, layer 1) from the start of a listening to its end, and it is a
-/// transcriber of layer 3: each listening is a stretch (`dictation-<n>`, `input-<n>`) whose
-/// partials and final segments go to `transcribed`, with their wall times. A capture pushes its
-/// own sound into a recognizer of its own.
+/// feature of layer 4 on the transcription stream: each listening is a stretch (`dictation-<n>`,
+/// `input-<n>`) that the one `Transcriber` hears (its rule picks OpenAI or the local model), and its
+/// partials and final segments go to `transcribed`, with their wall times.
 ///
 /// It holds what both features share: the permission, the model's progress, the numbering of the
 /// listenings (a late word of an old one changes nothing) and the final text.
@@ -49,16 +49,14 @@ public final class SpeechSession {
         case failed(String)
     }
 
-    /// The model of dictation, the input bar and capture: the stored choice.
-    public var model: () -> SpeechModel = { .default }
+    /// Runs at each start, before the transcriber is asked (the app reads its key again then).
+    public var willStart: () -> Void = {}
     /// False in a home of its own with no audio fixture: no microphone opens there.
     public var mayOpenMicrophone = true
     /// What macOS allows for the microphone. An audio fixture needs no permission.
     public var authorization: () -> AVAuthorizationStatus = { environmentFixture != nil ? .authorized : AVCaptureDevice.authorizationStatus(for: .audio) }
     /// A line for the app's log: counts and times, never the words.
     public var log: (String) -> Void = { _ in }
-    /// The recognizer of a model that runs online (`OnlineSpeech.recognizer`); nil for a local one.
-    public var online: (SpeechModel, WordList, @escaping @Sendable (SpeechRecognizer.Event) -> Void) -> SpeechListening? = { _, _, _ in nil }
     /// The transcription stream: each listening's partials and final segments, on the main thread.
     public var transcribed: (TranscriptEvent) -> Void = { _ in }
     /// A listening started (`true`) or none listens now: Always listen holds while a key listens.
@@ -68,17 +66,16 @@ public final class SpeechSession {
     public private(set) var ending: (stretch: String, start: Double, end: Double)?
 
     public let stream: MicStream
-    private let engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)?
+    public let transcriber: Transcriber
 
-    /// `engine` stands in for the model, for a test.
-    public init(stream: MicStream = .shared, engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)? = nil) {
+    public init(stream: MicStream = .shared, transcriber: Transcriber) {
         self.stream = stream
-        self.engine = engine
+        self.transcriber = transcriber
     }
 
     /// `source` stands in for the microphone: a stream of its own on it.
-    public convenience init(source: @escaping () -> SpeechSource, engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)? = nil) {
-        self.init(stream: MicStream(device: source), engine: engine)
+    public convenience init(source: @escaping () -> SpeechSource, transcriber: Transcriber) {
+        self.init(stream: MicStream(device: source), transcriber: transcriber)
     }
 
     /// The wall time of a listening's first sample: the zero of its segments' times.
@@ -96,6 +93,7 @@ public final class SpeechSession {
         let recognizer: SpeechListening
         let stretch: String
         let origin: TranscriptSegment.Origin
+        /// The model it started with: the rule's provider then.
         let model: SpeechModel
         let words: WordList
         let zero: Zero
@@ -151,12 +149,11 @@ public final class SpeechSession {
         newest = nil
         round += 1
         let round = round
-        let model = model()
-        let engine = self.engine.map { make in { @Sendable in try await make(model, words) } }
+        willStart()
         let heard: @Sendable (SpeechRecognizer.Event) -> Void = { [weak self] event in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.heard(event, round: round, client: client) } }
         }
-        let recognizer = online(model, words, heard) ?? SpeechRecognizer(model: model, words: words, engine: engine, heard: heard)
+        let (recognizer, model) = transcriber.listening(.live, words: words, heard: heard)
         let zero = Zero()
         let subscription: MicSubscription
         do {
@@ -181,7 +178,7 @@ public final class SpeechSession {
             model: model, words: words, zero: zero)
         published[round] = 0
         recognizer.start()
-        log("listening \(round) starts with \(model.id), \(words.entries.count) terms\(hearsFixture ? ", from the audio fixture" : "")")
+        log("listening \(round) starts with \(model.id) (\(transcriber.current.route.why.words)), \(words.entries.count) terms\(hearsFixture ? ", from the audio fixture" : "")")
         client.speech(.phase(model.isOnDisk ? .listening : .loading(downloading: 0)))
         return nil
     }
@@ -208,7 +205,7 @@ public final class SpeechSession {
         let zero = listening.zero.value
         transcribed(.segment(TranscriptSegment(
             stretch: listening.stretch, origin: listening.origin, start: zero + segment.start, end: zero + segment.end,
-            heard: HeardText(segment.heard, words: listening.words), model: listening.model.id)))
+            heard: HeardText(segment.heard, words: listening.words), model: segment.model.isEmpty ? listening.model.id : segment.model)))
     }
 
     /// Closes the microphone and drops what was not written.
