@@ -20,7 +20,9 @@
     "bridge",
     "pages",
     "run-on-mac.sh",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "NOTICE"
   ],
   "os": [
     "darwin"
