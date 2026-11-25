@@ -14,7 +14,7 @@
 // `--keep` keeps each home, with the app's log in <home>/logs/app.log. Every copy it started is
 // killed when it ends: after a scenario, after a failure, an exception, Ctrl-C or SIGTERM.
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -101,7 +101,21 @@ function withMind(home, minds = [{ mind: MIND, name: NAME }], { words, seed } = 
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
   mkdirSync(join(iterate, "dist"), { recursive: true });
-  writeFileSync(join(iterate, "bin/iterate.js"), "// the bridges import ../dist/node.mjs beside this file\n");
+  // the bridges import ../dist/node.mjs beside this file; `provide` (a copy started with --lend)
+  // says the state in provide.json beside it, and stays (live) or ends (exit) as it says
+  writeFileSync(
+    join(iterate, "bin/iterate.js"),
+    `import { existsSync, readFileSync } from "node:fs";
+if (process.argv[2] === "provide") {
+  const file = ${JSON.stringify(join(iterate, "provide.json"))};
+  const { exit, ...state } = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : { state: "live", again: false };
+  const at = process.argv.indexOf("--mind"), named = process.argv.indexOf("--name");
+  console.log(JSON.stringify({ mind: process.argv[at + 1], name: process.argv[named + 1], ...state }));
+  if (exit !== undefined) process.exit(exit);
+  setInterval(() => {}, 1 << 30);
+}
+`,
+  );
   writeFileSync(join(iterate, "seed.json"), JSON.stringify(seed ?? []));
   if (words) {
     // the mind's list, and the copy the app keeps of it: dictation has it from the start
@@ -159,8 +173,8 @@ for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
 }
 
 /** The app in `home`, until `quit`. */
-async function start(app, home, env = {}) {
-  const child = spawn(app, ["--home", home], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "ignore"] });
+async function start(app, home, env = {}, args = []) {
+  const child = spawn(app, ["--home", home, ...args], { env: { ...process.env, ...env }, stdio: ["ignore", "ignore", "ignore"] });
   running.add(child);
   const ended = new Promise((resolve) => child.on("exit", resolve)).then(() => running.delete(child));
   const control = (method, parameters) => ask(join(home, "control.sock"), method, parameters);
@@ -179,10 +193,259 @@ async function start(app, home, env = {}) {
     await quit();
     throw error;
   }
-  return { control, endpoint, quit, state: () => control("ui.state") };
+  return { control, endpoint, quit, pid: child.pid, state: () => control("ui.state") };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Waits until the copy's start is over: a second with at most 5 wake-ups, at most 30 s. macOS
+ * starts an AppKit app with work of its own on the main thread, which no code of the app asks
+ * for: on a GitHub runner (macOS 15 in a virtual machine) about 60 wake-ups a second for its
+ * first 8 to 10 s, in AppKit alone too (harness/launch-baseline.swift, 25 Nov 2026); on a Mac
+ * none. An idle window that starts in those seconds measures macOS, not the app. The answer is
+ * the seconds waited.
+ */
+async function settled(run) {
+  const started = Date.now();
+  let last = (await run.state()).perf;
+  while (Date.now() - started < 30000) {
+    await sleep(1000);
+    const now = (await run.state()).perf;
+    if (now.interruptWakeups - last.interruptWakeups <= 5) break;
+    last = now;
+  }
+  return Math.round((Date.now() - started) / 100) / 10;
+}
+
+/** What changed in `perf` (ui.state) from `a` to `b`: the CPU, the wake-ups and the counters. */
+function perfDelta(a, b) {
+  const counters = {};
+  for (const [name, n] of Object.entries(b.counters ?? {})) counters[name] = n - (a.counters?.[name] ?? 0);
+  return {
+    cpuMs: Math.round((b.cpuSeconds - a.cpuSeconds) * 1000),
+    idleWakeups: b.idleWakeups - a.idleWakeups,
+    interruptWakeups: b.interruptWakeups - a.interruptWakeups,
+    rssMB: Math.round(b.rss / 1e5) / 10,
+    openFiles: b.openFiles,
+    threads: b.threads,
+    counters,
+  };
+}
+
+/** Throws when a figure is over its limit, with every figure in the message. */
+function overLimits(figures, limits) {
+  return Object.entries(limits).filter(([name, limit]) => (figures[name] ?? figures.counters?.[name] ?? 0) > limit);
+}
+
+/** Where the app's threads spend `seconds` (`sample`), for a failed idle check: the call graph, cut. */
+function sampleOf(pid, home, seconds) {
+  const file = join(home, "idle.sample.txt");
+  try {
+    execFileSync("/usr/bin/sample", [String(pid), String(seconds), "-mayDie", "-file", file], { stdio: "ignore", timeout: 60000 });
+    const text = readFileSync(file, "utf8");
+    const graph = text.slice(text.indexOf("Call graph:"), text.indexOf("Total number in stack"));
+    const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-60).join("\n");
+    return `--- sample of the idle app (pid ${pid}) ---\n${graph.split("\n").slice(0, 1500).join("\n")}\n--- its log ---\n${log}\n--- end of sample ---\n`;
+  } catch (error) {
+    return `--- no sample: ${error.message} ---\n`;
+  }
+}
+
+/** A copy's figures each second for its first 30 s, and its log: when a start's cost begins and ends. */
+async function launchSeries(app, minds, args) {
+  const home = mkdtempSync(join(tmpdir(), "itx-"));
+  withMind(home, minds);
+  const t0 = Date.now();
+  const run = await start(app, home, {}, args);
+  const lines = [];
+  let runLoop = "";
+  try {
+    let last = (await run.state()).perf;
+    let threads = new Map();
+    while (Date.now() - t0 < 30000) {
+      await sleep(1000);
+      const state = await run.state();
+      const d = perfDelta(last, state.perf);
+      last = state.perf;
+      // each thread that worked in the second, by its name (or its id), and its milliseconds
+      const answer = await run.control("perf.threads");
+      const now = new Map((answer.threads ?? []).map((t) => [t.id, t]));
+      // the main run loop's timers in the third second: what wakes the main thread then
+      if (lines.length === 2) {
+        const timers = new Map();
+        for (const line of (answer.mainRunLoop ?? "").split("\n")) {
+          const timer = line.match(/<CFRunLoopTimer (0x[0-9a-f]+)/);
+          if (timer) timers.set(timer[1], line.replace(/^.*?\{/, "").replace(/, context = .*$/, "").slice(0, 300));
+        }
+        runLoop = [...timers.values()].join("\n");
+      }
+      const worked = [...now.values()]
+        .map((t) => [t.name || `#${t.id}`, t.cpuMs - (threads.get(t.id)?.cpuMs ?? 0), !threads.has(t.id)])
+        .filter(([, ms, isNew]) => ms >= 0.5 || isNew)
+        .map(([name, ms, isNew]) => `${isNew ? "+" : ""}${name}:${ms.toFixed(1)}`);
+      const gone = [...threads.values()].filter((t) => !now.has(t.id)).map((t) => `-${t.name || `#${t.id}`}`);
+      threads = now;
+      lines.push(`${((Date.now() - t0) / 1000).toFixed(1)}s ${state.lend.phase} ${d.cpuMs}ms ${d.interruptWakeups}w ${d.idleWakeups}i th${state.perf.threads} fd${state.perf.openFiles} ${JSON.stringify(Object.fromEntries(Object.entries(d.counters).filter(([, n]) => n)))} ${[...worked, ...gone].join(" ")}`);
+    }
+  } finally {
+    await run.quit();
+  }
+  const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-80).join("\n");
+  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its main run loop in the third second ---\n${runLoop}\n--- its log ---\n${log}\n${systemLog(run.pid, t0)}--- end ---\n`;
+}
+
+/** The same seconds of a start of AppKit with nothing of the app (harness/launch-baseline.swift):
+ * whether a cost of the start is the app's or every app's on this Mac. */
+function launchBaseline(home) {
+  const binary = join(home, "launch-baseline");
+  try {
+    execFileSync("swiftc", ["-O", "-o", binary, join(root, "harness/launch-baseline.swift")], { stdio: "ignore", timeout: 300000 });
+    const lines = ["plain", "status", "swiftui"].map((variant) => execFileSync(binary, [variant], { encoding: "utf8", timeout: 60000 }).trim());
+    return `--- a start of AppKit alone, each second ---\n${lines.join("\n")}\n--- end ---\n`;
+  } catch (error) {
+    return `--- no start of AppKit alone: ${error.message} ---\n`;
+  }
+}
+
+/** What macOS's own log has of process `pid` from `t0`: its lines each second, by subsystem in
+ * the first 12 s, and the lines of its fifth second. */
+function systemLog(pid, t0) {
+  let text;
+  try {
+    text = execFileSync("/usr/bin/log", ["show", "--predicate", `processID == ${pid}`, "--last", "2m", "--style", "compact", "--info", "--debug"], { encoding: "utf8", maxBuffer: 64 << 20, timeout: 60000 });
+  } catch (error) {
+    return `--- no system log: ${error.message} ---\n`;
+  }
+  const perSecond = {}, kinds = {}, fifth = [];
+  for (const line of text.split("\n")) {
+    const at = line.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})/);
+    if (!at) continue;
+    const second = Math.floor((new Date(at[1].replace(" ", "T")).getTime() - t0) / 1000);
+    perSecond[second] = (perSecond[second] ?? 0) + 1;
+    const kind = line.match(/\] (\[[^\]]+\]|\([^)]+\))/)?.[1] ?? "?";
+    if (second >= 2 && second < 12) kinds[kind] = (kinds[kind] ?? 0) + 1;
+    if (second === 4 && fifth.length < 150) fifth.push(line.slice(0, 260));
+  }
+  const top = Object.entries(kinds).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([k, n]) => `${n} ${k}`);
+  return `--- the system log: lines each second ---\n${JSON.stringify(perSecond)}\n--- by subsystem, seconds 2 to 12 ---\n${top.join("\n")}\n--- second 4 ---\n${fifth.join("\n")}\n`;
+}
+
+function within(what, figures, limits) {
+  const over = overLimits(figures, limits);
+  if (over.length) throw new Error(`${what}: ${over.map(([name, limit]) => `${name} ${figures[name] ?? figures.counters?.[name]} > ${limit}`).join(", ")}; ${JSON.stringify(figures)}`);
+}
+
+/** The limits of the idle scenarios, over their windows: what an idle copy may cost. */
+// Measured on 25 Nov 2026 (M-series, debug build), 20 s live: 41 ms and 47 wake-ups before the
+// fixes (a ticker each second, the window's title each second, presence and the record each 2 s),
+// 15 ms and 7 after. 10 s refused: 10 state changes and 10 writes of the mark before, 0 after.
+const IDLE_LIMITS = { cpuMs: 35, interruptWakeups: 20, stateChanges: 0, statusWrites: 0, panelBodies: 0, presenceLooks: 1, recordLooks: 0 };
+const REFUSED_LIMITS = { interruptWakeups: 12, stateChanges: 0, statusWrites: 0, panelBodies: 0, lendTicks: 0 };
+// 5 s open, a countdown showing: 10 bodies of the panel and 5 state changes before, 0 and 0 after
+// (the countdown's own row is drawn each second: `lendTicks`).
+const PANEL_LIMITS = { panelBodies: 1, stateChanges: 0, lendTicks: 6 };
+
 const scenarios = {
+  /**
+   * What a copy costs while nothing happens: lent to the fake mind (live), every switch off, the
+   * panel closed, 20 s. Then a lend the mind refuses (its next try in 5 minutes), 10 s: nothing
+   * changes, so the mark and the panel are not touched. The figures are in the result (`perf`);
+   * the main queue's longest delay is read over 3 s with its watch on.
+   */
+  async idle({ app, home }) {
+    const A = { mind: MIND, name: NAME }, B = { mind: "other.example.com", name: NAME };
+    withMind(home, [A, B]);
+    const run = await start(app, home, {}, ["--lend"]);
+    try {
+      await until("the lend live", 20, async () => (await run.state()).lend.phase === "live");
+      await until("the session", 10, async () => (await run.state()).session);
+      // the start's own work ends: the bridges, the word lists, and macOS's start of the app
+      await sleep(4000);
+      const settleSeconds = await settled(run);
+      await run.control("perf.reset");
+      const before = (await run.state()).perf;
+      await sleep(20000);
+      const live = perfDelta(before, (await run.state()).perf);
+      // over a limit: 10 s more in steps of 2 s (does the cost stay?) and where the threads are.
+      // Each `ui.state` costs some milliseconds itself, so the steps are not in the window above.
+      const series = [];
+      let liveSample = "";
+      if (overLimits(live, IDLE_LIMITS).length) {
+        let step = (await run.state()).perf;
+        for (let i = 0; i < 5; i++) {
+          await sleep(2000);
+          const now = (await run.state()).perf;
+          const d = perfDelta(step, now);
+          series.push(`${d.cpuMs}ms/${d.interruptWakeups}w${Object.keys(d.counters).length ? " " + JSON.stringify(d.counters) : ""}`);
+          step = now;
+        }
+        liveSample = sampleOf(run.pid, home, 3);
+        // the cost may be the start's and over by now: two more copies, with the lend and
+        // without, their figures each second from the start beside their logs
+        for (const args of [["--lend"], []]) liveSample += await launchSeries(app, [A, B], args);
+        liveSample += launchBaseline(home);
+      }
+
+      // a refused key: provide says so and ends; the next try is in 5 minutes
+      writeFileSync(join(home, "fake-iterate/provide.json"), JSON.stringify({ state: "notAllowed", why: "No member has allowed this key yet.", waiting: false, exit: 1 }));
+      writeConfig(home, join(home, "fake-iterate"), [A, B], B.mind);
+      await until("the lend refused", 20, async () => (await run.state()).lend.phase === "not allowed");
+      await sleep(2000);
+      await run.control("perf.reset");
+      const refusedBefore = (await run.state()).perf;
+      await sleep(10000);
+      const refused = perfDelta(refusedBefore, (await run.state()).perf);
+
+      await run.control("perf.reset", { watchMain: true });
+      await sleep(3000);
+      const stall = (await run.state()).perf.mainStallMaxMs;
+      await run.control("perf.reset", { watchMain: false });
+      const result = { live, refused, mainStallMaxMs: stall, settleSeconds, series };
+      try {
+        within("idle, live", live, IDLE_LIMITS);
+        within("idle, refused", refused, REFUSED_LIMITS);
+        if (stall > 100) throw new Error(`the main queue waited ${stall} ms while idle`);
+      } catch (error) {
+        if (liveSample) process.stderr.write(liveSample);
+        throw new Error(`${error.message.split(";")[0]}; ${JSON.stringify(result)}`);
+      }
+      return result;
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * The panel open for 5 s while the lend waits for its next try (a countdown shows): the panel's
+   * body is drawn once at most, the countdown's own row ticks, and nothing else changes.
+   */
+  async "panel-open"({ app, home }) {
+    withMind(home);
+    writeFileSync(join(home, "fake-iterate/provide.json"), JSON.stringify({ state: "notAllowed", why: "No member has allowed this key yet.", waiting: false, exit: 1 }));
+    const run = await start(app, home, {}, ["--lend"]);
+    try {
+      await until("the lend refused", 20, async () => (await run.state()).lend.phase === "not allowed");
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      // the open restarts a refused lend: it is refused again
+      await until("the lend refused again", 20, async () => (await run.state()).lend.phase === "not allowed");
+      await sleep(1500);
+      await settled(run);
+      await run.control("perf.reset", { watchMain: true });
+      const before = (await run.state()).perf;
+      await sleep(5000);
+      const after = (await run.state()).perf;
+      await run.control("perf.reset", { watchMain: false });
+      const open = { ...perfDelta(before, after), mainStallMaxMs: after.mainStallMaxMs };
+      within("panel open", open, PANEL_LIMITS);
+      if (!(open.counters.lendTicks >= 3)) throw new Error(`the countdown did not tick: ${JSON.stringify(open)}`);
+      return { open };
+    } finally {
+      await run.quit();
+    }
+  },
+
   /**
    * The app starts, answers, and its panel opens under the mark in the menu bar. The home has a
    * mind (the panel shows the choices only then), and lends nothing without --lend.
@@ -381,6 +644,96 @@ const scenarios = {
     }
   },
 
+  /**
+   * A banner shown at once after the last one's button: the last one's fade does not take the new
+   * one from the screen (Fable 10). Its buttons have ids (`banner.button.<n>`). No sound.
+   */
+  async banner({ app, home }) {
+    withMind(home);
+    execFileSync("defaults", ["write", join(home, "defaults"), "sharing.banners", "shared"]);
+    const run = await start(app, home);
+    const show = (title) => run.endpoint("banner.show", { title, body: "From the harness", buttons: [{ label: "OK" }], sound: "none", seconds: 30 });
+    try {
+      await until("the session", 10, async () => (await run.state()).session);
+      const first = show("First");
+      await until("the first banner", 10, async () => (await run.state()).banner?.title === "First");
+      await run.control("ui.press", { id: "banner.button.0" });
+      const answer = await first;
+      if (answer.pressed !== "OK") throw new Error(`the first banner answered ${JSON.stringify(answer)}`);
+      await sleep(50);
+      const second = show("Second");
+      // its call ends with the app when a step fails
+      second.catch(() => {});
+      await sleep(500);
+      const state = await run.state();
+      if (state.banner?.title !== "Second") throw new Error(`the banner is ${JSON.stringify(state.banner)}`);
+      if (!state.windows.some((window) => window.kind === "KeyablePanel")) throw new Error(`the second banner is not on the screen: ${JSON.stringify(state.windows)}`);
+      await run.control("ui.press", { id: "banner.button.0" });
+      if ((await second).pressed !== "OK") throw new Error("the second banner's button did not answer");
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * The keys, as the keyboard sends them (`ui.key`): Tab in the input bar chooses the next mind and
+   * ⇧Tab the one before (two minds with lists of their own); ⌘W closes the Add a Mind form, through
+   * the app's one Edit and Window menu (Carbon 11).
+   */
+  async keys({ app, home }) {
+    const A = { mind: MIND, name: NAME }, B = { mind: "other.example.com", name: NAME };
+    withMind(home, [A, B]);
+    mkdirSync(join(home, "words"), { recursive: true });
+    writeFileSync(join(home, "words", `${A.mind}.md`), "- Herdr: herder\n");
+    writeFileSync(join(home, "words", `${B.mind}.md`), "- Beelink: bee link\n");
+    const run = await start(app, home);
+    const input = async () => (await run.state()).input;
+    try {
+      await run.control("input.toggle");
+      await until("the input bar", 10, async () => (await input()).visible);
+      const first = (await input()).mind;
+      const other = first === A.mind ? B.mind : A.mind;
+      await run.control("ui.key", { key: "tab" });
+      await until(`Tab to ${other}`, 5, async () => (await input()).mind === other);
+      await run.control("ui.key", { key: "tab", shift: true });
+      await until(`⇧Tab back to ${first}`, 5, async () => (await input()).mind === first);
+      await run.control("ui.key", { key: "escape" });
+      await until("the bar closed by Esc", 5, async () => !(await input()).visible);
+
+      // ⌘W closes a form, which has no key handling of its own
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "panel.settings" });
+      await until("the Settings window", 10, async () => (await run.state()).settings.visible);
+      await until("Add a Mind", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "settings.addMind"));
+      await run.control("ui.press", { id: "settings.addMind" });
+      const form = () => run.state().then((state) => state.windows.find((window) => window.title === "Add a Mind"));
+      await until("the form", 10, async () => await form());
+      await run.control("ui.key", { key: "w", command: true });
+      await until("the form closed by ⌘W", 5, async () => !(await form()));
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /** A log of 25 MB from an earlier run is set aside at the start, and a new one begins (Fable 16). */
+  async "log-bound"({ app, home }) {
+    withMind(home);
+    mkdirSync(join(home, "logs"), { recursive: true });
+    const old = join(home, "logs/app.log");
+    writeFileSync(old, Buffer.alloc(25 * 1024 * 1024, "x"));
+    const run = await start(app, home);
+    try {
+      const previous = join(home, "logs/app.previous.log");
+      if (!existsSync(previous) || statSync(previous).size !== 25 * 1024 * 1024) throw new Error("the old log was not set aside");
+      const size = statSync(old).size;
+      if (size > 1024 * 1024) throw new Error(`the new log has ${size} bytes`);
+      if (!readFileSync(old, "utf8").includes("==== run start")) throw new Error("the new log has no start line");
+    } finally {
+      await run.quit();
+    }
+  },
+
   /** A text typed into the input bar goes to the mind as one event. */
   async "input-send"({ app, home }) {
     const sent = withMind(home);
@@ -410,15 +763,27 @@ const scenarios = {
       const fixture = join(home, "fixture.aiff");
       // `say -o` writes a file and plays nothing
       execFileSync("say", ["-o", fixture, sentence]);
+      const started = Date.now();
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
       try {
         await run.control("dictation.start");
         await until("the dictation", 10, async () => (await run.state()).dictation.running);
         // the model loads, the file plays at the clock's pace, then a pause ends the stretch
-        await until("the words in the pill", 240, async () => /doppler/i.test((await run.state()).dictation.text));
+        let firstWord;
+        await until("the words in the pill", 240, async () => {
+          const text = (await run.state()).dictation.text ?? "";
+          if (text.trim() && firstWord === undefined) firstWord = (Date.now() - started) / 1000;
+          return /doppler/i.test(text);
+        });
         await run.control("dictation.stop");
         const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
+        // Core ML compiles the model for the Neural Engine once for each build of the app (its
+        // cache, ~/Library/Caches/<bundle or process>/com.apple.e5rt.e5bundlecache, is the
+        // build's): the first run after a build waits 12 to 24 s for the model, every later
+        // process of it a fraction of a second
+        const ready = /is ready after ([\d.]+) s/.exec(readFileSync(join(home, "logs/app.log"), "utf8"));
+        return { firstWordSeconds: Math.round(firstWord * 10) / 10, modelReadySeconds: ready ? Number(ready[1]) : null };
       } finally {
         await run.quit();
       }
@@ -710,7 +1075,18 @@ const scenarios = {
         [(r) => r.control("approval.answer", { allow: false }), denied],
         [(r) => r.control("ui.press", { id: "approval.once" }), ran],
         [(r) => r.control("ui.press", { id: "approval.deny" }), denied],
+        // the keys of the question's panel: Return approves once, Esc denies. Only while the panel
+        // is key: its keys are SwiftUI's shortcuts, and no window is key while the screen is locked
+        [(r) => byKey(r, "return", true), ran],
+        [(r) => byKey(r, "escape", false), denied],
       ];
+      let keysSkipped = false;
+      const byKey = async (r, key, allow) => {
+        const panel = (await r.state()).windows.find((window) => window.title === "Ask");
+        if (panel?.key) return r.control("ui.key", { key });
+        keysSkipped = true;
+        return r.control("approval.answer", { allow });
+      };
       for (const [answer, check] of answers) {
         const asked = echo();
         const state = await until("the question", 10, async () => (await run.state()).approval);
@@ -734,7 +1110,9 @@ const scenarios = {
       if (again.timedOut) throw new Error("the use after Approve for 30 Minutes waits for a question");
       ran(again);
       const acts = (await run.state()).activity.entries;
-      if (acts.length !== 4 || acts.some((act) => act.did !== "Ran a command")) throw new Error(`the activity is ${JSON.stringify(acts)}`);
+      // the uses that ran: two by the socket and the buttons, one by Return, two after the time was approved
+      if (acts.length !== 5 || acts.some((act) => act.did !== "Ran a command")) throw new Error(`the activity is ${JSON.stringify(acts)}`);
+      if (keysSkipped) return { skipped: "Return and Esc: the question's panel was not key (a locked screen, or another app in front)" };
     } finally {
       await run.quit();
     }
@@ -833,7 +1211,10 @@ async function main() {
     const started = Date.now();
     const result = { scenario: scenario.name };
     try {
-      await scenario.run({ app: values.app, home });
+      // a scenario may answer its figures (`perf`), or what it could not check here (`skipped`)
+      const { skipped, ...figures } = (await scenario.run({ app: values.app, home })) ?? {};
+      if (Object.keys(figures).length) result.perf = figures;
+      if (skipped) result.skipped = skipped;
       result.ok = true;
     } catch (error) {
       failed++;

@@ -15,10 +15,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private let popover = NSPopover()
     private var statusItem: NSStatusItem?
     private var recordDot: RecordDotView?
-    private var shownStatusIcon = ""
+    /// What the mark shows now: it is written again only when it changes.
+    private var shownMark: MenuBarMark?
+    private var shownLabel = ""
+    /// The one look again at the end of a use's red (`MenuBarMark.inUse`).
+    private var useEnds: DispatchWorkItem?
     private var terminationSignal: DispatchSourceSignal?
     private var grantWatch: Timer?
     private var displayPictureTimer: Timer?
+    /// The panel's main page shows: its previews run (`startPreviews`).
+    private var previewsShow = false
     /// The cameras that run for the open panel's previews.
     private var camerasHeldByThePanel: Set<String> = []
     /// The Activity page hides the previews: their timer and cameras stop while it shows.
@@ -57,8 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private var appliedLogin: Bool?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        logRunStart()
         quitOnTerminationSignal()
+        installMainMenu()
         if environment.controlSocket != nil { ControlSocket.makeAccessibilityElements() }
 
         let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -69,6 +75,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         self.statusItem = statusItem
         let markSize = environment.hasOwnHome ? IterateIcon.testImage(MenuBarMark(ink: .live, dot: .none)).size : IterateIcon.plain.size
         if let button = statusItem.button { recordDot = RecordDotView.attach(to: button, imageSize: markSize) }
+        // after the mark: the first lines look for the cameras, which can take a moment
+        logRunStart()
 
         let panel = Panel(
             state: panelState,
@@ -158,7 +166,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         startDictation()
         preloadSpeech()
         stateDidChange()
-        watchForGrants()
 
         // At the very first start the panel opens by itself, so that the person sees the choices.
         // A home of its own is a test's: it opens nothing by itself.
@@ -173,6 +180,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         lend.stop()
         model.shutDown()
         log.info("==== run end: the app quits")
+    }
+
+    /// The app's one main menu, never shown (a menu-bar app has no menu bar of its own) and still
+    /// heard while the app is active: the Edit menu's keys in every field of Settings, the
+    /// Activity window and a form (Add a Mind pastes an address), and ⌘W. No ⌘Q: the panel's Quit
+    /// button quits, and a ⌘Q meant for another app does not end this one. The input bar is a panel
+    /// that does not make the app active: it takes these keys itself.
+    private func installMainMenu() {
+        let main = NSMenu()
+        let app = NSMenuItem()
+        app.submenu = NSMenu(title: "iterate")
+        main.addItem(app)
+        let edit = NSMenu(title: "Edit")
+        edit.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        edit.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        edit.addItem(.separator())
+        edit.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        edit.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        edit.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        edit.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        let editItem = NSMenuItem(title: "Edit", action: nil, keyEquivalent: "")
+        editItem.submenu = edit
+        main.addItem(editItem)
+        let window = NSMenu(title: "Window")
+        window.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        windowItem.submenu = window
+        main.addItem(windowItem)
+        NSApp.mainMenu = main
     }
 
     /// `kill <process>` quits the app as its Quit button does: captures stop, the log gets its last
@@ -258,7 +294,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             return config.minds.first { $0.mind == mind }?.wordsExpression ?? config.wordsExpression
         }
         seenExpressions = expressions()
-        for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
+        // the lent mind's list now, for the first dictation; another mind's when the input bar
+        // first chooses it (`Words.list` fetches it then), so no process starts for it at launch
+        if let mind = lend.config?.activeMind { words.refresh(mind.mind) }
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
         dictation.onChange = { [weak self] in self?.stateDidChange() }
@@ -409,6 +447,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         view.commandLine = lend.commandLine
         view.isCommandRunning = lend.isCommandRunning
         view.source = lend.config.map { $0.source.line(home: NSHomeDirectory()) }
+        view.state = lend.state
         if view != panelState.lend { panelState.lend = view }
     }
 
@@ -472,6 +511,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: - The mark and the panel
 
     private func stateDidChange() {
+        Perf.count("stateChanges")
         updateStatusButton()
         let banner = model.banners.state.showing
         if banner != panelState.banner { panelState.banner = banner }
@@ -498,8 +538,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func configChanged() {
         let now = expressions()
         if now != seenExpressions {
+            // a mind whose list comes from another expression now: its own changed, or the default it uses
+            let effective = { (all: [String: String], mind: String) in all[mind] ?? all[""] }
+            for mind in lend.config?.minds ?? [] where effective(now, mind.mind) != effective(seenExpressions, mind.mind) {
+                words.refresh(mind.mind)
+            }
             seenExpressions = now
-            for mind in lend.config?.minds ?? [] { words.refresh(mind.mind) }
         }
         if let login = lend.config?.login, appliedLogin != nil, login != appliedLogin { openAtLogin() }
     }
@@ -562,30 +606,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// General's version rows, from where the app came from (`UpdateSource`) and the last ask of npm.
     private func updateRow() -> SettingsState.UpdateRow {
-        guard let config = lend.config else { return .init(title: "Not set up", detail: "Run npx @iterate-com/mac-app in a terminal.") }
-        switch config.source {
-        case .copy:
-            return .init(
-                title: config.source.line(home: NSHomeDirectory()),
-                detail: "It runs what was built. Run node cli.mjs update in that folder to build it again.")
-        case .trial(let spec, let version):
-            return .init(title: "\(version), a trial", detail: "Updated by hand: npx \(spec) update.")
-        case .registry(let version):
-            let detail: String
-            if environment.hasOwnHome {
-                detail = "A home of its own never updates."
-            } else if let check = lend.updateCheck {
-                let at = Lend.shortClock(check.at)
-                if let latest = check.latest, latest != version {
-                    detail = "Version \(latest) is out. Checked at \(at)."
-                } else {
-                    detail = check.latest == nil ? "npm did not answer at \(at)." : "Up to date. Checked at \(at)."
-                }
-            } else {
-                detail = choices.updatesByItself ? "Not checked yet: the first check is a minute after the start." : "It does not update by itself."
-            }
-            return .init(title: "\(version), from npm", detail: detail, updatesItself: true)
-        }
+        UpdateStatus.of(
+            lend.config?.source, home: NSHomeDirectory(), hasOwnHome: environment.hasOwnHome, updatesByItself: choices.updatesByItself,
+            check: lend.updateCheck.map { (Lend.shortClock($0.at), $0.latest) })
     }
 
     private func settingsActions() -> SettingsActions {
@@ -632,12 +655,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// A new name for this Mac in a mind: a key is for one name, so the CLI's `add` makes a new key
     /// and a member allows it again. The person says yes first.
     private func rename(_ mind: String, to name: String) {
-        let rule = #"^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*$"#
         let alert = NSAlert()
         alert.icon = NSApp.applicationIconImage
-        guard name.range(of: rule, options: .regularExpression) != nil else {
+        if let problem = name.isEmpty ? "A name is needed, such as jane.mac." : MindProfile.deviceNameProblem(name) {
             alert.messageText = "\"\(name)\" is not a name"
-            alert.informativeText = "Letters and digits, starting with a letter; dots between parts, such as jane.mac."
+            alert.informativeText = problem
             alert.runModal()
             return
         }
@@ -663,7 +685,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let approvals = Dictionary(uniqueKeysWithValues: things.compactMap { thing in model.approval.isApproved(thing).map { (thing.id, $0) } })
         if approvals != panelState.approvals { panelState.approvals = approvals }
         if model.uses != panelState.uses { panelState.uses = model.uses }
-        panelState.revision += 1
         // Accessibility given since the last look: fn is heard from now
         if !dictation.hearsFn, !environment.hasOwnHome, AXIsProcessTrusted() { dictation.watchKeys() }
         let fnLines = dictation.fnLines
@@ -690,39 +711,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// change the ink (`MenuBarMark`).
     private func updateStatusButton() {
         guard let button = statusItem?.button else { return }
-        let isInUse = model.lastUse.map { Date().timeIntervalSince($0.at) < 3 } ?? false
-        if isInUse {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.1) { [weak self] in self?.updateStatusButton() }
+        let use = MenuBarMark.inUse(lastUse: model.lastUse?.at, now: Date())
+        // one look again, at the end of the red: a newer use moves it, and none is left behind
+        useEnds?.cancel()
+        useEnds = use.endsAt.map { end in
+            let item = DispatchWorkItem { [weak self] in self?.updateStatusButton() }
+            DispatchQueue.main.asyncAfter(wallDeadline: .now() + max(0.05, end.timeIntervalSinceNow + 0.05), execute: item)
+            return item
         }
         let record = model.record
-        let isCapturing = model.microphone.isRunning || model.isAnyCameraRunning || self.isCapturing
+        let isOn = model.microphone.isRunning || model.isAnyCameraRunning || self.isCapturing
         let banner = model.banners.state.showing
         let glance = lend.state.phase.glance
         let mark = MenuBarMark.of(
-            bannerShows: banner != nil, inUse: isInUse, microphoneOrCameraOn: isCapturing, glance: glance,
+            bannerShows: banner != nil, inUse: use.isInUse, microphoneOrCameraOn: isOn, glance: glance,
             isRecording: record.isRecording, isPaused: record.isPaused)
+        let label = MenuBarMark.label(
+            banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
+            glance: glance, dot: mark.dot, tracks: record.tracks.count, pausedBecause: record.pausedBecause)
+        // the button is written only when what it shows changed
+        guard mark != shownMark || label != shownLabel else { return }
+        Perf.count("statusWrites")
         // a test copy's mark is its own: the owner never quits the installed app for it
-        button.image = environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark)
+        if mark != shownMark { button.image = environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark) }
         recordDot?.dot = mark.dot
-        let lendWords: String
-        switch glance {
-        case .live: lendWords = "iterate: lent"
-        case .connecting: lendWords = "iterate: connecting"
-        case .down: lendWords = "iterate: not lent"
-        }
-        let words =
-            banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
-            ?? (isInUse ? "iterate: a mind uses this Mac now" : self.isCapturing ? "iterate: your capture runs" : isCapturing ? "iterate: microphone or camera on" : lendWords)
-        let label = [words, mark.dot.words(tracks: record.tracks.count, pausedBecause: record.pausedBecause)].compactMap { $0 }.joined(separator: ", ")
         let shown = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path). \(label)" : label
         button.toolTip = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path)" : label
         button.setAccessibilityLabel(shown)
         // the cell is the accessibility element (`ui.tree`, VoiceOver)
         button.cell?.setAccessibilityLabel(shown)
-        if mark.name != shownStatusIcon {
-            shownStatusIcon = mark.name
-            log.info("menu-bar icon: the iterate mark, \(mark.name)")
-        }
+        if mark != shownMark { log.info("menu-bar icon: the iterate mark, \(mark.name)") }
+        (shownMark, shownLabel) = (mark, label)
     }
 
     @objc private func togglePanel() {
@@ -755,21 +774,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// The previews run while the panel's main page shows: the cameras, and a display's picture
     /// each second.
     private func startPreviews() {
+        previewsShow = true
         syncPreviews()
+    }
+
+    /// The displays whose small picture shows: on, with Screen Recording given.
+    private var shownDisplays: [Shareable] {
+        guard !panelState.missing.contains(.screenRecording) else { return [] }
+        return panelState.things.filter { $0.power == .screen && panelState.sharing[$0.id, default: .off] != .off }
+    }
+
+    /// A new picture each second, only while a display's picture shows.
+    private func syncDisplayTimer() {
+        let wanted = previewsShow && popover.isShown && !shownDisplays.isEmpty
+        guard wanted != (displayPictureTimer != nil) else { return }
         displayPictureTimer?.invalidate()
+        displayPictureTimer = nil
+        guard wanted else { return }
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.refreshDisplayPictures() }
         }
+        timer.tolerance = 0.2
         RunLoop.main.add(timer, forMode: .common)
         displayPictureTimer = timer
     }
 
     private func stopPreviews() {
+        previewsShow = false
         displayPictureTimer?.invalidate()
         displayPictureTimer = nil
         camerasHeldByThePanel.forEach(model.releaseCamera)
         camerasHeldByThePanel = []
-        panelState.displayPictures = [:]
+        if !panelState.displayPictures.isEmpty { panelState.displayPictures = [:] }
     }
 
     /// A large picture of a display or a camera, for the popover of its small one.
@@ -813,11 +849,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// Each display's small picture, at the size it is drawn (30 points, 60 pixels wide), made by
     /// ScreenCaptureKit off the main thread.
     private func refreshDisplayPictures() {
-        for thing in panelState.things where thing.power == .screen {
-            guard panelState.sharing[thing.id, default: .off] != .off, !panelState.missing.contains(.screenRecording) else {
-                panelState.displayPictures[thing.id] = nil
-                continue
-            }
+        let shown = shownDisplays
+        // a picture that no longer shows goes; a write that changes nothing tells no view
+        let gone = Set(panelState.displayPictures.keys).subtracting(shown.map(\.id))
+        if !gone.isEmpty { panelState.displayPictures = panelState.displayPictures.filter { !gone.contains($0.key) } }
+        syncDisplayTimer()
+        for thing in shown {
             Task { @MainActor in
                 guard let picture = try? await Screen.image(of: Screen.id(of: thing), maxWidth: 60), popover.isShown, !panelState.isActivityOpen else { return }
                 panelState.displayPictures[thing.id] = picture
@@ -854,31 +891,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         watchForGrants()
     }
 
-    /// Looks once a second, for at most 5 minutes, whether macOS gave what the things that are not
-    /// off still wait for. It runs after the guide and at the start of the app, so a switch set in
-    /// System Settings is seen without another click. After the 5 minutes, the panel's "Allow…"
-    /// button starts it again.
+    /// Looks every 3 s, for at most 5 minutes, whether macOS gave what the things that are not
+    /// off still wait for (`GrantWatch`). It runs after the guide, so a switch set in System
+    /// Settings is seen without another click; not at the start of the app, where the panel reads
+    /// the permissions when it opens. Screen Recording's look is a new process, one at a time, and
+    /// waited for off the main thread. After the 5 minutes, the panel's "Allow…" button starts it again.
     private func watchForGrants() {
         var waiting = Set(Shareable.all.filter { $0.sharing != .off }.compactMap(\.power.permission).filter { !$0.isGranted })
         grantWatch?.invalidate()
         grantWatch = nil
         guard !waiting.isEmpty else { return }
-        var looksLeft = 300
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] timer in
+        var watch = GrantWatch(startedAt: Date())
+        let timer = Timer(timeInterval: GrantWatch.interval, repeats: true) { [weak self] timer in
             MainActor.assumeIsolated {
-                guard let self else { return timer.invalidate() }
-                looksLeft -= 1
+                guard let self, self.grantWatch === timer else { return timer.invalidate() }
                 for permission in waiting where permission.isGranted {
                     waiting.remove(permission)
                     self.log.info("macOS gave \(permission.title)")
                     self.stateDidChange()
                     if self.popover.isShown { self.syncPreviews() }
                 }
-                if waiting.contains(.screenRecording), Permission.screenRecordingWaitsForRestart {
-                    timer.invalidate()
-                    self.log.info("macOS gave Screen Recording; the app starts again to use it")
-                    Permission.restartTheApp()
-                } else if waiting.isEmpty || looksLeft <= 0 {
+                if watch.probes(at: Date(), waitsForScreenRecording: waiting.contains(.screenRecording)) {
+                    Task { @MainActor [weak self] in
+                        let given = await Permission.screenRecordingWaitsForRestart()
+                        watch.answered()
+                        guard let self, self.grantWatch === timer, given else { return }
+                        timer.invalidate()
+                        self.log.info("macOS gave Screen Recording; the app starts again to use it")
+                        Permission.restartTheApp()
+                    }
+                }
+                if waiting.isEmpty || watch.isOver(at: Date()) {
                     timer.invalidate()
                     self.grantWatch = nil
                     if !waiting.isEmpty {
@@ -887,6 +930,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
             }
         }
+        timer.tolerance = 0.5
         RunLoop.main.add(timer, forMode: .common)
         grantWatch = timer
     }

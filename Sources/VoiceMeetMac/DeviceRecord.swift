@@ -112,17 +112,33 @@ final class DeviceRecord: ObservableObject {
 
     func start() {
         recordLog = { line in AppLog("record").info(line) }
-        // for a permission given in System Settings; nothing else is polled
+        tick()
+    }
+
+    /// A look every 2 s, only while a switch that is on waits for a permission given in System
+    /// Settings: nothing else is polled, and with every switch off, or all given, nothing runs.
+    private func lookForPermissions(_ isWaiting: Bool) {
+        guard isWaiting != (timer != nil) else { return }
+        timer?.invalidate()
+        timer = nil
+        guard isWaiting else { return }
         let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
         timer.tolerance = 0.5
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
-        tick()
+    }
+
+    /// The recorder sealed slot `t` of this session: the bridge's record job sends it now, not at
+    /// its next look at the spool.
+    private func sealed(_ t: Int64, stamp: SessionWork.Stamp) {
+        guard work.lands(stamp) else { return }
+        bridge?.send("record", ["slot": t])
     }
 
     /// At quit: the last files are written and sealed; the job sends them now or at the next start.
     func stop() {
         timer?.invalidate()
+        timer = nil
         if let recorder { lifecycle.sync { recorder.stop() } }
         recorder = nil
     }
@@ -177,8 +193,10 @@ final class DeviceRecord: ObservableObject {
         (running, watching) = ([], [])
     }
 
-    /// Every 2 s, at each switch, and at once when the presence changes (`AppModel`).
+    /// At each switch, at once when the presence changes (`AppModel`), and every 2 s while a
+    /// permission is waited for (`lookForPermissions`).
     func tick() {
+        Perf.count("recordLooks")
         let session = session
         let permitted = { (sources: Set<RecordSource>) in
             session == nil ? [] : Set(sources.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
@@ -189,6 +207,10 @@ final class DeviceRecord: ObservableObject {
         if let session, !wanted.union(watched).isEmpty {
             if recorder == nil {
                 let recorder = Recorder(options: RecordOptions(spool: Self.spool(for: session), device: session.name))
+                let stamp = work.stamp
+                recorder.onSeal = { [weak self] t in
+                    DispatchQueue.main.async { MainActor.assumeIsolated { self?.sealed(t, stamp: stamp) } }
+                }
                 if let sink { recorder.add(sink: sink) }
                 lifecycle.async { recorder.start() }
                 self.recorder = recorder
@@ -211,6 +233,7 @@ final class DeviceRecord: ObservableObject {
                 }
             }
         }
+        lookForPermissions(session != nil && (wanted != on || watched != live))
         showState(waiting: session == nil ? 0 : waiting, isLent: session != nil)
     }
 

@@ -44,11 +44,18 @@ final class DeviceWindow: ObservableObject {
     }
     private var front: Front?
     private var isChecking = false
+    /// A change came while a check ran: one more check after it.
+    private var checksAgain = false
     private var observer: NSObjectProtocol?
-    private var timer: Timer?
+    /// The front app's own notifications of its focused window and its titles (`observeFront`).
+    private var windowWatch: AXObserver?
+    private var watchedPid: pid_t?
     private var monitors: [Any] = []
     private var lastKey: Date?
     private var lastScroll: Date?
+    /// The one wait for the end of typing, and of a scroll.
+    private var typingWait: DispatchWorkItem?
+    private var scrollWait: DispatchWorkItem?
     /// Every Accessibility call runs here, the title's and the text's.
     private let reader = DispatchQueue(label: "device.window-read")
     private var lastRead = Date.distantPast
@@ -56,14 +63,14 @@ final class DeviceWindow: ObservableObject {
     private var lastText: String?
     private var work = SessionWork()
 
+    /// No poll: the front app is checked when it changes (`didActivateApplication`), and its window
+    /// and title when it says so (an `AXObserver` on it, moved at each activation).
     func start() {
         observer = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in MainActor.assumeIsolated { self?.check() } }
-        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in MainActor.assumeIsolated { self?.tick() } }
-        RunLoop.main.add(timer, forMode: .common)
-        self.timer = timer
+        ) { [weak self] _ in MainActor.assumeIsolated { self?.frontChanged() } }
         watchInput()
+        frontChanged()
     }
 
     /// Another session, or none: what the old one began lands nowhere, and the new mind hears the
@@ -73,6 +80,8 @@ final class DeviceWindow: ObservableObject {
         front = nil
         lastText = nil
         waitingTrigger = nil
+        // on the next turn: the device's events take the session after this (`AppModel.use`)
+        DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.frontChanged() } }
     }
 
     /// "Window text" is off: a read that runs or waits is told to no mind.
@@ -83,29 +92,80 @@ final class DeviceWindow: ObservableObject {
     }
 
     func stop() {
-        timer?.invalidate()
         if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        observer = nil
+        endWindowWatch()
+        typingWait?.cancel()
+        scrollWait?.cancel()
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
     }
 
-    private func tick() {
+    /// The app in front changed, or the lend did: its notifications are heard from now, and it is
+    /// checked at once.
+    private func frontChanged() {
+        observeFront()
         check()
-        let now = Date()
-        if let key = lastKey, now.timeIntervalSince(key) >= 1 {
-            lastKey = nil
-            trigger("typing-pause")
+    }
+
+    /// Hears the front app's focused window change and its titles change, while the Mac is lent and
+    /// Accessibility is given. The observer is made on the reader's queue (it asks the app) and
+    /// heard on the main run loop, where its callback only starts a check.
+    private func observeFront() {
+        let app = isLent() && Permission.accessibility.isGranted ? NSWorkspace.shared.frontmostApplication : nil
+        let pid = app.flatMap { exclude.excludes($0.bundleIdentifier) ? nil : $0.processIdentifier }
+        guard pid != watchedPid else { return }
+        endWindowWatch()
+        watchedPid = pid
+        guard let pid else { return }
+        let box = Unmanaged.passUnretained(self).toOpaque()
+        reader.async { [weak self] in
+            var made: AXObserver?
+            let callback: AXObserverCallback = { _, _, _, refcon in
+                guard let refcon else { return }
+                // on the main run loop: the source is added there
+                MainActor.assumeIsolated { Unmanaged<DeviceWindow>.fromOpaque(refcon).takeUnretainedValue().windowChanged() }
+            }
+            guard AXObserverCreate(pid, callback, &made) == .success, let made else { return }
+            let element = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(element, 0.3)
+            for name in [kAXFocusedWindowChangedNotification, kAXMainWindowChangedNotification, kAXTitleChangedNotification] {
+                _ = AXObserverAddNotification(made, element, name as CFString, box)
+            }
+            let watch = Handed(observer: made)
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    // another app came in front meanwhile: this one is not heard
+                    guard let self, self.watchedPid == pid, self.windowWatch == nil else { return }
+                    CFRunLoopAddSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(watch.observer), .commonModes)
+                    self.windowWatch = watch.observer
+                }
+            }
         }
-        if let scroll = lastScroll, now.timeIntervalSince(scroll) >= 0.3 {
-            lastScroll = nil
-            trigger("scroll-end")
-        }
+    }
+
+    private func endWindowWatch() {
+        if let windowWatch { CFRunLoopRemoveSource(CFRunLoopGetMain(), AXObserverGetRunLoopSource(windowWatch), .commonModes) }
+        windowWatch = nil
+        watchedPid = nil
+    }
+
+    /// The front app's window or a title changed.
+    private func windowChanged() {
+        Perf.count("windowChanges")
+        check()
+    }
+
+    /// An observer handed from the reader's queue to the main one.
+    private struct Handed: @unchecked Sendable {
+        let observer: AXObserver
     }
 
     /// The front app and its window's title; an event when either changed.
     private func check() {
+        Perf.count("frontChecks")
         guard isLent(), let app = NSWorkspace.shared.frontmostApplication else { return front = nil }
-        guard !isChecking else { return }
+        guard !isChecking else { return checksAgain = true }
         isChecking = true
         let bundle = app.bundleIdentifier ?? "", pid = app.processIdentifier
         let name = app.localizedName ?? bundle, isExcluded = exclude.excludes(bundle)
@@ -122,6 +182,10 @@ final class DeviceWindow: ObservableObject {
 
     private func checked(_ now: Front, session: Int?) {
         isChecking = false
+        if checksAgain {
+            checksAgain = false
+            defer { check() }
+        }
         guard isLent(), session != nil, session == work.stamp.generation, now != front else { return }
         let trigger = now.bundle == front?.bundle ? "window" : "app"
         front = now
@@ -148,14 +212,50 @@ final class DeviceWindow: ObservableObject {
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: kinds, handler: { [weak self] event in
             MainActor.assumeIsolated {
                 switch event.type {
-                case .keyDown: self?.lastKey = Date()
-                case .scrollWheel: self?.lastScroll = Date()
+                case .keyDown: self?.typed()
+                case .scrollWheel: self?.scrolled()
                 default: self?.trigger("click")
                 }
             }
         }) {
             monitors.append(monitor)
         }
+    }
+
+    /// A key: a read 1 s after the last one. One wait at a time; a key meanwhile moves its end.
+    private func typed() {
+        lastKey = Date()
+        guard typingWait == nil else { return }
+        waitForPause(after: 1, of: \.lastKey, trigger: "typing-pause", wait: \.typingWait)
+    }
+
+    /// A scroll: a read 0.3 s after its last step.
+    private func scrolled() {
+        lastScroll = Date()
+        guard scrollWait == nil else { return }
+        waitForPause(after: 0.3, of: \.lastScroll, trigger: "scroll-end", wait: \.scrollWait)
+    }
+
+    private func waitForPause(
+        after seconds: TimeInterval, of last: ReferenceWritableKeyPath<DeviceWindow, Date?>, trigger name: String,
+        wait: ReferenceWritableKeyPath<DeviceWindow, DispatchWorkItem?>
+    ) {
+        let left = max(0.01, seconds - Date().timeIntervalSince(self[keyPath: last] ?? Date()))
+        let item = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self[keyPath: wait] = nil
+                guard let at = self[keyPath: last] else { return }
+                if Date().timeIntervalSince(at) >= seconds {
+                    self[keyPath: last] = nil
+                    self.trigger(name)
+                } else {
+                    self.waitForPause(after: seconds, of: last, trigger: name, wait: wait)
+                }
+            }
+        }
+        self[keyPath: wait] = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + left, execute: item)
     }
 
     // MARK: - The window's text

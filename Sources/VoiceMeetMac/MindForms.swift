@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import VoiceMeetCore
 
 /// "Add a Mind": which mind, and the name this Mac is available under, as itx.<name>. A form in
 /// the style of System Settings, in a small window of its own.
@@ -30,21 +31,10 @@ struct AddMindForm: View {
 
     private var trimmedName: String { name.trimmingCharacters(in: .whitespaces) }
 
-    /// The rules of cli.mjs: a host name, and the name rule of `iterate provide`.
-    private var mindProblem: String? {
-        if mind.isEmpty { return nil }
-        let host = #"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"#
-        return mind.range(of: host, options: .regularExpression) == nil ? "A mind's address is a host name, such as example.com." : nil
-    }
+    /// The rules of cli.mjs: a host name, and the name rule of `iterate provide` (`MindProfile`).
+    private var mindProblem: String? { MindProfile.mindProblem(mind) }
 
-    private var nameProblem: String? {
-        if trimmedName.isEmpty { return nil }
-        if trimmedName.hasPrefix("itx.") { return "Leave out \"itx.\": it is always there." }
-        let rule = #"^[a-zA-Z][a-zA-Z0-9]*(\.[a-zA-Z][a-zA-Z0-9]*)*$"#
-        return trimmedName.range(of: rule, options: .regularExpression) == nil
-            ? "Letters and digits, starting with a letter; dots between parts, such as jane.mac."
-            : nil
-    }
+    private var nameProblem: String? { MindProfile.deviceNameProblem(trimmedName) }
 
     private var isValid: Bool { !mind.isEmpty && !trimmedName.isEmpty && mindProblem == nil && nameProblem == nil }
 

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import VoiceMeetCore
 
 /// WHAT A MIND SAYS OF ITSELF: its name and its icon, for every view of the app that shows a mind.
 /// The mind's website answers them to anyone at `/.well-known/iterate-profile`
@@ -89,8 +90,17 @@ final class MindFaces: ObservableObject {
         else { return face(of: address) }
         var face = Face(address: address, name: Self.name(json["name"], address: address))
         if let icon = Self.iconURL(json["icon"], address: address) {
-            // an icon that does not load keeps the one kept
-            face.icon = await fetch(icon, max: Self.iconMaxLength).flatMap(Self.square) ?? self.face(of: address).icon
+            // an icon that does not load keeps the one kept; it is drawn off the main thread
+            var drawn: NSImage?
+            if let data = await fetch(icon, max: Self.iconMaxLength) {
+                let pixels = Self.iconPixels
+                if MindProfile.isSVG(data) {
+                    drawn = Self.square(data)
+                } else if let png = await Task.detached(priority: .utility, operation: { MindProfile.squareIcon(data, pixels: pixels) }).value {
+                    drawn = NSImage(data: png)
+                }
+            }
+            face.icon = drawn ?? self.face(of: address).icon
         }
         if face != faces[address] {
             objectWillChange.send()
@@ -103,44 +113,24 @@ final class MindFaces: ObservableObject {
     private func fetch(_ url: URL, max: Int) async -> Data? {
         var request = URLRequest(url: url)
         request.httpShouldHandleCookies = false
-        guard let (data, response) = try? await session.data(for: request),
+        // the body is read as it comes, and given up past `max`: no answer is read to its end first
+        guard let (bytes, response) = try? await session.bytes(for: request),
             let http = response as? HTTPURLResponse, http.statusCode == 200,
             // a redirect to another host is not the mind's answer
-            http.url?.host == url.host,
-            data.count <= max
+            http.url?.host == url.host
         else { return nil }
-        return data
+        return try? await MindProfile.bounded(bytes, expected: http.expectedContentLength, max: max)
     }
 
     // MARK: - What the answer may say
 
-    /// A hostname of letters, digits, hyphens and dots: the only kind of address read or kept.
-    nonisolated static func isHostname(_ address: String) -> Bool {
-        address.count <= 253 && address.contains(".")
-            && address.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == ".") }
-    }
+    /// The rules of what a profile may say: `MindProfile`.
+    nonisolated static func isHostname(_ address: String) -> Bool { MindProfile.isHostname(address) }
+    nonisolated static func name(_ value: Any?, address: String) -> String? { MindProfile.name(value, address: address) }
+    nonisolated static func iconURL(_ value: Any?, address: String) -> URL? { MindProfile.iconURL(value, address: address) }
 
-    /// The name, one line of at most 80 characters, with no control character and no character
-    /// that turns the direction of the text. nil when it is empty or only the address.
-    nonisolated static func name(_ value: Any?, address: String) -> String? {
-        guard let value = value as? String else { return nil }
-        let unsafe = CharacterSet.controlCharacters.union(CharacterSet(charactersIn: "\u{200E}\u{200F}\u{202A}\u{202B}\u{202C}\u{202D}\u{202E}\u{2066}\u{2067}\u{2068}\u{2069}"))
-        let words = value.unicodeScalars.map { unsafe.contains($0) ? " " : String($0) }.joined()
-            .split(whereSeparator: \.isWhitespace).joined(separator: " ")
-        let name = String(words.prefix(80)).trimmingCharacters(in: .whitespaces)
-        return name.isEmpty || [address, "iterate.\(address)"].contains(name.lowercased()) ? nil : name
-    }
-
-    /// The icon's address, when it is an `https:` address on the mind's website or a host under it.
-    nonisolated static func iconURL(_ value: Any?, address: String) -> URL? {
-        guard let value = value as? String, value.count <= 2048, let url = URL(string: value),
-            url.scheme == "https", url.user == nil, url.password == nil, url.port == nil,
-            let host = url.host?.lowercased(), host == address || host.hasSuffix(".\(address)")
-        else { return nil }
-        return url
-    }
-
-    /// The picture drawn on a square of `iconPixels`, as PNG bytes: an SVG, a PNG or a JPEG alike.
+    /// An SVG drawn on a square of `iconPixels`: a picture with pixels goes through
+    /// `MindProfile.squareIcon`, which bounds its size before it decodes it.
     nonisolated static func square(_ data: Data) -> NSImage? {
         guard let image = NSImage(data: data), image.size.width > 0, image.size.height > 0,
             let picture = NSBitmapImageRep(

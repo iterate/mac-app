@@ -1,4 +1,5 @@
 import AppKit
+import VoiceMeetCore
 
 /// THE CONTROL SOCKET: `control.sock` in the app's home, for a test on this Mac with no hand
 /// (README, "Testing with no hand"). Only a copy with a home of its own opens it (`AppEnvironment`):
@@ -20,6 +21,14 @@ import AppKit
 ///   into it (at its end, or in place of its text), by its accessibility identifier (and, for a
 ///   segmented control, the segment's label; for a pop-up button, the item's title).
 /// - `ui.scroll {id}`: scrolls a list to its end, as a person does to read older rows.
+/// - `ui.key {key, shift?, command?}`: a press of Tab, Return, Escape or a letter of the Edit
+///   menu (`key`: "tab", "return", "escape", "a", "c", "v", "w", "x", "z") in the key window,
+///   through the app as the keyboard's: so ⌘W reaches the main menu.
+/// - `perf.reset {watchMain?}`: the counters and the main queue's longest delay start again from
+///   zero; `watchMain` starts the watch of the main queue (it wakes the app 20 times a second, so
+///   it is off until asked, and false stops it). `ui.state`'s `perf` has the figures (`Perf`).
+/// - `perf.threads`: each thread of the app, its name and its time so far (`Perf.threads`), and the
+///   description of the main run loop (its sources and timers).
 @MainActor
 final class ControlSocket {
     var state: () -> [String: Any] = { [:] }
@@ -33,15 +42,33 @@ final class ControlSocket {
 
     private let endpoint: LocalEndpoint
     private let approval: Approval
+    private let mainWatch = MainStallWatch()
 
     init(socketURL: URL, approval: Approval) {
         endpoint = LocalEndpoint(socketURL: socketURL, log: "control")
         self.approval = approval
         approval.answersByControl = true
+        Perf.isCounting = true
         endpoint.onRequest = { [weak self] method, parameters in try self?.answer(method, parameters) ?? [:] }
     }
 
-    func start() { endpoint.start() }
+    func start() {
+        endpoint.start()
+        countWakes()
+    }
+
+    /// The wakes of the main thread (`mainWakes`) and the events it is given (`events.<type>`), for
+    /// `perf`: what wakes an idle copy.
+    private func countWakes() {
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, 0) { _, _ in
+            Perf.count("mainWakes")
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        _ = NSEvent.addLocalMonitorForEvents(matching: .any) { event in
+            Perf.count("events.\(event.type.rawValue)")
+            return event
+        }
+    }
 
     /// SwiftUI makes its accessibility elements only while an assistive app asks for them, and
     /// such an app says so with this attribute: `ui.tree` needs them too. Before the first view.
@@ -79,7 +106,60 @@ final class ControlSocket {
                 ["kind": String(describing: type(of: window)), "title": window.title, "key": window.isKeyWindow, "frame": Self.rect(window.frame)]
             }
             answer["approval"] = approval.waiting.map { ["question": $0.question.words, "mind": $0.question.mind ?? NSNull()] as [String: Any] } ?? NSNull()
+            var perf = Perf.figures().dictionary
+            perf["counters"] = Perf.counters
+            perf["mainStallMaxMs"] = mainWatch.isRunning ? mainWatch.maxMilliseconds : NSNull()
+            answer["perf"] = perf
             return answer
+        case "perf.reset":
+            Perf.resetCounters()
+            if let watch = parameters["watchMain"] as? Bool {
+                if watch { mainWatch.start() } else { mainWatch.stop() }
+            }
+            mainWatch.reset()
+            return ["figures": Perf.figures().dictionary]
+        case "perf.threads":
+            // the main run loop's description names its timers, their intervals and callouts
+            return [
+                "threads": Perf.threads().map { ["id": $0.id, "name": $0.name, "cpuMs": $0.cpuMs] },
+                "mainRunLoop": CFCopyDescription(CFRunLoopGetMain()) as String,
+            ]
+        case "ui.key":
+            guard let name = parameters["key"] as? String, let code = Self.keyCodes[name.lowercased()] else {
+                throw EndpointRefusal("ui.key needs key: one of \(Self.keyCodes.keys.sorted().joined(separator: ", ")).")
+            }
+            // the key window, else the frontmost that can be one: a test copy is often not the
+            // app in front (and none is while the screen is locked), and the keys are its window's
+            let front = NSApp.windows.filter { $0.isVisible && $0.canBecomeKey }.min { $0.orderedIndex < $1.orderedIndex }
+            guard let window = NSApp.keyWindow ?? front else {
+                throw EndpointRefusal("No window of the app can take a key now.")
+            }
+            var flags: NSEvent.ModifierFlags = []
+            if parameters["shift"] as? Bool == true { flags.insert(.shift) }
+            if parameters["command"] as? Bool == true { flags.insert(.command) }
+            let event = { (type: NSEvent.EventType) in
+                NSEvent.keyEvent(
+                    with: type, location: .zero, modifierFlags: flags, timestamp: ProcessInfo.processInfo.systemUptime,
+                    windowNumber: window.windowNumber, context: nil, characters: code.characters, charactersIgnoringModifiers: code.characters,
+                    isARepeat: false, keyCode: code.keyCode)
+            }
+            guard let down = event(.keyDown), let up = event(.keyUp) else { throw EndpointRefusal("The key event could not be made.") }
+            let answer: [String: Any] = ["window": String(describing: type(of: window)), "title": window.title]
+            // as AppKit takes a key: the window's key equivalents (a default button, a shortcut),
+            // then the main menu's, then the first responder's keyDown
+            if window.performKeyEquivalent(with: down) { return answer.merging(["by": "window"]) { $1 } }
+            if !flags.isEmpty, let item = Self.menuItem(for: down, in: NSApp.mainMenu), let action = item.action {
+                var responder: NSResponder? = window.firstResponder ?? window
+                while let next = responder, !next.responds(to: action) { responder = next.nextResponder }
+                guard let target = responder ?? (window.responds(to: action) ? window : nil) else {
+                    throw EndpointRefusal("Nothing in \(window.title) takes \(item.title).")
+                }
+                NSApp.sendAction(action, to: target, from: item)
+                return answer.merging(["by": "menu", "item": item.title]) { $1 }
+            }
+            window.sendEvent(down)
+            window.sendEvent(up)
+            return answer.merging(["by": "keyDown"]) { $1 }
         case "ui.tree":
             var budget = parameters["maxNodes"] as? Int ?? 4_000
             return ["windows": NSApp.windows.filter(\.isVisible).map { Self.node($0, depth: 0, budget: &budget) }]
@@ -134,10 +214,31 @@ final class ControlSocket {
             }
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
+                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, ui.key, perf.reset, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
         }
         return [:]
     }
+
+    /// The item of the main menu that a key with ⌘ is, as the menu's own key matching finds it.
+    private static func menuItem(for event: NSEvent, in menu: NSMenu?) -> NSMenuItem? {
+        guard let menu else { return nil }
+        let wanted = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        for item in menu.items {
+            if let found = menuItem(for: event, in: item.submenu) { return found }
+            guard !item.keyEquivalent.isEmpty, item.isEnabled || item.action != nil else { continue }
+            // an upper-case key equivalent is the key with ⇧
+            let isShifted = item.keyEquivalent != item.keyEquivalent.lowercased()
+            let modifiers = item.keyEquivalentModifierMask.union(isShifted ? .shift : [])
+            if item.keyEquivalent.lowercased() == event.charactersIgnoringModifiers?.lowercased(), modifiers == wanted { return item }
+        }
+        return nil
+    }
+
+    /// The keys `ui.key` presses: their virtual key codes and characters.
+    private static let keyCodes: [String: (keyCode: UInt16, characters: String)] = [
+        "tab": (48, "\t"), "return": (36, "\r"), "escape": (53, "\u{1b}"),
+        "a": (0, "a"), "c": (8, "c"), "v": (9, "v"), "w": (13, "w"), "x": (7, "x"), "z": (6, "z"),
+    ]
 
     // MARK: - The app's own accessibility elements
 

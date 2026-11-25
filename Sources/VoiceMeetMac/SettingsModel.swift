@@ -31,7 +31,7 @@ final class SettingsState: ObservableObject {
     @Published var defaultExpression: String?
     /// Each mind's own expression (`minds[].wordsExpression`), by its address.
     @Published var expressions: [String: String] = [:]
-    @Published var update = UpdateRow()
+    @Published var update = UpdateRow(title: "", detail: "")
     /// Each mind's sign-in of the iterate CLI, read when its page shows.
     @Published var signIns: [String: SignIn] = [:]
     /// What keeps fn dictation from working (`Dictation.fnLines`).
@@ -44,13 +44,8 @@ final class SettingsState: ObservableObject {
     var fixedNow: Date?
 
     /// The version's rows of General.
-    struct UpdateRow: Equatable {
-        /// "0.1.0, from npm", or "Built from ~/src/mac-app".
-        var title = ""
-        var detail = ""
-        /// From npm: Update Now and the switch. A trial and a copy are updated by hand.
-        var updatesItself = false
-    }
+    /// General's version rows (`UpdateStatus`).
+    typealias UpdateRow = UpdateStatus
 }
 
 /// What the person does in Settings.
@@ -79,47 +74,5 @@ struct SettingsActions {
     var lend = LendActions()
 }
 
-/// THE ITERATE CLI'S SIGN-IN to one mind, as it keeps it on this Mac: `sessions.json` in its folder
-/// (`$XDG_CONFIG_HOME/iterate`, else `~/.config/iterate`), one entry for each mind's API
-/// (`https://<address>/api`). An entry has `expiresAt`, the end of its token (4 hours after it was
-/// given), and a `refreshToken`, with which the CLI renews it at its next use. The app reads the two
-/// and nothing else: no token leaves the file, and no network is asked.
-enum SignIn: Equatable {
-    case unknown
-    /// The token is good until then.
-    case until(Date)
-    /// The token ended; the CLI renews it at its next use.
-    case renews
-    case notSignedIn
+// The iterate CLI's sign-in to one mind: `SignIn` (VoiceMeetCore).
 
-    /// The address the CLI connects to for a mind of config.json: `example.com` is
-    /// `iterate.example.com`, as the CLI's `addressOf` reads two labels.
-    nonisolated static func address(of mind: String) -> String {
-        mind.range(of: #"^[a-z0-9-]+\.[a-z0-9-]+$"#, options: .regularExpression) != nil ? "iterate.\(mind)" : mind
-    }
-
-    /// Reads the sign-in of `mind`, away from the main thread.
-    nonisolated static func read(_ mind: String, now: Date = Date()) async -> SignIn {
-        await Task.detached(priority: .utility) { () -> SignIn in
-            let environment = ProcessInfo.processInfo.environment
-            let folder = environment["XDG_CONFIG_HOME"].flatMap { $0.isEmpty ? nil : $0 } ?? (NSHomeDirectory() as NSString).appendingPathComponent(".config")
-            let file = URL(fileURLWithPath: folder).appendingPathComponent("iterate/sessions.json")
-            guard let data = try? Data(contentsOf: file), let sessions = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-                let session = sessions["https://\(address(of: mind))/api"] as? [String: Any]
-            else { return .notSignedIn }
-            let renewable = (session["refreshToken"] as? String).map { !$0.isEmpty } ?? false
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-            let ends = (session["expiresAt"] as? String).flatMap { formatter.date(from: $0) ?? ISO8601DateFormatter().date(from: $0) }
-            if let ends, ends > now { return .until(ends) }
-            if ends == nil, session["token"] != nil { return .renews }
-            return renewable ? .renews : .notSignedIn
-        }.value
-    }
-
-    /// "3 h 12 min left", "12 min left".
-    static func left(until: Date, now: Date) -> String {
-        let minutes = max(0, Int(until.timeIntervalSince(now) / 60))
-        return minutes >= 60 ? "\(minutes / 60) h \(String(format: "%02d", minutes % 60)) min left" : "\(minutes) min left"
-    }
-}
