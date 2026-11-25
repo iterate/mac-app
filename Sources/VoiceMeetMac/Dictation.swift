@@ -169,7 +169,9 @@ final class Dictation: SpeechClient {
             guard Choices.shared.dictationOnFn || key.state != .idle else { return }
             fnChanged(down: down, at: time)
         case .escape: escape()
-        case .otherKey: act(key.otherKey())
+        case .otherKey:
+            if key.wantsOtherKeys { log.info("fn with another key: a combination, the dictation ends") }
+            act(key.otherKey())
         }
     }
 
