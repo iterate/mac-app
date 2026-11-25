@@ -661,13 +661,21 @@ with a lock while it stays on and the time since the start.
 - **GPT Live Transcribe at OpenAI, when the lent mind has an OpenAI key (or this Mac has one);
   else on this Mac.** Settings ›
   Dictation (the panel's Settings button opens it) chooses the model of dictation and the input
-  bar. A capture always uses a local model (the chosen one, or Parakeet v3).
+  bar. A capture always uses a local model (the chosen one, or Oruk Fourier 2B).
 
   | Model                       | Runs         | Download | License   | Note                                                     |
   | --------------------------- | ------------ | -------- | --------- | -------------------------------------------------------- |
   | GPT Live Transcribe         | OpenAI       | none     | OpenAI    | The default with a key (the mind's or yours). $1/hour of talking; the sound leaves this Mac |
-  | Parakeet TDT 0.6B v3        | this Mac     | 480 MB   | CC BY 4.0 | The default with no key, and the model behind OpenAI     |
+  | Oruk Fourier 2B             | this Mac     | 2.68 GB  | CC BY-NC 4.0 | The default with no key, and the model behind OpenAI. **Non-commercial**: see below |
+  | Parakeet TDT 0.6B v3        | this Mac     | 480 MB   | CC BY 4.0 | The model behind OpenAI until Fourier is on this Mac     |
   | Parakeet Ultra              | this Mac     | 632 MB   | CC BY 4.0 | A post-training of v3, which FluidAudio 0.18.4 recommends |
+
+  **Oruk Fourier's licence is non-commercial.** [Oruk Fourier 2B](https://huggingface.co/oruk/oruk-fourier-2b)
+  is under CC BY-NC 4.0: no commercial use. The owner accepts it for his own Mac for now. Before
+  this default ships to anyone else (a release of the app to other Macs, a customer, a commercial
+  use), iterate must have Oruk's permission; until then, Parakeet v3 (CC BY 4.0) stays a choice in
+  Settings › Dictation. The app downloads the model from Oruk's repository on each Mac; it does not
+  redistribute it.
 
   Why OpenAI is the default: on the owner's own voice (`harness/speech-bench`, 25 November 2026)
   `gpt-live-transcribe` with delay `low` had WER 10.3 and got 130 of 146 terms; Parakeet v3 had
@@ -679,7 +687,8 @@ with a lock while it stays on and the time since the start.
   kept from fn down, so a socket that opens late loses no word (its setup costs about 0.8 s). Each
   delta is the pill's text; at the end a commit asks for the final, which the word list repairs.
   Each socket serves one dictation. When OpenAI fails (no session within 5 s, an error
-  while you talk, no final within 5 s of the end, or no token and no key), Parakeet v3 hears what was kept and
+  while you talk, no final within 5 s of the end, or no token and no key), the local model (Oruk
+  Fourier 2B, or Parakeet v3 until Fourier is on this Mac) hears what was kept and
   what comes after, and `app.log` says why ("gpt-live-transcribe failed after 0.31 s (…): the local
   model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the socket),
   `StreamRecognizer.swift` (the stream, with the local model behind it).
@@ -706,7 +715,7 @@ with a lock while it stays on and the time since the start.
   takes 0.3 to 0.6 s on an open connection (25 November 2026); the standby hides it. It has 5 s;
   a token is used at once and never kept, logged or written. Whether the lent mind can mint is
   found out with one mint at each new connection of its bridge and by each dictation's: a mind
-  with no `/secrets/openai` (or a key OpenAI refuses) says no, and then Parakeet v3 is the default,
+  with no `/secrets/openai` (or a key OpenAI refuses) says no, and then Oruk Fourier 2B is the default,
   unless this Mac has a key of its own. Settings › Dictation says "OpenAI through <mind>: the
   mind's key" when the mind can mint. The code: `MindToken.swift`, `SpeechText/OpenAIAccess.swift`.
 - **Your own key is optional, and only behind the mind's.** It is used when this Mac is lent to no
@@ -720,20 +729,46 @@ with a lock while it stays on and the time since the start.
   "OpenAI key stored". A copy with a home of its own uses the service with `.` and the first 12
   hex digits of the SHA-256 of its home's path, so a test never reads or writes the owner's item.
   With no stored choice, a mind that mints or a key that comes makes GPT Live Transcribe the model,
-  and when neither is left it is Parakeet v3; a choice in Settings stays.
-- **The local models run on this Mac** as Core ML through
-  [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. With
-  them no sound and no text leaves the Mac. Each one shows its size and whether it is on this Mac.
-  A model that is not on this Mac downloads when you choose it, with its progress in the panel,
-  into `~/Library/Application Support/FluidAudio`, and is the model once it loaded. The choice is
-  kept in the app's defaults (`speechModel`). It needs Apple silicon. v3 stays the local default:
-  on the owner's own captures and a fixture of the list's hard terms, Ultra got more terms wrong
-  (`harness/speech-bench`, 24 November 2026).
+  and when neither is left it is the local default (Oruk Fourier 2B); a choice in Settings stays.
+- **The local models run on this Mac.** With them no sound and no text leaves the Mac. Each one
+  shows its size and whether it is on this Mac. A model that is not on this Mac downloads when you
+  choose it, with its progress in its row of Settings › Dictation, and is the model once it loaded.
+  The choice is kept in the app's defaults (`speechModel`). They need Apple silicon.
+  - **Oruk Fourier 2B** (the default) is a fine-tune of Qwen3-ASR, 2.04B parameters, as Oruk's
+    MLX 8-bit form (`mlx/8bit`, 2.46 GB). It runs on the GPU through
+    [mlx-audio](https://github.com/Blaizzy/mlx-audio) 0.6.7, in a Python process of its own that
+    the app starts and keeps warm: it loads the model once, then hears each stretch that the app
+    sends it as JSON lines on its stdin (`Sources/SpeechText/Fourier.swift`). It ends when the app
+    ends or another local model is chosen. The word list's terms go into its prompt. Its files
+    are in `~/Library/Application Support/iterate-speech/oruk-fourier-2b` (2.85 GB), shared by
+    every copy of the app on this Mac (`ITERATE_MAC_FOURIER_FOLDER` names another folder): a
+    pinned uv (0.11.28) makes a venv with its own Python 3.12, installs the 47 packages of
+    `FourierLock.swift` with `--require-hashes` (`node harness/fourier-lock.mjs` writes it), and
+    the model's 11 files come from revision `d058401c` of `oruk/oruk-fourier-2b`, each checked
+    against its SHA-256. A download that stops goes on from where it was; `setup.log` there says
+    each step. The first use downloads 2.68 GB in all (about 2.5 minutes on the owner's line).
+    On a Mac that had Parakeet v3 before Fourier became the default, v3 stays the model until
+    Fourier is on this Mac: the installed app gets Fourier in the background a few seconds after
+    its start, with its progress in its row, and uses it once it loaded.
+  - **Why Fourier, and why 8-bit.** On the bench's synthetic set with no word list (25 November
+    2026), Fourier 8-bit had WER 16.3 (plain sentences 3.3), Parakeet v3 27.4 (13.3), Parakeet
+    Ultra 29.2. Fourier's BF16 checkpoint (4.08 GB, converted to MLX by
+    `harness/speech-bench/engines/oruk-bf16.py`) had WER 16.1 (plain 3.3): no more accurate, and
+    slower (end of audio → text 0.44 / 1.14 s at p50 / p90 against 0.20 / 0.28 s). So the app runs
+    8-bit. The app's own path (`fourier-app`: the recognizer, its pauses and its paced partials)
+    had WER 15.9, the first words in the pill 0.92 s after the start, and the final 0.55 / 0.81 s
+    after the end of the audio (Parakeet v3 in the app: 0.43 / 0.66 s). MLX Swift is not the runtime: the app builds with Apple's Command Line Tools, which have
+    no Metal compiler for MLX's kernels, and Fourier's Swift port is a prerelease fork; mlx's
+    Python wheel brings its kernels built.
+  - **Parakeet v3 and Ultra** run as Core ML through
+    [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex, from
+    `~/Library/Application Support/FluidAudio`. Ultra got more terms wrong than v3 on the owner's
+    own captures and a fixture of the list's hard terms (`harness/speech-bench`, 24 November 2026).
 - **No wait on first use.** Core ML prepares a model for the Neural Engine at its first load after
-  each start of the app (about 25 s on a MacBook Pro). The app loads the chosen local model (with
-  GPT Live Transcribe chosen: Parakeet v3, for captures and for a failure of OpenAI) in the
-  background a few seconds after it starts, when its files are on this Mac, so the first
-  dictation is at once. You can talk during a load: the microphone is open and what you say is
+  each start of the app (about 25 s on a MacBook Pro); Fourier's process reads its model and makes
+  a warm-up pass (1.0 s once its files were read before). The app loads the chosen local model (with GPT Live Transcribe
+  chosen: the local default, for captures and for a failure of OpenAI) in the background a few
+  seconds after it starts, when its files are on this Mac, so the first dictation is at once. You can talk during a load: the microphone is open and what you say is
   kept (the last 60 s). The pill says "Getting the speech model: N%" only while files download,
   and "Loading the speech model" while they only load.
 - **The mind's word list.** A mind keeps the names and terms that a speech model must get right in
@@ -750,9 +785,10 @@ with a lock while it stays on and the time since the start.
   ("This answered a commit id, with no line that starts with "- ""), and the last good list stays
   in use. A new expression fetches at once, and so does **Fetch Now** on the mind's page, which
   shows the count, when it was fetched and the first terms. The app runs no expression that came
-  from anywhere but this setting. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
+  from anywhere but this setting. The list does two things. Oruk Fourier gets the terms in its
+  prompt (mlx-audio's `hotwords`). For the Parakeet models a second, small model (Parakeet CTC 110M, 100 MB)
   listens for the terms in what you said and puts a term in where the sound fits it; it works
-  with each model above, as all of them share v3's tokenizer. Then each wrong form, and each term
+  with both, as they share v3's tokenizer. Then each wrong form, and each term
   in another case, is written as the term: whole words only, the longest form first, and any run
   of separators between a form's words (spaces, `-`, the hyphens and dashes U+2010 to U+2015, the
   minus U+2212, `_`) matches any other run, so `b link` also catches `b-link` and `B‑Link`. A full
@@ -769,9 +805,13 @@ with a lock while it stays on and the time since the start.
 - **Permissions.** The microphone, at the first use. The line under the panel's three buttons
   says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
 
-With a local model, while you talk, the text is written again twice a second from the stretch of
-speech that is going. A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment;
-then its text is final: one segment, with its times from the start. With GPT Live Transcribe the
+With a local model, while you talk, the text is written again from the stretch of speech that is
+going: twice a second with Parakeet; with Oruk Fourier, which has no partial text of its own and
+hears the whole stretch at each pass, at most once a second, and never sooner than twice the last
+pass's time (`PacedEngine`). A pass took 0.08 s for 1 s of speech, 0.15 s for 4 s, 0.38 s for
+10 s and 0.45 s for 12 s (25 November 2026, an M4 Max). A stretch ends at a pause of 0.7 s, or
+after 14 s at its quietest moment; then its text is final: one more pass, one segment, with its
+times from the start (Fourier gives no times of its words). With GPT Live Transcribe the
 whole dictation is one segment, with no times of its words.
 
 ## Listening: one microphone, in layers
@@ -1022,9 +1062,10 @@ pieces of 0.1 s; a model that hears whole utterances gets the clip at its end.
 | Engine | Runtime | Word list |
 | --- | --- | --- |
 | `parakeet-v3`, `parakeet-ultra` | The app's recognizer (`speech-bench`, Core ML) | CTC boosting and repair, as the app |
+| `fourier-app` | The app's recognizer (`speech-bench`): Oruk Fourier in the app's own Python process, a partial pass at most once a second | The terms in its prompt, and repair, as the app |
 | `fluid-speech-pro` | Core ML, the FluidVoice fork of FluidAudio, patched for Xcode 16 | The fork's CTC boosting |
 | `phonon-2.5-english` | Core ML on the Neural Engine, the package's C library | 25 hotwords (its most) |
-| `oruk-fourier-2b` | MLX 8-bit, Python mlx-audio (CC BY-NC 4.0) | The terms in its prompt |
+| `oruk-fourier-2b`, `oruk-fourier-2b-bf16` | MLX 8-bit or BF16 (converted by `engines/oruk-bf16.py`), Python mlx-audio in the bench's venv (CC BY-NC 4.0) | The terms in its prompt |
 | `granite-speech-5.0-470m-turboctc` | MLX, Python mlx-audio (Granite-MLX needs macOS 26) | None (CTC) |
 | `gpt-live-transcribe-low`, `-medium` | OpenAI, a WebSocket; deltas while you talk | `keywords`, `prompt` |
 | `gpt-transcribe` | OpenAI, a WebSocket; the committed turn | `keywords`, `prompt` |
@@ -1186,5 +1227,9 @@ sentence after 2 s of silence, pushed as a capture's buffers with their times, g
 the terms that start after the silence), `listen-always` (Always listen on, the fixture and no
 key: the sentence is one stretch with the terms, `listen.write` writes it, the fake mind gets it
 as one line of a slot's `transcript` track, and the mark's label says that the microphone is open;
-then 20 s of the fixture's silence, its figures in the result) and `speech-model` (Ultra chosen
-through `ui.press` is the stored choice). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.
+then 20 s of the fixture's silence, its figures in the result), `speech-model` (the default is Oruk Fourier when its
+files are on this Mac, else Parakeet v3; Ultra chosen through `ui.press` is the stored choice) and
+`dictation-fourier` (Oruk Fourier chosen hears the fixture: the pill has words before the end,
+and the text has Herdr, Beelink and Doppler; with no Fourier files, in
+`~/Library/Application Support/iterate-speech/oruk-fourier-2b` or `ITERATE_MAC_FOURIER_FOLDER`,
+its result says `skipped`). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.

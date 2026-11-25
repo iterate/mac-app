@@ -608,7 +608,7 @@ private struct DictationPage: View {
                 SettingsRow(title: "Put speech into words", detail: whereDetail, isFirst: true) {
                     Segments(
                         id: "settings.speechWhere", choices: ["On this Mac", "OpenAI"], selection: speech.chosen.isLocal ? "On this Mac" : "OpenAI",
-                        choose: { speech.choose($0 == "OpenAI" ? .gptLiveTranscribe : .default) })
+                        choose: { speech.choose($0 == "OpenAI" ? .gptLiveTranscribe : speech.local) })
                 }
                 ForEach(SpeechModel.all) { model in
                     modelRow(model)
@@ -671,7 +671,7 @@ private struct DictationPage: View {
     private var whereDetail: String {
         let model = speech.chosen
         guard model.isLocal else {
-            return "\(model.name) at OpenAI: the sound leaves this Mac. When OpenAI fails, \(SpeechModel.default.name) hears it here. Captures stay on this Mac."
+            return "\(model.name) at OpenAI: the sound leaves this Mac. When OpenAI fails, \(speech.local.name) hears it here. Captures stay on this Mac."
         }
         return "\(model.name), \(model.megabytes) MB, \(speech.isOnDisk(model) ? "on this Mac" : "not downloaded"). No sound and no text leaves this Mac."
     }

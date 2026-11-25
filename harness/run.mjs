@@ -21,7 +21,7 @@
 import { execFile, execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -104,6 +104,9 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
  */
 /** The word list of the speech fixtures: the owner's forms of Beelink (25 November 2026) among them. */
 const WORDS = "- Herdr: herder, hurdur, her dr\n- Beelink: b-link, be link, bee link, b link\n- Doppler: dopler\n";
+/** Oruk Fourier's files, as the app finds them (`FourierRuntime`): `ready.json` says they are all there. */
+const FOURIER = process.env.ITERATE_MAC_FOURIER_FOLDER || join(homedir(), "Library/Application Support/iterate-speech/oruk-fourier-2b");
+const hasFourier = () => existsSync(join(FOURIER, "ready.json"));
 /** A heard form of Beelink, with any separator (`WordList.separators`). */
 const WRONG_BEELINK = /(?<![\p{L}\p{N}])(?:b|be|bee)[\s\-\u2010-\u2015\u2212_]+link(?![\p{L}\p{N}])/iu;
 
@@ -1010,6 +1013,48 @@ const scenarios = {
     },
   },
 
+  /**
+   * Oruk Fourier 2B, chosen, hears the dictation fixture in a test copy: the pill has words before
+   * the end (a pass at most once a second, `PacedEngine`), and the text has the list's terms.
+   */
+  "dictation-fourier": {
+    local: "needs Oruk Fourier's files (2.85 GB, `FourierRuntime`: ~/Library/Application Support/iterate-speech/oruk-fourier-2b or ITERATE_MAC_FOURIER_FOLDER) and `say`",
+    async run({ app, home }) {
+      if (!hasFourier()) return { skipped: `no Oruk Fourier files in ${FOURIER}: the model's first use downloads them (2.68 GB)` };
+      withMind(home, undefined, { words: WORDS });
+      execFileSync("defaults", ["write", join(home, "defaults"), "speechModel", "oruk-fourier-2b"]);
+      const fixture = join(home, "fixture.aiff");
+      execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler, and the words come while I talk"]);
+      const started = Date.now();
+      const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
+      try {
+        if ((await run.state()).speech.model !== "oruk-fourier-2b") throw new Error(`the model is ${(await run.state()).speech.model}`);
+        await run.control("dictation.start");
+        await until("the dictation", 10, async () => (await run.state()).dictation.running);
+        // the words before the end: the pill shows a partial pass's text while the file plays
+        const seen = [];
+        let firstWord;
+        await until("the words in the pill", 120, async () => {
+          const text = (await run.state()).dictation.text ?? "";
+          if (text.trim() && seen.at(-1) !== text) seen.push(text);
+          if (text.trim() && firstWord === undefined) firstWord = (Date.now() - started) / 1000;
+          return /talk/i.test(text);
+        });
+        await run.control("dictation.stop");
+        const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
+        for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
+        if (WRONG_BEELINK.test(said)) throw new Error(`"${said}" has a heard form of Beelink`);
+        if (seen.length < 2) throw new Error(`the pill had one text only before the end: ${JSON.stringify(seen)}`);
+        const log = readFileSync(join(home, "logs/app.log"), "utf8");
+        if (!/listening 1 starts with oruk-fourier-2b/.test(log)) throw new Error("the log has no listening with oruk-fourier-2b");
+        const ready = /oruk-fourier-2b is ready after ([\d.]+) s/.exec(log);
+        return { firstWordSeconds: Math.round(firstWord * 10) / 10, modelReadySeconds: ready ? Number(ready[1]) : null, pillTexts: seen.length };
+      } finally {
+        await run.quit();
+      }
+    },
+  },
+
   /** The model picker of Settings › Dictation, through ui.press: the choice is stored in the home's defaults. */
   "speech-model": {
     local: "needs Parakeet v3 and Ultra in ~/Library/Application Support/FluidAudio (else a choice downloads)",
@@ -1017,8 +1062,10 @@ const scenarios = {
       const run = await start(app, home);
       try {
         const speech = async () => (await run.state()).speech;
-        if ((await speech()).model !== "parakeet-v3") throw new Error(`the default model is ${(await speech()).model}`);
-        if (!(await speech()).models.every((model) => model.onDisk)) throw new Error("a model is not on this Mac");
+        // the default is Oruk Fourier once its files are on this Mac; until then Parakeet v3 stands in
+        const local = hasFourier() ? "oruk-fourier-2b" : "parakeet-v3";
+        if ((await speech()).model !== local) throw new Error(`the default model is ${(await speech()).model}, not ${local}`);
+        if (!(await speech()).models.filter((model) => model.id.startsWith("parakeet")).every((model) => model.onDisk)) throw new Error("a Parakeet model is not on this Mac");
         await run.control("ui.press", { id: "statusItem" });
         await until("the panel", 10, async () => (await run.state()).panel.visible);
         await run.control("ui.press", { id: "panel.settings" });
