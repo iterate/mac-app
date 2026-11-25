@@ -338,20 +338,33 @@ final class OpenAIStandbyTests: XCTestCase {
         XCTAssertTrue(lines.all.contains("the standby socket has other keywords: closed, and a new one"), "\(lines.all)")
     }
 
-    func testAStandbyThatTheServerClosedIsDroppedQuietlyAndANewSocketOpens() async throws {
-        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+    func testAStandbyThatTheServerClosedIsOpenedAgainWithinTenMinutesOfTheLastDictation() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "again"))
         let lines = Lines()
-        let standby = OpenAIStandby(log: { lines.add($0) })
+        let time = TestClock()
+        let standby = OpenAIStandby(clock: time.clock, log: { lines.add($0) })
         standby.prepare(setup(server), key: { "sk-test" })
         try await until("the standby") { standby.isHeld }
+
+        // the server resets it (the owner's Mac: after 94 and 101 s): a new one is asked for at once
+        time.advance(100)
         server.closeAll()
         try await until("the drop") { !standby.isHeld }
-        XCTAssertTrue(lines.all.contains { $0.hasPrefix("the standby socket went") }, "\(lines.all)")
+        XCTAssertTrue(lines.all.contains { $0.hasPrefix("the standby socket went") && $0.hasSuffix("a new one in 0 s") }, "\(lines.all)")
+        time.fireTimers()
+        try await until("the new standby") { standby.isHeld }
 
         let dictation = await dictate(server, standby)
-        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
-        XCTAssertEqual(dictation.text, ["new"])
-        XCTAssertFalse(dictation.notes.contains { $0.contains("failed") }, "\(dictation.notes)")
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(standby)") }, "\(dictation.notes)")
+        XCTAssertEqual(dictation.text, ["again"])
+
+        // 10 minutes after the last dictation's ask, one that goes stays gone
+        standby.prepare(setup(server), key: { "sk-test" })
+        try await until("the third standby") { standby.isHeld }
+        time.advance(600)
+        server.closeAll()
+        try await until("the last drop") { !standby.isHeld }
+        XCTAssertTrue(lines.all.last?.hasSuffix(": dropped") == true, "\(lines.all)")
     }
 
     func testAStandbyIsClosedAfterTenMinutesUnusedAndTheNextOpensOnlyAfterTheNextDictation() async throws {

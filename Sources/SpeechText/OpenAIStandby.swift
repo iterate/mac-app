@@ -10,7 +10,9 @@ import Foundation
 /// goes, or the Mac sleeps (`drop`). There is never more than one, held or opening. One that waits
 /// 10 minutes unused is closed, and the next opens only after the next dictation: an idle Mac
 /// holds no socket for long. One that the server or the network closes is dropped with a line in
-/// the log and nothing else. A listening takes it (`take`) when it is open, of the same session
+/// the log and opened again, within those 10 minutes of the last dictation, at most once in
+/// `renewSpacing` seconds (the owner's Mac, 25 Nov 2026: OpenAI reset idle standbys after 94 and
+/// 101 s, and kept another 262 s). A listening takes it (`take`) when it is open, of the same session
 /// (the word list's keywords, the key) and answers a ping; else it opens a new socket, as before.
 ///
 /// Cost: OpenAI bills realtime transcription by the audio it gets (25 November 2026: $0.017 a
@@ -21,6 +23,9 @@ import Foundation
 public final class OpenAIStandby: @unchecked Sendable {
     /// The most seconds a standby waits unused.
     public static let unused = 600.0
+    /// The fewest seconds between two openings after a standby went: a network that is down does not
+    /// make a loop.
+    static let renewSpacing = 15.0
     /// The most seconds a listening waits for the standby's pong.
     static let pingTimeout = 0.5
 
@@ -54,6 +59,10 @@ public final class OpenAIStandby: @unchecked Sendable {
     /// The id of the newest opening; an opening of an id at or below `dropped` is not kept.
     private var newest = 0
     private var dropped = 0
+    /// The last dictation's session, and when it asked for a standby: a standby that goes is opened
+    /// again until `unused` seconds after it.
+    private var wanted: (setup: OpenAIStream.Setup, key: @Sendable () -> String?, at: Date)?
+    private var lastRenewal: Date?
 
     public init(clock: Clock = .system, log: @escaping @Sendable (String) -> Void = { _ in }) {
         self.clock = clock
@@ -65,6 +74,12 @@ public final class OpenAIStandby: @unchecked Sendable {
 
     /// Opens a standby for `setup` in the background, unless one is held or opens, or there is no key.
     public func prepare(_ setup: OpenAIStream.Setup, key: @escaping @Sendable () -> String?) {
+        lock.withLock { wanted = (setup, key, clock.now()) }
+        open(setup, key: key, until: clock.now().addingTimeInterval(Self.unused))
+    }
+
+    /// Opens one, kept until `until` at the latest.
+    private func open(_ setup: OpenAIStream.Setup, key: @escaping @Sendable () -> String?, until: Date) {
         let id: Int? = lock.withLock {
             guard held == nil, !isOpening else { return nil }
             isOpening = true
@@ -85,7 +100,7 @@ public final class OpenAIStandby: @unchecked Sendable {
                 }
                 guard isKept else { return stream.cancel() }
                 log("a standby socket is ready after \(milliseconds(since: started)) ms, with \(setup.keywords.count) keywords")
-                clock.after(Self.unused) { [weak self] in self?.expire(id) }
+                clock.after(max(0, until.timeIntervalSince(clock.now()))) { [weak self] in self?.expire(id) }
             } catch {
                 lock.withLock { isOpening = false }
                 log("no standby socket: \(error.localizedDescription)")
@@ -121,6 +136,7 @@ public final class OpenAIStandby: @unchecked Sendable {
     public func drop(_ why: String) {
         let taken: Held? = lock.withLock {
             dropped = newest
+            wanted = nil
             defer { held = nil }
             return held
         }
@@ -136,7 +152,22 @@ public final class OpenAIStandby: @unchecked Sendable {
             held = nil
             return true
         }
-        if isHeld { log("the standby socket went (\(reason)): dropped") }
+        guard isHeld else { return }
+        let renew: (OpenAIStream.Setup, @Sendable () -> String?, Date, Double)? = lock.withLock {
+            guard let wanted else { return nil }
+            let until = wanted.at.addingTimeInterval(Self.unused)
+            guard clock.now() < until else { return nil }
+            let wait = lastRenewal.map { max(0, Self.renewSpacing - clock.now().timeIntervalSince($0)) } ?? 0
+            lastRenewal = clock.now().addingTimeInterval(wait)
+            return (wanted.setup, wanted.key, until, wait)
+        }
+        guard let (setup, key, until, wait) = renew else { return log("the standby socket went (\(reason)): dropped") }
+        log("the standby socket went (\(reason)): a new one in \(Int(wait)) s")
+        clock.after(wait) { [weak self] in
+            // a drop meanwhile (the model, the key, sleep) wants none
+            guard let self, self.lock.withLock({ self.wanted != nil }) else { return }
+            self.open(setup, key: key, until: until)
+        }
     }
 
     /// The timer of `unused` seconds. Internal for a test.
