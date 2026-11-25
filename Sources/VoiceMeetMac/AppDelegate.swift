@@ -67,8 +67,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     /// The Activity window: every event of the device's context, read only while it is open.
     private let contextLog = ContextLog()
-    private lazy var activityWindow = ActivityWindow { [unowned self] in
-        AnyView(ActivityWindowView(acts: model.acts, log: contextLog, state: panelState, actions: activityWindowActions()))
+    private lazy var activityWindow: ActivityWindow = ActivityWindow { [unowned self] in
+        AnyView(
+            ActivityWindowView(
+                acts: model.acts, log: contextLog, state: panelState, actions: activityWindowActions(), shown: activityWindow.shown, history: .shared))
     }
     /// The word-list expressions of the config last seen: a change fetches the lists again.
     private var seenExpressions: [String: String] = [:]
@@ -129,6 +131,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     // a tap of ⌥⇧D: a dictation that stays on until the next press
                     self?.dictation.shortcutPressed()
                     self?.dictation.shortcutReleased()
+                },
+                pasteLast: { [weak self] in
+                    self?.panelWindow.performClose(nil)
+                    self?.writeSaid()
+                },
+                showDictations: { [weak self] in
+                    self?.activityWindow.shown.mode = .dictations
+                    self?.openActivityWindow()
                 }
             ),
             lendActions: LendActions(
@@ -367,6 +377,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
         dictation.onChange = { [weak self] in self?.stateDidChange() }
+        History.shared.read()
         control?.dictationPressed = { [weak self] in self?.dictation.holdStarted() }
         control?.dictationReleased = { [weak self] in self?.dictation.holdEnded() }
         control?.dictationFn = { [weak self] down in self?.dictation.fnChanged(down: down) }
@@ -411,7 +422,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let settableKeys: [UInt32: (what: String, name: String, does: String)] = [
         HotKey.Combo.capture.id: ("capture", "capture", "starts and ends one"),
         HotKey.Combo.input.id: ("input", "the input", "opens it"),
-        HotKey.Combo.writeSaid.id: ("write what I just said", "Write what I just said", "writes the last stretch of speech"),
+        HotKey.Combo.writeSaid.id: ("paste the last transcript", "Paste the last transcript", "pastes the newest transcript of the history"),
     ]
 
     /// The key that Settings set for `id`.
@@ -423,7 +434,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// What the key of capture (`HotKey.Combo.capture.id`), of the input or of "write what I just said" does.
+    /// What the key of capture (`HotKey.Combo.capture.id`), of the input or of "Paste the last transcript" does.
     private func pressed(_ id: UInt32) -> () -> Void {
         switch id {
         case HotKey.Combo.capture.id: return { [weak self] in if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() } }
@@ -432,7 +443,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Settings recorded a key for capture, the input or "write what I just said", or removed it
+    /// Settings recorded a key for capture, the input or "Paste the last transcript", or removed it
     /// (nil). A key that macOS refuses leaves the one before; the answer says so.
     private func setKey(_ id: UInt32, _ combo: HotKey.Combo?) -> String? {
         guard let key = Self.settableKeys[id] else { return nil }
@@ -466,7 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     /// The listening layers (README, "Listening"): every final segment of dictation, the input bar
     /// and Always listen goes into the transcript and the record's `transcript` track; Always listen
-    /// runs while its switch is on; ⌥⇧W writes the last finished stretch.
+    /// runs while its switch is on; ⌥⇧W pastes the newest transcript of the history.
     private func startListening() {
         listening.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
         listening.localModel = { [weak self] in self?.speechChoice.local ?? .default }
@@ -480,6 +491,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speech.transcribed = { [weak self] event in self?.listening.heard(event) }
         speech.onListening = { [weak self] isOn in self?.listening.keyListening(isOn) }
         dictation.said = { [weak self] from, to, stretch in self?.listening.said(from: from, to: to, of: stretch) ?? "" }
+        dictation.heardBy = { [weak self] stretch in self?.listening.model(of: stretch) }
         alwaysListenWatch = choices.$alwaysListen.dropFirst().removeDuplicates().sink { [weak self] isOn in
             // `@Published` tells before the value is set
             DispatchQueue.main.async {
@@ -488,13 +500,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         control?.writeSaid = { [weak self] in self?.writeSaid() }
-        if let combo = choices.writeSaidKey { register(combo, "write what I just said", "writes the last stretch of speech", pressed: pressed(HotKey.Combo.writeSaid.id)) }
+        if let combo = choices.writeSaidKey {
+            register(combo, "paste the last transcript", "pastes the newest transcript of the history", pressed: pressed(HotKey.Combo.writeSaid.id))
+        }
         listening.apply()
     }
 
-    /// ⌥⇧W: the last finished stretch of speech, where the cursor is.
+    /// ⌥⇧W, "Paste the last transcript": the newest entry of the history, where the cursor is.
     private func writeSaid() {
-        dictation.writeSaid(listening.lastStretch)
+        dictation.pasteLast(History.shared.newest)
     }
 
     /// The control socket (`ControlSocket`), when the environment asks for it.
@@ -521,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "input": input.controlState(),
             "dictation": dictation.controlState(),
             "listening": listening.controlState(),
+            "history": History.shared.controlState(),
             "speech": speechChoice.controlState(),
             "sounds": DictationSound.shared.controlState(),
             "activity": [
@@ -537,13 +552,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "log": [
                 "visible": activityWindow.isVisible, "read": contextLog.window.isRead, "held": contextLog.window.events.count,
                 "hasOlder": contextLog.window.hasOlder, "failure": contextLog.failure ?? NSNull(),
-                "types": contextLog.window.events.prefix(50).map(\.type), "shown": contextLog.shown.count,
+                "types": contextLog.window.events.prefix(50).map(\.type), "shown": contextLog.shown.count, "mode": activityWindow.shown.mode.rawValue,
+                // what the Dictations view lists, while it shows
+                "dictations": activityWindow.isVisible && activityWindow.shown.mode == .dictations
+                    ? History.shared.history.shown(search: activityWindow.shown.search).prefix(20).map(\.text) : [],
             ] as [String: Any],
             "choices": [
                 "approvalMinutes": choices.approvalMinutes, "captureKey": choices.captureKey?.words ?? NSNull(),
                 "inputKey": choices.inputKey?.words ?? NSNull(), "dictationOnFn": choices.dictationOnFn, "doubleTap": choices.doubleTap,
                 "pillShowsWords": choices.pillShowsWords, "sounds": choices.sounds, "write": choices.write.rawValue,
-                "alwaysListen": choices.alwaysListen, "writeSaidKey": choices.writeSaidKey?.words ?? NSNull(),
+                "alwaysListen": choices.alwaysListen, "writeSaidKey": choices.writeSaidKey?.words ?? NSNull(), "keepsHistory": History.shared.keeps,
             ],
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
             "record": model.record.state(),
@@ -695,7 +713,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             copy: { json in
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(json, forType: .string)
-            })
+            },
+            paste: { [weak self] text in self?.dictation.paste(text) })
     }
 
     // MARK: - Settings

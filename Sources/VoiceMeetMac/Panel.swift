@@ -90,11 +90,15 @@ struct LendActions {
     var open: (String) -> Void = { _ in }
 }
 
-/// What the panel's three action buttons do.
+/// What the panel's three action buttons do, and the Dictate button's menu.
 struct PanelActions {
     var capture: () -> Void = {}
     var openInput: () -> Void = {}
     var dictate: () -> Void = {}
+    /// ⌥⇧W: the newest transcript of the history, where the cursor is.
+    var pasteLast: () -> Void = {}
+    /// The Activity window in its Dictations mode.
+    var showDictations: () -> Void = {}
 }
 
 /// The app's one piece of interface: a panel under the mark in the menu bar, 400 points wide. From
@@ -321,7 +325,11 @@ struct Panel: View {
                     .help("Talk or type what you want, paste or drop files, choose the mind, Return sends.")
                     .accessibilityIdentifier("panel.openInput")
                 actionButton("Dictate", symbol: "waveform", key: "hold fn", action: actions.dictate)
-                    .help("Hold fn and talk: what you say is written where the cursor is, on this Mac. Tap fn twice to keep it on until the next tap. This button keeps it on until ⌥⇧D.")
+                    .help("Hold fn and talk: what you say is written where the cursor is, on this Mac. Tap fn twice to keep it on until the next tap. This button keeps it on until ⌥⇧D. Control-click for the history.")
+                    .contextMenu {
+                        Button("Paste Last Transcript", action: actions.pasteLast)
+                        Button("Show Dictations", action: actions.showDictations)
+                    }
             }
             if let last = state.lastResult {
                 Text("\(last.what): \(last.line)")

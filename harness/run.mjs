@@ -850,6 +850,144 @@ const scenarios = {
   },
 
   /**
+   * The history of transcripts (README, "Dictation"), with no speech model: a file as the app
+   * writes it, with an entry of 40 days ago and a broken line. The copy reads it (the old entry
+   * goes, the broken line is skipped and its file kept beside it); `listen.write` (⌥⇧W, "Paste the
+   * last transcript") writes the newest entry, a stretch of Always listen; the Activity window's
+   * Dictations mode lists the entries newest first, searches them, and its Paste writes a row's
+   * text. Settings › Dictation, "Clear History…", asks once and empties the file, also after a restart.
+   */
+  "dictation-history": async ({ app, home }) => {
+    withMind(home);
+    const now = Date.now() / 1000;
+    const entry = (id, kind, outcome, ago, text, more = {}) => JSON.stringify({ id, kind, outcome, at: now - ago, text, words: text.split(" ").length, seconds: 2, ...more });
+    const texts = {
+      old: "This one is forty days old",
+      cancelled: "Tell Misha the roadmap moved to Friday",
+      written: "Restart the bridge on the Beelink box",
+      stretch: "so the panel opens on the mind first",
+    };
+    const file = join(home, "dictation-history.jsonl");
+    writeFileSync(
+      file,
+      [
+        entry("h0", "dictation", "written", 40 * 86400, texts.old, { app: "Notes", bundle: "com.apple.Notes" }),
+        entry("h1", "dictation", "cancelled", 600, texts.cancelled, { app: "Slack", bundle: "com.tinyspeck.slackmacgap" }),
+        "{ not an entry",
+        entry("h2", "dictation", "written", 300, texts.written, { app: "Ghostty", bundle: "com.mitchellh.ghostty", model: "parakeet-v3" }),
+        entry("h3", "stretch", "heard", 60, texts.stretch, { model: "parakeet-v3" }),
+      ].join("\n") + "\n",
+    );
+    let run = await start(app, home);
+    const tree = async () => JSON.stringify(await run.control("ui.tree"));
+    try {
+      const history = await until("the history read", 10, async () => (await run.state()).history.read && (await run.state()).history);
+      if (history.entries !== 3 || history.newest?.text !== texts.stretch || history.newest.kind !== "stretch" || !history.keeps)
+        throw new Error(`the history: ${JSON.stringify(history)}`);
+      if (!existsSync(join(home, "dictation-history.broken.jsonl"))) throw new Error("the broken file is not kept beside the history");
+      if (!/1 line of the file was no entry/.test(readFileSync(join(home, "logs/app.log"), "utf8"))) throw new Error("the log does not say that a line was broken");
+      const lines = readFileSync(file, "utf8").trim().split("\n");
+      if (lines.length !== 3 || lines.some((line) => line.includes(texts.old))) throw new Error(`the file is not written again: ${lines.length} lines`);
+
+      // ⌥⇧W: the newest entry, a stretch, whichever ended last
+      await run.control("listen.write");
+      const written = await until("the pasted transcript", 10, async () => (await run.state()).dictation.lastText);
+      if (written !== texts.stretch) throw new Error(`listen.write wrote "${written}"`);
+
+      // the Dictations view, newest first
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "activity.all" });
+      await until("the Activity page's button", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "activity.window"));
+      await run.control("ui.press", { id: "activity.window" });
+      await until("the Activity window", 10, async () => (await run.state()).log.visible);
+      await run.control("ui.press", { id: "log.mode", label: "Dictations" });
+      const listed = await until("the Dictations view", 10, async () => {
+        const log = (await run.state()).log;
+        return log.mode === "dictations" && log.dictations.length === 3 && log.dictations;
+      });
+      if (JSON.stringify(listed) !== JSON.stringify([texts.stretch, texts.written, texts.cancelled])) throw new Error(`the view lists ${JSON.stringify(listed)}`);
+      await until("the rows in the tree", 10, async () => {
+        const shown = await tree();
+        return [texts.stretch, texts.written, texts.cancelled, "dictations.paste"].every((text) => shown.includes(text));
+      });
+      // the search, then the row's Paste
+      await run.control("ui.type", { id: "log.search", text: "beelink" });
+      await until("the search", 10, async () => JSON.stringify((await run.state()).log.dictations) === JSON.stringify([texts.written]));
+      await until("one row", 10, async () => !(await tree()).includes(texts.cancelled));
+      await run.control("ui.press", { id: "dictations.paste" });
+      await until("the row's text pasted", 10, async () => (await run.state()).dictation.lastText === texts.written);
+      await run.control("ui.press", { id: "log.close" });
+      await until("the window closed", 10, async () => !(await run.state()).log.visible);
+
+      // Settings › Dictation: Clear History… asks once, in the page
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "panel.settings" });
+      await until("the Settings window", 10, async () => (await run.state()).settings.visible);
+      await run.control("ui.press", { id: "settings.page.dictation" });
+      await until("Clear History…", 10, async () => (await tree()).includes("settings.clearHistory"));
+      await run.control("ui.press", { id: "settings.clearHistory" });
+      await until("the question", 10, async () => (await tree()).includes("settings.clearHistory.confirm"));
+      if ((await run.state()).history.entries !== 3) throw new Error("the history went before the person said yes");
+      await run.control("ui.press", { id: "settings.clearHistory.confirm" });
+      await until("the history cleared", 10, async () => (await run.state()).history.entries === 0);
+      await until("the file emptied", 10, () => readFileSync(file, "utf8") === "");
+      await run.quit();
+
+      run = await start(app, home);
+      await until("the history read again", 10, async () => (await run.state()).history.read);
+      if ((await run.state()).history.entries !== 0) throw new Error("the cleared history came back after a restart");
+      await run.control("listen.write");
+      const line = await until("the line", 10, async () => (await run.state()).dictation.lastLine);
+      if (!/^No transcript to paste/.test(line)) throw new Error(`with no history, listen.write says "${line}"`);
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * The fixture dictated into the history, then a restart: `listen.write` ("Paste the last
+   * transcript") writes the same text from the history, and the Dictations view lists it.
+   */
+  "dictation-history-fixture": {
+    local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
+    async run({ app, home }) {
+      withMind(home, undefined, { words: WORDS });
+      const fixture = join(home, "fixture.aiff");
+      execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler"]);
+      let run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
+      try {
+        await run.control("dictation.start");
+        await until("the words in the pill", 240, async () => /doppler/i.test((await run.state()).dictation.text ?? ""));
+        await run.control("dictation.stop");
+        const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
+        const kept = await until("the entry", 10, async () => (await run.state()).history.newest);
+        if (kept.text !== said || kept.kind !== "dictation" || kept.outcome !== "written") throw new Error(`the history keeps ${JSON.stringify(kept)}`);
+        const line = readFileSync(join(home, "dictation-history.jsonl"), "utf8").trim().split("\n").map((text) => JSON.parse(text)).at(-1);
+        if (line.text !== said || !line.model || !(line.seconds > 0) || line.words !== said.split(/\s+/).length) throw new Error(`the file's line: ${JSON.stringify(line)}`);
+        await run.quit();
+
+        run = await start(app, home);
+        await until("the history read", 10, async () => (await run.state()).history.read);
+        await run.control("listen.write");
+        const written = await until("the pasted transcript", 10, async () => (await run.state()).dictation.lastText);
+        if (written !== said) throw new Error(`after the restart listen.write wrote "${written}", the dictation was "${said}"`);
+        await run.control("ui.press", { id: "statusItem" });
+        await until("the panel", 10, async () => (await run.state()).panel.visible);
+        await run.control("ui.press", { id: "activity.all" });
+        await until("the Activity page's button", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "activity.window"));
+        await run.control("ui.press", { id: "activity.window" });
+        await run.control("ui.press", { id: "log.mode", label: "Dictations" });
+        await until("the dictation in the view", 10, async () => (await run.state()).log.dictations[0] === said);
+        if (!JSON.stringify(await run.control("ui.tree")).includes(said)) throw new Error("ui.tree has no row with the dictation's text");
+      } finally {
+        await run.quit();
+      }
+    },
+  },
+
+  /**
    * The fn key's ways (`DictationKey`), with the fixture in place of the microphone: a tap that
    * times out, a hold, a double tap that locks and fn to finish, and a lock that Esc cancels.
    */

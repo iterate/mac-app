@@ -9,12 +9,13 @@ import Carbon.HIToolbox
 /// | Key | What |
 /// | --- | --- |
 /// | `approval.minutes` | How long "Approve for N Minutes" lasts (`Approval`); 30 unless set. |
-/// | `key.capture`, `key.input`, `key.writeSaid` | The keys of capture, the input and "write what I just said" (`HotKey`), or "none". |
+/// | `key.capture`, `key.input`, `key.writeSaid` | The keys of capture, the input and "Paste the last transcript" (`HotKey`), or "none". |
 /// | `dictation.key` | "fn": a hold of fn dictates; "none": fn does nothing (⌥⇧D still works). |
 /// | `dictation.doubleTap` | Two taps of fn keep the dictation on. |
 /// | `dictation.pill` | The dictation pill shows the words; off, the level bars and the time alone. |
 /// | `dictation.sounds` | A gentle sound when a dictation starts, is written and is thrown away (`DictationSound`). |
 /// | `dictation.write` | "cursor": the text is written where the cursor is; "clipboard": it is put on the clipboard only. |
+/// | `dictation.history` | "Keep a history" of transcripts on this Mac (`History`, which reads and writes it). On unless set. |
 /// | `listen.always` | Always listen (`Listening`): speech is found and put into words on this Mac with no key. Off unless set. |
 /// | `update.byItself` | The app updates itself once an hour (only when it is from npm). |
 @MainActor

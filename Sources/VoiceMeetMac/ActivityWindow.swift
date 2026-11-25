@@ -12,6 +12,8 @@ import VoiceMeetCore
 // the window holds 500 (`EventWindow`). A new event over that pushes the oldest out. The window's
 // close ends the subscription and lets go of the events. The list is lazy: only the rows on the
 // screen are made, and each row's words are made once, when its event comes.
+//
+// The third mode, Dictations, is the history of transcripts on this Mac (`DictationsView`).
 
 /// One row of the window: an event, or an act of the panel's list.
 struct LogLine: Identifiable, OffsetEvent {
@@ -380,6 +382,8 @@ final class ActivityWindow: NSObject, NSWindowDelegate {
     private let makeView: () -> AnyView
     /// The window opened (true) or closed (false): the log's read starts or ends.
     var opened: (Bool) -> Void = { _ in }
+    /// Its mode and the Dictations search: the panel's "Show Dictations" opens it in that mode.
+    let shown = ActivityWindowShown()
 
     init(view: @escaping () -> AnyView) {
         makeView = view
@@ -426,18 +430,32 @@ struct ActivityWindowActions {
     var choose: (Shareable, Sharing) -> Void = { _, _ in }
     var endApproval: (Shareable) -> Void = { _ in }
     var copy: (String) -> Void = { _ in }
+    /// A transcript of the history, where the cursor is in the app that was in front before the window.
+    var paste: (String) -> Void = { _ in }
+}
+
+/// The window's mode, and what the Dictations mode searches: outside the view, so that the panel
+/// can open the window in a mode, and `ui.state` can tell it.
+@MainActor
+final class ActivityWindowShown: ObservableObject {
+    @Published var mode = ActivityWindowView.Mode.every
+    @Published var search = ""
 }
 
 struct ActivityWindowView: View {
-    enum Mode: String { case acts, every }
+    enum Mode: String { case acts, every, dictations }
 
     @ObservedObject var acts: ActivityLog
     @ObservedObject var log: ContextLog
     /// The things, their choices and approvals, as the panel has them.
     @ObservedObject var state: PanelState
     var actions = ActivityWindowActions()
-    @State var mode: Mode = .every
+    @ObservedObject var shown: ActivityWindowShown
+    @ObservedObject var history: History
     @State var selected: LogLine?
+    /// The chosen transcript of the Dictations mode.
+    @State var chosenEntry: String?
+    private var mode: Mode { shown.mode }
     /// A drawing's: it shows "Following" as an open window does.
     var isDrawing = false
 
@@ -456,15 +474,19 @@ struct ActivityWindowView: View {
             }
             .background(Theme.titlebar)
             Theme.line.frame(height: 1)
-            HStack(spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    header
-                    list
+            if mode == .dictations {
+                DictationsView(history: history, search: shown.search, selected: $chosenEntry, actions: actions, now: isDrawing ? Rendering.now : Date())
+            } else {
+                HStack(spacing: 0) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        header
+                        list
+                    }
+                    .frame(maxWidth: .infinity)
+                    Theme.line.frame(width: 1)
+                    details
+                        .frame(width: 285)
                 }
-                .frame(maxWidth: .infinity)
-                Theme.line.frame(width: 1)
-                details
-                    .frame(width: 285)
             }
             Theme.line.frame(height: 1)
             footer
@@ -484,6 +506,7 @@ struct ActivityWindowView: View {
             HStack(spacing: 2) {
                 modeButton(.acts, "Acts")
                 modeButton(.every, "Every event")
+                modeButton(.dictations, "Dictations")
             }
             .padding(2)
             .background(Theme.track, in: RoundedRectangle(cornerRadius: Theme.Radius.segmentTrack, style: .continuous))
@@ -498,10 +521,10 @@ struct ActivityWindowView: View {
             Spacer(minLength: 8)
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass").font(.system(size: 11, weight: .regular)).foregroundStyle(Theme.t3)
-                TextField("Search", text: mode == .every ? $log.search : .constant(""))
+                TextField("Search", text: mode == .every ? $log.search : mode == .dictations ? $shown.search : .constant(""))
                     .textFieldStyle(.plain)
                     .font(.system(size: 12))
-                    .disabled(mode != .every)
+                    .disabled(mode == .acts)
                     .accessibilityIdentifier("log.search")
             }
             .padding(.horizontal, 9)
@@ -515,7 +538,7 @@ struct ActivityWindowView: View {
     private func modeButton(_ value: Mode, _ title: String) -> some View {
         let isSelected = mode == value
         return Button {
-            mode = value
+            shown.mode = value
             selected = nil
         } label: {
             Text(title)
@@ -592,6 +615,8 @@ struct ActivityWindowView: View {
         switch mode {
         case .acts:
             return acts.rows.map { LogWords.line($0) }
+        case .dictations:
+            return []
         case .every:
             guard log.groups.contains(.acts) else { return log.shown }
             let search = log.search.lowercased().split(separator: " ").map(String.init)
@@ -622,6 +647,7 @@ struct ActivityWindowView: View {
         let words: String? =
             switch mode {
             case .acts: count == 0 ? (acts.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.") : nil
+            case .dictations: nil
             case .every:
                 acts.path == nil ? "This Mac is lent to no mind: there is no context to read."
                     : log.failure.map { "The log could not be read: \($0)" }
@@ -737,17 +763,25 @@ struct ActivityWindowView: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Text("Keys and moves are in no log unless you keep them. A refused use is no act and is not listed.")
-                .font(.system(size: 11))
-                .foregroundStyle(Theme.t3)
-                .lineLimit(1)
-                .truncationMode(.tail)
+            Text(
+                mode == .dictations
+                    ? "The history stays on this Mac and goes to no mind. Settings › Dictation turns it off or clears it."
+                    : "Keys and moves are in no log unless you keep them. A refused use is no act and is not listed."
+            )
+            .font(.system(size: 11))
+            .foregroundStyle(Theme.t3)
+            .lineLimit(1)
+            .truncationMode(.tail)
             Spacer(minLength: 8)
             Toggle("Show each act on the screen", isOn: $acts.showsPill)
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12))
                 .fixedSize()
                 .accessibilityIdentifier("log.showsPill")
+                // the Dictations mode keeps the foot's height
+                .opacity(mode == .dictations ? 0 : 1)
+                .disabled(mode == .dictations)
+                .accessibilityHidden(mode == .dictations)
         }
     }
 }
@@ -840,11 +874,23 @@ extension ActivityWindowView {
         state.sharing = Dictionary(uniqueKeysWithValues: state.things.map { ($0.id, $0.sharing) })
         state.approvals = ["commands": Rendering.now.addingTimeInterval(30 * 60)]
         let selected = acts.rows.first.map { LogWords.line($0) }
+        let history = History(fixed: DictationsView.sample(now: Rendering.now))
         var drawn = true
         for (dark, tone) in [(false, "light"), (true, "dark")] {
-            let view = ActivityWindowView(acts: acts, log: log, state: state, selected: selected, isDrawing: true)
+            let view = ActivityWindowView(acts: acts, log: log, state: state, shown: ActivityWindowShown(), history: history, selected: selected, isDrawing: true)
                 .frame(width: ActivityWindow.size.width, height: ActivityWindow.size.height)
             drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("log-\(tone).png"), titled: true) && drawn
+        }
+        // the Dictations mode: the cancelled one chosen; then searched for “beelink”, the long one chosen
+        for (name, search, chosen) in [("", "", "s4"), ("-search", "beelink", "s5")] {
+            let shown = ActivityWindowShown()
+            shown.mode = .dictations
+            shown.search = search
+            for (dark, tone) in [(false, "light"), (true, "dark")] {
+                let view = ActivityWindowView(acts: acts, log: log, state: state, shown: shown, history: history, chosenEntry: chosen, isDrawing: true)
+                    .frame(width: ActivityWindow.size.width, height: ActivityWindow.size.height)
+                drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("dictations\(name)-\(tone).png"), titled: true) && drawn
+            }
         }
         return drawn
     }
