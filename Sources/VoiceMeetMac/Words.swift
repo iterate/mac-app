@@ -38,6 +38,10 @@ final class Words: ObservableObject {
     private var askedAt: [String: Date] = [:]
     /// The expression of each mind's last fetch: another one fetches at once.
     private var askedWith: [String: String] = [:]
+    /// The minds whose fetch runs: one at a time for a mind, as its bridge has one handler of
+    /// `words`. A fetch asked for meanwhile runs after it, with the newest expression.
+    private var fetching: Set<String> = []
+    private var fetchAfter: [String: String] = [:]
 
     private static func file(of mind: String) -> URL {
         folder.appendingPathComponent("\(mind).md")
@@ -65,13 +69,20 @@ final class Words: ObservableObject {
     }
 
     private func fetch(_ mind: String, expression: String) {
+        guard !fetching.contains(mind) else {
+            fetchAfter[mind] = expression
+            return
+        }
         guard let bridge = bridge(mind) else { return }
+        fetching.insert(mind)
         askedAt[mind] = Date()
         askedWith[mind] = expression
         status[mind, default: Status()].isFetching = true
         bridge.on("words") { [weak self, weak bridge] line in
             guard let self, line["job"] != nil || line["exited"] != nil else { return }
             bridge?.release("words")
+            self.fetching.remove(mind)
+            defer { if let next = self.fetchAfter.removeValue(forKey: mind) { self.fetch(mind, expression: next) } }
             if let terms = line["terms"] as? Int {
                 self.log.info("\(mind): \(terms) terms")
                 self.loadStatus(mind, ended: .done)

@@ -95,12 +95,10 @@ final class Lend {
 
     private let log = AppLog("lend")
     private var sessions = MindSessions()
-    private var process: Process?
+    private var process: JSONLineProcess?
     /// Goes up with each process: the end or a line of an older one changes nothing.
     private var generation = 0
     private var startedAt = Date()
-    /// What each pipe printed after its last whole line.
-    private var pending: [Stream: String] = [:]
     private enum Stream { case states, human }
     private var wait: DispatchWorkItem?
     private var updateTimer: Timer?
@@ -207,9 +205,8 @@ final class Lend {
     private func endProcess() {
         cancelWait()
         generation += 1
-        pending = [:]
-        if let process, process.isRunning {
-            log.info("ends the lend process \(process.processIdentifier)")
+        if let process {
+            log.info("ends the lend process \(process.pid)")
             process.terminate()
         }
         process = nil
@@ -225,61 +222,40 @@ final class Lend {
             send(.humanLine("Node is gone from \(config.node): run npx @iterate-com/mac-app again"))
             return send(.processEnded(status: -1, ranFor: 0))
         }
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: config.node)
-        child.arguments = [config.iterateBin, "provide", config.bridge, "--key", mind.keyFile, "--name", mind.name, "--mind", mind.mind, "--json"]
         var environment = ProcessInfo.processInfo.environment
         environment["ITERATE_MAC_APP_SUPERVISED"] = "1"
-        child.environment = environment
-        // stdout carries the states, one JSON object per line; stderr the lines for a person
-        let states = Pipe()
-        let human = Pipe()
-        child.standardOutput = states
-        child.standardError = human
+        // stdout carries the states, one JSON object per line; stderr the lines for a person. The
+        // lines are whole (framed by bytes), and the end comes after the last of them.
+        let child = JSONLineProcess(
+            executable: config.node,
+            arguments: [config.iterateBin, "provide", config.bridge, "--key", mind.keyFile, "--name", mind.name, "--mind", mind.mind, "--json"],
+            environment: environment, input: false)
         let generation = generation
-        for (pipe, stream) in [(states, Stream.states), (human, Stream.human)] {
-            pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                let data = handle.availableData
-                guard !data.isEmpty else { return handle.readabilityHandler = nil }
-                let text = String(decoding: data, as: UTF8.self)
-                Task { @MainActor in self?.read(text, from: stream, of: generation) }
-            }
-        }
-        child.terminationHandler = { [weak self] ended in
-            let status = ended.terminationStatus
-            // after the last of its output: the pipe's reader runs on another queue
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                MainActor.assumeIsolated {
-                    guard let self, generation == self.generation else { return }
-                    self.read("\n", from: .states, of: generation)
-                    self.read("\n", from: .human, of: generation)
-                    self.process = nil
-                    self.log.info("the lend process ended (exit \(status))")
-                    self.send(.processEnded(status: status, ranFor: Date().timeIntervalSince(self.startedAt)))
-                }
-            }
+        child.printed = { [weak self] line in self?.read(line, from: .states, of: generation) }
+        child.logged = { [weak self] line in self?.read(line, from: .human, of: generation) }
+        child.exited = { [weak self] status in
+            guard let self, generation == self.generation else { return }
+            self.process = nil
+            self.log.info("the lend process ended (exit \(status))")
+            self.send(.processEnded(status: status, ranFor: Date().timeIntervalSince(self.startedAt)))
         }
         do {
-            try child.run()
+            try child.start()
             process = child
             startedAt = Date()
-            log.info("lends to \(mind.mind) as itx.\(mind.name): process \(child.processIdentifier)")
+            log.info("lends to \(mind.mind) as itx.\(mind.name): process \(child.pid)")
         } catch {
             send(.humanLine("the lend did not start: \(AppLog.describe(error))"))
             send(.processEnded(status: -1, ranFor: 0))
         }
     }
 
-    /// Whole lines only: a chunk of the pipe can end in the middle of one. Both streams go to the
-    /// log; the human lines stay there as the CLI wrote them.
-    private func read(_ text: String, from stream: Stream, of generation: Int) {
+    /// One whole line of a stream. Both streams go to the log; the human lines stay there as the
+    /// CLI wrote them.
+    private func read(_ line: String, from stream: Stream, of generation: Int) {
         guard generation == self.generation else { return }
-        var lines = ((pending[stream] ?? "") + text).components(separatedBy: "\n")
-        pending[stream] = lines.removeLast()
-        for line in lines {
-            if !line.isEmpty { log.info("provide\(stream == .states ? " state" : ""): \(line.prefix(400))") }
-            send(stream == .states ? .stateLine(line) : .humanLine(line))
-        }
+        if !line.isEmpty { log.info("provide\(stream == .states ? " state" : ""): \(line.prefix(400))") }
+        send(stream == .states ? .stateLine(line) : .humanLine(line))
     }
 
     private func networkChanged(isUp: Bool) {
@@ -347,7 +323,7 @@ final class Lend {
     /// `use <mind>`: config.json names it active; the folder's watch switches the lend.
     func use(_ mind: String) {
         edit("use \(mind)") {
-            try ConfigFile.write(ConfigFile.using(mind, in: ConfigFile.read(Self.configFile)), to: Self.configFile)
+            try ConfigFile.update(Self.configFile) { try ConfigFile.using(mind, in: $0) }
             return "The app lends this Mac to \(mind.lowercased()) now."
         }
     }
@@ -355,9 +331,14 @@ final class Lend {
     /// `remove <mind>`: it leaves config.json, and its key file is deleted.
     func remove(_ mind: String) {
         edit("remove \(mind)") {
-            let (state, keyFile) = try ConfigFile.removing(mind, from: ConfigFile.read(Self.configFile))
+            var keyFile: String?
+            try ConfigFile.update(Self.configFile) { state in
+                let removed = try ConfigFile.removing(mind, from: state)
+                keyFile = removed.keyFile
+                return removed.state
+            }
+            // the key goes after the config that names it: a failed write leaves both
             if let keyFile { try? FileManager.default.removeItem(atPath: keyFile) }
-            try ConfigFile.write(state, to: Self.configFile)
             return "Removed \(mind.lowercased()) and deleted its key. The key stays listed on the mind's /keys page until you remove it there; it can do nothing now."
         }
     }
@@ -400,43 +381,27 @@ final class Lend {
         guard FileManager.default.fileExists(atPath: config.cli) else {
             return say("This version has no \(config.cli): run npx @iterate-com/mac-app update")
         }
-        let child = Process()
-        child.executableURL = URL(fileURLWithPath: config.node)
-        child.arguments = [config.cli] + arguments
-        child.standardInput = FileHandle.nullDevice
-        let errors = Pipe()
-        child.standardOutput = FileHandle.nullDevice
-        child.standardError = errors
-        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return handle.readabilityHandler = nil }
-            let text = String(decoding: data, as: UTF8.self)
-            Task { @MainActor in
-                guard let self else { return }
-                for line in text.split(separator: "\n") where !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                    self.log.info("cli \(arguments[0]): \(line.prefix(400))")
-                    if let link = line.range(of: #"https://\S+/keys/enrol\S*"#, options: .regularExpression) {
-                        self.commandLink = String(line[link])
-                    }
-                    self.say(String(line))
-                }
+        // stderr's lines are whole: a link that two reads cut is one line
+        let child = JSONLineProcess(executable: config.node, arguments: [config.cli] + arguments, input: false)
+        child.printed = { _ in }
+        child.logged = { [weak self] line in
+            guard let self, !line.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+            self.log.info("cli \(arguments[0]): \(line.prefix(400))")
+            if let link = line.range(of: #"https://\S+/keys/enrol\S*"#, options: .regularExpression) {
+                self.commandLink = String(line[link])
             }
+            self.say(line)
         }
-        child.terminationHandler = { [weak self] ended in
-            let status = ended.terminationStatus
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                MainActor.assumeIsolated {
-                    guard let self else { return }
-                    self.isCommandRunning = false
-                    self.log.info("cli \(arguments[0]) ended (exit \(status))")
-                    if status == 0 { self.commandLink = nil }
-                    self.reload()
-                }
-            }
+        child.exited = { [weak self] status in
+            guard let self else { return }
+            self.isCommandRunning = false
+            self.log.info("cli \(arguments[0]) ended (exit \(status))")
+            if status == 0 { self.commandLink = nil }
+            self.reload()
         }
         log.info("runs cli.mjs \(arguments.joined(separator: " "))")
         do {
-            try child.run()
+            try child.start()
             isCommandRunning = true
             commandLink = nil
         } catch {

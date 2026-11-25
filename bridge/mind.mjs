@@ -19,7 +19,8 @@
 //   words    the mind's word list into a file                                   (words.mjs)
 //
 // stdin and stdout are JSON lines, each with its `job`: `{ job, … }`. `events`, `live` and
-// `record` run from `{ job, start: true }` (record's also names `spool`) to `{ job, stop: true }`;
+// `record` run from `{ job, start: true }` (record's also names `spool`) to `{ job, stop: true }`,
+// and record hears `{ job, slot: <t> }` for each slot the recorder seals;
 // a capture's lines name it (`capture`), and an input's line names it (`input`), and what each
 // says names it again. A line with no `job` is the process's own: `{ connected: true }`,
 // `{ connected: false, failed }`, and `{ failed }` for the app's log. When stdin closes (the app is
@@ -81,6 +82,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
       if (job === "events" && line.event) return running?.add(line.event);
       if (job === "events" && line.log) return running?.log(line);
       if (job === "live") return track(running?.take(line));
+      if (job === "record" && line.slot !== undefined) return running?.sealed(Number(line.slot));
       return;
     }
     if (job === "capture") {

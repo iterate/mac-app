@@ -62,7 +62,7 @@ export function deviceLive({ link, say, pingEveryMs = 60_000 }) {
     }
     if (ended) return;
     iceTimer = setTimeout(
-      () => link.now().then((connection) => iceServers(connection.device)),
+      () => link.now().then((connection) => iceServers(connection.device)).catch(() => {}),
       Math.max(60, ttl / 2) * 1000,
     );
     iceTimer.unref?.();
@@ -71,7 +71,7 @@ export function deviceLive({ link, say, pingEveryMs = 60_000 }) {
   const unhook = link.each(async (connection) => {
     const state = {};
     of.set(connection, state);
-    state.subscription = await connection.device.subscribe({
+    const subscription = await connection.device.subscribe({
       name: `${me}-${++subscriptions}`,
       consumes: [SIGNAL, PING],
       target: (batch) => {
@@ -84,6 +84,9 @@ export function deviceLive({ link, say, pingEveryMs = 60_000 }) {
         }
       },
     });
+    // the job ended while it subscribed: nothing keeps this subscription
+    if (ended) return subscription[Symbol.dispose]();
+    state.subscription = subscription;
     await iceServers(connection.device);
   });
 
@@ -103,11 +106,15 @@ export function deviceLive({ link, say, pingEveryMs = 60_000 }) {
   }
   const pinger = setInterval(() => ping().catch(() => {}), pingEveryMs);
 
-  // Out: what the device says, one append at a time, in order; on up to three connections.
+  // Out: what the device says, one append at a time, in order; on up to three connections. The
+  // end gives up what waits for a connection after its last wait: the process then exits.
   let chain = Promise.resolve();
+  let stop;
+  const stopped = new Promise((resolve) => (stop = resolve));
   async function appendOne(event) {
     for (let tries = 1; tries <= 3; tries++) {
-      const connection = await link.now();
+      const connection = await Promise.race([link.now(), stopped]);
+      if (!connection) return;
       try {
         return await connection.device.append(event);
       } catch (error) {
@@ -137,6 +144,7 @@ export function deviceLive({ link, say, pingEveryMs = 60_000 }) {
       clearInterval(pinger);
       clearTimeout(iceTimer);
       await within(chain, ms).catch(() => {});
+      stop();
       unhook();
       const connection = link.current();
       if (connection) of.get(connection)?.subscription?.[Symbol.dispose]();

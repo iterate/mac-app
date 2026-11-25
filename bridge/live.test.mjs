@@ -88,3 +88,13 @@ test("its end ends its subscription, and the connection stays for the other jobs
   assert.equal(link.current(), mind.connections[0]);
   link.stop();
 });
+
+test("with no connection, the end gives up what waits, so the process can exit", async () => {
+  const link = { each: () => () => {}, now: () => new Promise(() => {}), current: () => undefined, broke() {} };
+  const live = deviceLive({ link, say: () => {}, pingEveryMs: 3_600_000 });
+  const waiting = live.take({ signal: { to: "watcher", bye: true } });
+  const ended = Date.now();
+  await live.end(50);
+  await waiting;
+  assert.ok(Date.now() - ended < 1000, "the signal's wait ended with the job");
+});

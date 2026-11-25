@@ -2,9 +2,10 @@
 // the fake mind.
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { after, test } from "node:test";
 import { fakeMind } from "./fake-mind.test-helper.mjs";
 import { INPUT_SUBMITTED, mindFileName, sendInput } from "./input.mjs";
 import { mindLink } from "./mind.mjs";
@@ -118,4 +119,64 @@ test("a file's name in the mind keeps no slash, no control character and no lead
   assert.equal(mindFileName(2, "line\nbreak.md"), "3-line_break.md");
   assert.equal(mindFileName(3, ""), "4-file");
   assert.equal(mindFileName(4, "Screenshot 2026-11-24 at 14.02.11.png"), "5-Screenshot 2026-11-24 at 14.02.11.png");
+});
+
+test("a send again after a lost answer: unchanged it is the same input; changed it is a new one that leaves the first one's files", async () => {
+  const { fake, send, events } = mind();
+  const local = folderWith({ "notes.txt": "one" });
+  const folder = mkdtempSync(join(tmpdir(), "input-folder-"));
+  try {
+    fake.dropNextAnswer = true;
+    await assert.rejects(send({ id: "c3", text: "hi", at: "t1", files: local.files }, { folder }));
+    // the same input again (a send has a new time)
+    await sendInput({ input: { id: "c3", text: "hi", at: "t2", files: local.files }, name: "jane.mac", link: linkTo(fake), folder });
+    assert.equal(events().length, 1, "the mind has it once");
+    // changed after the failure: other words, other bytes
+    writeFileSync(local.files[0].local, "two");
+    const payload = await sendInput({ input: { id: "c3", text: "hi there", at: "t3", files: local.files }, name: "jane.mac", link: linkTo(fake), folder });
+    assert.match(payload.id, /^c3-[0-9a-f]{16}$/);
+    assert.deepEqual(events().map((event) => event.payload.text), ["hi", "hi there"]);
+    assert.equal(fake.files.get("devices/jane.mac/inputs/c3/1-notes.txt").bytes.toString(), "one", "the first event's file is as it was");
+    assert.equal(fake.files.get(`devices/jane.mac/inputs/${payload.id}/1-notes.txt`).bytes.toString(), "two");
+  } finally {
+    local.remove();
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+const links = [];
+after(() => links.forEach((link) => link.stop()));
+const linkTo = (fake) => {
+  const link = mindLink({ name: "jane.mac", connect: fake.connect, sleep: () => new Promise((resolve) => setTimeout(resolve, 5)), say: () => {} });
+  links.push(link);
+  return link;
+};
+
+test("a send with no answer is aborted: its PUT ends and nothing is appended after", async () => {
+  const fake = fakeMind();
+  const requests = [];
+  const server = createServer((request) => requests.push(request));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const link = mindLink({
+    name: "jane.mac",
+    connect: async () => {
+      const connection = await fake.connect();
+      connection.itx.r2.presign = async ({ key }) => ({ url: `http://127.0.0.1:${server.address().port}/${key}` });
+      return connection;
+    },
+    sleep: () => new Promise((resolve) => setTimeout(resolve, 5)),
+    say: () => {},
+  });
+  const local = folderWith({ "big.txt": "x".repeat(1000) });
+  try {
+    await assert.rejects(sendInput({ input: { id: "d4", text: "", at: "t", files: local.files }, name: "jane.mac", link, silentMs: 200 }), /no answer/);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].destroyed, true, "the PUT was ended");
+    assert.equal(fake.appended.length, 0);
+  } finally {
+    link.stop();
+    server.close();
+    local.remove();
+  }
 });

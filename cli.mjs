@@ -31,10 +31,12 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  closeSync,
   cpSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -123,11 +125,72 @@ function readState() {
   return migrated;
 }
 
-/** Written atomically: the app watches the folder and reads the file again at each change. */
+/** Written atomically: the app watches the folder and reads the file again at each change. The
+ *  temporary file is this process's own: the app writes beside it (ConfigFile.swift). */
 function writeState(state) {
   mkdirSync(home, { recursive: true });
-  writeFileSync(`${paths.config}.new`, `${JSON.stringify(state, null, 2)}\n`);
-  renameSync(`${paths.config}.new`, paths.config);
+  const temporary = `${paths.config}.${process.pid}.new`;
+  writeFileSync(temporary, `${JSON.stringify(state, null, 2)}\n`);
+  renameSync(temporary, paths.config);
+}
+
+const pauseSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** Whether the process `pid` runs. */
+function isRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error.code === "EPERM";
+  }
+}
+
+/** A lock file with the holder's pid: its release, or null when another process holds it after
+ *  `waitMs`. A lock whose holder is gone is taken over. The app takes the same lock
+ *  (ConfigFile.swift). */
+function lock(file, waitMs) {
+  mkdirSync(home, { recursive: true });
+  for (const deadline = Date.now() + waitMs; ; ) {
+    try {
+      const descriptor = openSync(file, "wx");
+      writeFileSync(descriptor, String(process.pid));
+      closeSync(descriptor);
+      return () => rmSync(file, { force: true });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+    }
+    let holder = 0;
+    let age = 0;
+    try {
+      holder = Number(readFileSync(file, "utf8"));
+      age = Date.now() - statSync(file).mtimeMs;
+    } catch {
+      continue;
+    }
+    // no pid yet is a lock being written: it is stale only when old
+    if (holder ? !isRunning(holder) : age > 5000) {
+      rmSync(file, { force: true });
+      continue;
+    }
+    if (Date.now() >= deadline) return null;
+    pauseSync(10);
+  }
+}
+
+/** One change of config.json: read again under its lock, changed and written, so a change that
+ *  another process (the app, another command) made meanwhile stays. `change` answers the new
+ *  state; what it throws is thrown. */
+function updateState(change) {
+  const release = lock(`${paths.config}.lock`, 5000);
+  if (!release) throw new Error(`Another process holds ${paths.config}.lock: try again.`);
+  try {
+    const state = change(readState());
+    writeState(state);
+    return state;
+  } finally {
+    release();
+  }
 }
 
 const keyFileOf = (mind) => join(paths.keys, `${mind}.key`);
@@ -363,20 +426,43 @@ async function allowKey(config, entry) {
   say(`Allowed. The key is ${entry.keyFile}; remove it on the mind's /keys page to end it.`);
 }
 
-/** Makes or checks the key of one mind, then saves the mind and makes it the active one. */
-async function addMind(state, entry) {
+/** Makes or checks the key of one mind with `config`'s node and iterate CLI. A key is allowed for
+ *  one name only: a mind under a new name gets a new key file, beside the one that works, which
+ *  goes only once config.json names the new one (`commitMind`). A key file made here for a key
+ *  that was not allowed goes. Answers the entry, and the key file it replaces. */
+async function addMind(config, entry) {
   checkMind(entry.mind);
   checkName(entry.name);
-  const known = state.minds.find((m) => m.mind === entry.mind);
-  // a key is allowed for one name only
-  if (known && known.name !== entry.name && existsSync(entry.keyFile)) rmSync(entry.keyFile);
-  await allowKey(state, entry);
-  return {
-    ...state,
-    // the keys it does not know (a word list's expression, a later version's) stay in the entry
-    minds: [...state.minds.filter((m) => m.mind !== entry.mind), { ...known, ...entry }],
-    active: entry.mind,
-  };
+  const known = readState().minds.find((m) => m.mind === entry.mind);
+  const keyFile =
+    known?.name === entry.name
+      ? known.keyFile
+      : known
+        ? join(paths.keys, `${entry.mind}.${entry.name}.key`)
+        : entry.keyFile;
+  const isNew = !existsSync(keyFile);
+  try {
+    await allowKey(config, { ...entry, keyFile });
+  } catch (error) {
+    if (isNew) rmSync(keyFile, { force: true });
+    throw error;
+  }
+  return { entry: { ...entry, keyFile }, replaced: known && known.keyFile !== keyFile ? known.keyFile : undefined };
+}
+
+/** The mind of `addMind` into config.json, active; then the key file it replaced goes. */
+function commitMind({ entry, replaced }, more = (state) => state) {
+  const committed = updateState((state) => {
+    const known = state.minds.find((m) => m.mind === entry.mind);
+    return more({
+      ...state,
+      // the keys it does not know (a word list's expression, a later version's) stay in the entry
+      minds: [...state.minds.filter((m) => m.mind !== entry.mind), { ...known, ...entry }],
+      active: entry.mind,
+    });
+  });
+  if (replaced) rmSync(replaced, { force: true });
+  return committed;
 }
 
 /** The setup must have run: `add` needs its node, its iterate CLI and its bridge. */
@@ -412,30 +498,32 @@ async function add({ values }, { interactive }) {
       ? await ask("The name to lend this Mac under, as itx.<name>:", suggestedName())
       : undefined);
   if (!name) throw new Error("Which name? Pass --name <x.mac>.");
-  writeState(await addMind(state, { mind, name, keyFile: keyFileOf(mind) }));
+  commitMind(await addMind(state, { mind, name, keyFile: keyFileOf(mind) }));
   say(`Added ${mind}; the app lends this Mac to it now, as itx.${name}.`);
 }
 
 function use({ positionals }) {
-  const state = readState();
   const mind = positionals[1]?.toLowerCase();
-  if (!state.minds.some((m) => m.mind === mind))
-    throw new Error(
-      `No mind "${mind ?? ""}" on this Mac. Its minds: ${state.minds.map((m) => m.mind).join(", ") || "none"}.`,
-    );
-  writeState({ ...state, active: mind });
+  updateState((state) => {
+    if (!state.minds.some((m) => m.mind === mind))
+      throw new Error(
+        `No mind "${mind ?? ""}" on this Mac. Its minds: ${state.minds.map((m) => m.mind).join(", ") || "none"}.`,
+      );
+    return { ...state, active: mind };
+  });
   say(`The app lends this Mac to ${mind} now.`);
 }
 
 function remove({ positionals }) {
-  const state = readState();
   const mind = positionals[1]?.toLowerCase();
-  const entry = state.minds.find((m) => m.mind === mind);
-  if (!entry) throw new Error(`No mind "${mind ?? ""}" on this Mac.`);
+  let entry;
+  const { active } = updateState((state) => {
+    entry = state.minds.find((m) => m.mind === mind);
+    if (!entry) throw new Error(`No mind "${mind ?? ""}" on this Mac.`);
+    return { ...state, minds: state.minds.filter((m) => m !== entry), active: state.active === mind ? null : state.active };
+  });
+  // the key goes after the config that names it: a failed write leaves both
   rmSync(entry.keyFile, { force: true });
-  const minds = state.minds.filter((m) => m !== entry);
-  const active = state.active === mind ? null : state.active;
-  writeState({ ...state, minds, active });
   say(
     `Removed ${mind} and deleted its key. The key stays listed on the mind's /keys page until you remove it there; it can do nothing now.` +
       (active ? "" : `\nNo mind is lent to now: npx ${PACKAGE} use <mind>`),
@@ -446,9 +534,16 @@ function remove({ positionals }) {
  *  `--words-expression <text>` for every mind (the top level) or with `--mind` for one. An empty
  *  text removes the value: the built-in default, or the default of this Mac. Every other key of the
  *  file, known or not, stays as it is. */
-function set({ values }) {
-  const state = readState();
-  const changed = [];
+function set(parsed) {
+  let changed;
+  updateState((state) => {
+    changed = [];
+    return setIn(state, parsed, changed);
+  });
+  say(changed.join(" "));
+}
+
+function setIn(state, { values }, changed) {
   let next = state;
   if (values.login !== undefined) {
     next = { ...next, login: values.login };
@@ -478,19 +573,29 @@ function set({ values }) {
   } else if (values.mind) throw new Error("--mind goes with --words-expression <text>.");
   if (!changed.length)
     throw new Error("Nothing to set. Pass --login, --no-login, or [--mind <address>] --words-expression <text>.");
-  writeState(next);
-  say(changed.join(" "));
+  return next;
 }
 
-async function setup({ values }, { interactive }) {
+async function setup(parsed, options) {
   if (process.platform !== "darwin") throw new Error("This app runs on a Mac only.");
+  // one setup or update at a time: the app's hourly update and a person's run share the build
+  const release = lock(join(home, "update.lock"), 0);
+  if (!release) throw new Error("Another setup or update of the app runs on this Mac: run this again when it ends.");
+  try {
+    await setupLocked(parsed, options);
+  } finally {
+    release();
+  }
+}
+
+async function setupLocked({ values }, { interactive }) {
   const saved = readState();
   const active = saved.minds.find((m) => m.mind === saved.active);
-  // `update` asks nothing and keeps the minds; setup adds or updates the mind it is given
-  const asked =
-    values.mind ||
-    (interactive ? (active?.mind ?? (await askMind(saved))) : undefined) ||
-    active?.mind;
+  // `update` asks nothing and keeps the minds; setup adds or updates the mind it is given. Only a
+  // mind chosen by this run (a flag, a question) becomes the active one: the build takes minutes,
+  // and a `use` meanwhile stays.
+  const chosen = values.mind || (interactive && !active ? await askMind(saved) : undefined);
+  const asked = chosen || active?.mind;
   if (!asked && !saved.minds.length) throw new Error("Which mind? Pass --mind <address>.");
   const mind = asked && checkMind(asked);
   const known = saved.minds.find((m) => m.mind === mind);
@@ -501,6 +606,8 @@ async function setup({ values }, { interactive }) {
       ? await ask(`The name to lend this Mac under, as itx.<name>:`, suggestedName())
       : suggestedName());
   checkName(name);
+  // the saved answer is not this run's: a `set` meanwhile stays
+  const isLoginAnswered = values.login !== undefined || saved.login === undefined;
   const loginAnswer =
     values.login ??
     saved.login ??
@@ -511,9 +618,9 @@ async function setup({ values }, { interactive }) {
   const rebuilt = buildApp();
   // run from an owner's copy: the app runs what was built and does not update itself (Lend.swift)
   const copy = readRecord(here) ? here : undefined;
-  let state = {
-    ...saved,
-    login: loginAnswer,
+  /** What this run sets in config.json; every other value is read again when it is written. */
+  const own = {
+    ...(isLoginAnswered && { login: loginAnswer }),
     // a run from a folder (a clone) makes that folder the source; an npm run with no questions
     // keeps the saved source, so a trial build stays a trial build
     spec:
@@ -529,15 +636,16 @@ async function setup({ values }, { interactive }) {
   // The app must run for the key's first connection: the bridge asks it on its socket.
   if (appProcesses().length === 0) spawnSync("/usr/bin/open", [paths.app]);
   const entry = mind && { mind, name, keyFile: keyFileOf(mind) };
-  if (entry && (!known || known.name !== name || !existsSync(entry.keyFile))) {
+  const apply = (state) => ({ ...state, ...own, ...(chosen && { active: mind }) });
+  let state;
+  // Written last: the app reads it at its start.
+  if (entry && (!known || known.name !== name || !existsSync(known.keyFile))) {
     if (!interactive)
       throw new Error(
         `This Mac has no allowed key for ${mind} yet: run \`npx ${PACKAGE}\` in a terminal.`,
       );
-    state = await addMind(state, entry);
-  } else if (entry) state = { ...state, active: mind };
-  // Written last: the app reads it at its start.
-  writeState(state);
+    state = commitMind(await addMind({ ...saved, ...own }, entry), apply);
+  } else state = updateState(apply);
   // The app starts again with the new config (and the new build): it starts the lend itself.
   await quitApp();
   spawnSync("/usr/bin/open", [paths.app]);

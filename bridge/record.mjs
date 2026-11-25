@@ -15,10 +15,21 @@
 //
 // It is on the connection of mind.mjs, as the person (the iterate CLI's own sign-in: the Mac's key
 // lends and does nothing else). A failure that says the connection is gone (a session whose sign-in
-// ended, 1008; a hang of 120 s) ends that connection, and the next try is on the next one.
-// It says `{ uploaded, waiting }`, `{ failed, waiting, retryInSeconds }`, `{ dropped, why }` and
-// `{ fallback }`.
-import { existsSync, readFileSync, readdirSync, rmdirSync, rmSync, statSync } from "node:fs";
+// ended, 1008; 120 s with no answer and no byte) ends that connection, and the next try is on the
+// next one. An attempt that is given up is aborted: its PUTs end, and it appends and deletes
+// nothing after that. A PUT's own failure (it goes beside the connection) does not end it.
+//
+// The job reads the spool's list once at its start and keeps its slots and their bytes; then it
+// hears each new slot from the app, `{ job: "record", slot: <t> }` when the recorder seals it, and
+// wakes for it. Until the first such line it looks at the list every `everyMs`, as before; after
+// it, once a minute (a slot whose line was lost). Each slot's manifest is read once for its size.
+// A slot that fails 3 times for its own reason (not the connection, not a 5xx of the signed route,
+// which waits for the route) is set aside in `slots/failed/`: the next slots go, and the cap drops
+// the slots set aside first. Its event goes to the device that its files name: a slot recorded
+// before this Mac's name changed goes to the old name, with the files it names.
+// It says `{ uploaded, waiting }`, `{ waiting }` (a new slot), `{ failed, waiting, retryInSeconds }`,
+// `{ setAside, why }`, `{ dropped, why }` and `{ fallback }`.
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { isConnectionError } from "./mind-connection.mjs";
 import { putFile } from "./upload.mjs";
@@ -33,25 +44,81 @@ function filesOf(payload) {
   ]);
 }
 
-/** The uploads of `spool` on `link`, until `end()`. `everyMs` is the look at an empty spool. */
-export function recordUploads({ link, spool, say, maxBytes = 5e9, everyMs = 2000, sleep = pause }) {
-  const local = (path) => join(spool, path.slice(1));
-  const slotFile = (t) => join(spool, "slots", `${t}.json`);
+/** The device whose files a slot names: `/devices/<name>/…`. */
+const ownerOf = (payload) => filesOf(payload).map(([path]) => /^\/devices\/([^/]+)\//.exec(path)?.[1]).find(Boolean);
 
-  /** The waiting slots, oldest first. */
-  function waitingSlots() {
-    const folder = join(spool, "slots");
-    if (!existsSync(folder)) return [];
-    return readdirSync(folder)
-      .filter((file) => /^\d+\.json$/.test(file))
-      .map((file) => Number(file.slice(0, -5)))
-      .sort((a, b) => a - b);
+/** Inserts `t` into the sorted list `list`. A new slot is the newest: it goes at the end. */
+function insert(list, t) {
+  if (!list.length || list.at(-1) < t) return list.push(t);
+  let low = 0;
+  for (let high = list.length; low < high; ) {
+    const middle = (low + high) >> 1;
+    if (list[middle] < t) low = middle + 1;
+    else high = middle;
+  }
+  if (list[low] !== t) list.splice(low, 0, t);
+}
+
+/** The uploads of `spool` on `link`, until `end()`. `everyMs` is the look at the spool's list
+ *  before the app tells slots; `idleMs` the time with no answer and no byte that gives an attempt
+ *  up. */
+export function recordUploads({ link, spool, say, maxBytes = 5e9, everyMs = 2000, idleMs = 120_000, mostOwnFailures = 3, sleep = pause }) {
+  const local = (path) => join(spool, path.slice(1));
+  const slots = join(spool, "slots");
+  const aside = join(slots, "failed");
+  const slotFile = (t, folder = slots) => join(folder, `${t}.json`);
+
+  /** The waiting slots and those set aside, oldest first, and the bytes of each. */
+  const waiting = [];
+  const setAside = [];
+  const bytes = new Map();
+  let total = 0;
+  /** The failures of a slot for its own reason, by slot. */
+  const failures = new Map();
+
+  const read = (t, folder = slots) => JSON.parse(readFileSync(slotFile(t, folder), "utf8"));
+  function sizeOf(t, folder) {
+    try {
+      return filesOf(read(t, folder)).reduce((sum, [path]) => {
+        try {
+          return sum + statSync(local(path)).size;
+        } catch {
+          return sum;
+        }
+      }, 0);
+    } catch {
+      return 0;
+    }
+  }
+  function add(list, t, folder) {
+    if (bytes.has(t) && list.includes(t)) return false;
+    const size = sizeOf(t, folder);
+    bytes.set(t, size);
+    total += size;
+    insert(list, t);
+    return true;
+  }
+  function forget(list, t) {
+    const at = list.indexOf(t);
+    if (at !== -1) list.splice(at, 1);
+    total -= bytes.get(t) ?? 0;
+    bytes.delete(t);
+    failures.delete(t);
+  }
+  /** The slots of a folder's list that the index does not have yet. */
+  function scan(list, folder) {
+    if (!existsSync(folder)) return;
+    for (const file of readdirSync(folder))
+      if (/^\d+\.json$/.test(file)) {
+        const t = Number(file.slice(0, -5));
+        if (!list.includes(t)) add(list, t, folder);
+      }
   }
 
   /** The event first (a slot with no event is no slot to the uploader), then its files. */
-  function remove(t, payload) {
-    rmSync(slotFile(t), { force: true });
-    for (const [path] of filesOf(payload)) {
+  function remove(t, payload, folder = slots) {
+    rmSync(slotFile(t, folder), { force: true });
+    for (const [path] of payload ? filesOf(payload) : []) {
       rmSync(local(path), { force: true });
       // the empty folders of an hour, a day and a track
       for (let folder = dirname(local(path)); folder.startsWith(join(spool, "devices") + "/"); ) {
@@ -65,115 +132,184 @@ export function recordUploads({ link, spool, say, maxBytes = 5e9, everyMs = 2000
     }
   }
 
-  /** Drops the oldest slots while the spool holds more than `maxBytes`. */
-  function cap(slots) {
-    const sizes = slots.map((t) => {
+  /** Drops the oldest slots, those set aside first, while the spool holds more than `maxBytes`. */
+  function cap() {
+    while (total > maxBytes && setAside.length + waiting.length > 1) {
+      const [list, folder] = setAside.length ? [setAside, aside] : [waiting, slots];
+      const t = list[0];
+      let payload;
       try {
-        const payload = JSON.parse(readFileSync(slotFile(t), "utf8"));
-        return filesOf(payload).reduce((sum, [path]) => sum + (existsSync(local(path)) ? statSync(local(path)).size : 0), 0);
-      } catch {
-        return 0;
-      }
-    });
-    let total = sizes.reduce((a, b) => a + b, 0);
-    while (total > maxBytes && slots.length > 1) {
-      const t = slots.shift();
-      total -= sizes.shift();
-      remove(t, JSON.parse(readFileSync(slotFile(t), "utf8")));
+        payload = read(t, folder);
+      } catch {}
+      // a slot whose manifest does not read goes with its manifest alone
+      try {
+        remove(t, payload, folder);
+      } catch {}
+      forget(list, t);
       say({ dropped: t, why: `the spool holds more than ${maxBytes} bytes` });
     }
   }
 
   let saidFallback = false;
-  /** The connection the slot is on: a failure of it ends it. */
-  let connection;
 
-  async function upload(t) {
-    // within the try's 120 s: a wait that outlives it would upload the slot a second time
-    connection = await link.now(110_000);
-    const { device, itx } = connection;
-    const files = itx.r2;
-    const payload = JSON.parse(readFileSync(slotFile(t), "utf8"));
-    const present = filesOf(payload).filter(([path]) => existsSync(local(path)));
-    const gone = filesOf(payload).filter(([path]) => !existsSync(local(path)));
-    // the links of the slot in one go; and for a file gone from the spool (it went up before, or
-    // the spool's cap dropped it) the mind says which
-    const [links, heads] = await Promise.all([
-      Promise.all(present.map(([path]) => files.presign({ key: path.slice(1), method: "PUT", expiresInSeconds: 600 }))),
-      Promise.all(gone.map(([path]) => files.head(path.slice(1)))),
-    ]);
-    await Promise.all(
-      present.map(([path, contentType], index) =>
-        putFile({
-          r2: files,
-          key: path.slice(1),
-          path: local(path),
-          contentType,
-          url: links[index].url,
-          fellBack: () => {
-            if (!saidFallback) say({ fallback: "signed upload failing; files go through the connection" });
-            saidFallback = true;
-          },
-        }).catch((error) => {
-          throw Object.assign(new Error(`${path}: ${error?.message ?? error}`), { cause: error });
-        }),
-      ),
-    );
-    const missing = gone.filter((_, index) => !heads[index]).map(([path]) => path);
-    if (missing.length) {
-      remove(t, payload);
-      say({ dropped: t, why: `not in the spool nor in the mind: ${missing.join(", ")}` });
-      return false;
-    }
+  /** Slot `t` into the mind. Every wait races `signal`; after it, nothing is appended or deleted. */
+  async function upload(t, signal, alive) {
+    const aborted = new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    aborted.catch(() => {});
+    const within = (promise) => Promise.race([promise, aborted]);
+    const connection = await within(link.now());
+    const fail = (error) => Object.assign(error instanceof Error ? error : new Error(String(error)), { connection });
     try {
-      await device.append({ type: "record/slot-stored", payload, idempotencyKey: `record/slot-stored/${t}` });
+      const { itx } = connection;
+      const files = itx.r2;
+      const payload = read(t);
+      const owner = ownerOf(payload);
+      const device = owner ? itx.cd(`/devices/${owner}`) : connection.device;
+      const present = filesOf(payload).filter(([path]) => existsSync(local(path)));
+      const gone = filesOf(payload).filter(([path]) => !existsSync(local(path)));
+      // the links of the slot in one go; and for a file gone from the spool (it went up before, or
+      // the spool's cap dropped it) the mind says which
+      const [links, heads] = await within(
+        Promise.all([
+          Promise.all(present.map(([path]) => files.presign({ key: path.slice(1), method: "PUT", expiresInSeconds: 600 }))),
+          Promise.all(gone.map(([path]) => files.head(path.slice(1)))),
+        ]),
+      );
+      alive();
+      await within(
+        Promise.all(
+          present.map(([path, contentType], index) =>
+            putFile({
+              r2: files,
+              key: path.slice(1),
+              path: local(path),
+              contentType,
+              url: links[index].url,
+              signal,
+              said: alive,
+              fellBack: () => {
+                if (!saidFallback) say({ fallback: "signed upload failing; files go through the connection" });
+                saidFallback = true;
+              },
+            }).catch((error) => {
+              throw Object.assign(new Error(`${path}: ${error?.message ?? error}`), { cause: error, put: error?.put, status: error?.status });
+            }),
+          ),
+        ),
+      );
+      signal.throwIfAborted();
+      const missing = gone.filter((_, index) => !heads[index]).map(([path]) => path);
+      if (missing.length) {
+        remove(t, payload);
+        say({ dropped: t, why: `not in the spool nor in the mind: ${missing.join(", ")}` });
+        return false;
+      }
+      try {
+        await within(device.append({ type: "record/slot-stored", payload, idempotencyKey: `record/slot-stored/${t}` }));
+      } catch (error) {
+        // the mind has another event for this slot: it keeps it, and the files are the newer ones
+        if (error?.code !== "IDEMPOTENCY_CONFLICT") throw error;
+        say({ failed: `slot ${t}: ${error.message}`, kept: "the mind's event" });
+      }
+      signal.throwIfAborted();
+      remove(t, payload);
+      return true;
     } catch (error) {
-      // the mind has another event for this slot: it keeps it, and the files are the newer ones
-      if (error?.code !== "IDEMPOTENCY_CONFLICT") throw error;
-      say({ failed: `slot ${t}: ${error.message}`, kept: "the mind's event" });
+      throw fail(error);
     }
-    remove(t, payload);
-    return true;
   }
 
   let isEnding = false;
-  let ending;
-  const ended = new Promise((resolve) => (ending = resolve));
-  /** A wait that the end cuts short. */
-  const wait = (ms) => Promise.race([sleep(ms), ended]);
+  /** Wakes the wait now: a new slot, or the end. */
+  let wake = () => {};
+  /** A wait that a new slot or the end cuts short: true when it was cut. */
+  const wait = (ms) =>
+    new Promise((resolve) => {
+      let timer;
+      const done = (woken) => {
+        clearTimeout(timer);
+        wake = () => {};
+        resolve(woken);
+      };
+      wake = () => done(true);
+      if (sleep === pause) timer = setTimeout(() => done(false), ms);
+      else sleep(ms).then(() => done(false));
+    });
+  /** True once the app has told a slot: the look at the list is then once a minute. */
+  let isTold = false;
 
   const loop = (async () => {
     let backoff = 0;
+    scan(waiting, slots);
+    scan(setAside, aside);
     while (!isEnding) {
-      const slots = waitingSlots();
-      if (slots.length > 1) cap(slots);
-      if (slots.length === 0) {
-        await wait(everyMs);
+      cap();
+      const t = waiting[0];
+      if (t === undefined) {
+        if (!(await wait(isTold ? 60_000 : everyMs))) scan(waiting, slots);
         continue;
       }
+      const attempt = new AbortController();
       let timer;
+      const alive = () => {
+        clearTimeout(timer);
+        timer = setTimeout(() => attempt.abort(new Error(`no answer in ${idleMs / 1000} s`)), idleMs);
+      };
+      alive();
       try {
-        // a connection that hangs (no network) is given up and made again
-        const isUploaded = await Promise.race([
-          upload(slots[0]),
-          new Promise((_, reject) => (timer = setTimeout(() => reject(new Error("no answer in 120 s")), 120_000))),
-        ]).finally(() => clearTimeout(timer));
+        const isUploaded = await upload(t, attempt.signal, alive);
         backoff = 0;
-        if (isUploaded) say({ uploaded: slots[0], waiting: slots.length - 1 });
+        forget(waiting, t);
+        if (isUploaded) say({ uploaded: t, waiting: waiting.length });
       } catch (error) {
-        if (isConnectionError(error)) link.broke(connection, error);
+        // only the wait with no answer aborts before here; the abort now ends the other PUTs
+        const isStalled = attempt.signal.aborted;
+        attempt.abort(error);
+        const isConnection = isStalled || isConnectionError(error);
+        // a PUT's reset says nothing of the connection; a 5xx of the signed route waits for it
+        if (isConnection && (isStalled || !error.put)) link.broke(error.connection, error);
+        const isOwn = !isConnection && !(error.status >= 500);
+        const failed = isOwn ? (failures.get(t) ?? 0) + 1 : 0;
+        if (isOwn) failures.set(t, failed);
         backoff = Math.min(60, Math.max(1, backoff * 2));
-        say({ failed: String(error?.message ?? error).slice(0, 300), waiting: slots.length, retryInSeconds: backoff });
+        say({ failed: String(error?.message ?? error).slice(0, 300), waiting: waiting.length, retryInSeconds: backoff });
+        if (failed >= mostOwnFailures) {
+          setSlotAside(t, error);
+          continue;
+        }
         await wait(backoff * 1000);
+      } finally {
+        clearTimeout(timer);
       }
     }
   })();
 
+  function setSlotAside(t, error) {
+    try {
+      mkdirSync(aside, { recursive: true });
+      renameSync(slotFile(t), slotFile(t, aside));
+    } catch {}
+    const size = bytes.get(t) ?? 0;
+    forget(waiting, t);
+    bytes.set(t, size);
+    total += size;
+    insert(setAside, t);
+    say({ setAside: t, why: `${mostOwnFailures} failures: ${String(error?.message ?? error).slice(0, 300)}` });
+  }
+
   return {
+    /** The app sealed slot `t`: it waits now, and the job wakes for it. */
+    sealed(t) {
+      isTold = true;
+      if (!Number.isFinite(t) || waiting.includes(t) || !existsSync(slotFile(t))) return;
+      add(waiting, t, slots);
+      say({ waiting: waiting.length });
+      wake();
+    },
     /** Ends after the slot it is on. */
     async end() {
       isEnding = true;
-      ending();
+      wake();
       await loop;
     },
   };
