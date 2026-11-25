@@ -219,14 +219,20 @@ export function captureUpload({
       panels.some((panel) => panel.did !== "the screen at the end")
         ? `The words point at red marks on the screen: look at the pictures before you answer. Each # is a numbered picture.`
         : `The words are about what is on the screen: look at the picture before you answer.`,
-      `On ${manifest.by.device}: read ${pictures}, in ${folder}. Those files are the whole capture: answer from them, and open nothing else in that folder`,
+      inTheMind
+        ? `Get the pictures in one of these ways, then answer from them and the lines below alone:`
+        : `Read the pictures, then answer from them and the lines below alone:`,
+      `- On ${manifest.by.device}: read ${pictures}, in ${folder} (open nothing else there).`,
       ...(inTheMind
         ? [
             // One script, whole in the text: an agent that is pointed at a file of code reads the code
-            // before it runs it, which is one more call. It answers context.json, whose
-            // "itx/images" the MCP tool answers as images; an agent of the mind is shown the same
-            // pictures as the files of a message to itself.
-            `If you cannot read that folder (you are an agent of the mind ${mind}, or you have its MCP tool and no file tool), run this as your first step. It answers the words and the marks, and it shows you the pictures as images: async (itx) => { const d = "${directory}/"; await itx.cd(d).waitForEvent({ type: "capture/ready", afterOffset: 0, timeoutMs: 60000 }).catch(() => {}); const c = JSON.parse(new TextDecoder().decode(await itx.files.get(d + "context.json").bytes())); const files = await Promise.all(c.pictures.map(async (name) => ({ contentType: "image/jpeg", filename: name, data: await itx.files.get(d + name).bytes() }))); await itx.agents.get((await itx.whoami()).path).message({ message: "The capture's pictures", files }, { trigger: false }).catch(() => {}); return c; }`,
+            // before it runs it, which is one more call. The same text runs everywhere: the MCP tool
+            // takes it as it is, a codemode block and the CLI take its body. It answers context.json
+            // (whose "itx/images" the MCP tool shows as images) and a signed link for each picture,
+            // which a shell fetches with curl; an agent of the mind also gets the pictures as the
+            // files of a message to itself.
+            `- Anywhere else, through the mind ${mind}: run this itx script. It answers the words, the marks and a download link for each picture ("urls"), and an agent of the mind also gets the pictures as images. The iterate MCP tool "run" takes it as it is. In your own codemode, or with the iterate CLI (iterate itx run --mind ${mind} --eval '…'), run only its body, between the outer braces. If no images appeared, download each link in "urls" (curl -o) and look at the files.`,
+            `async (itx) => { const d = "${directory}/"; await itx.cd(d).waitForEvent({ type: "capture/ready", afterOffset: 0, timeoutMs: 60000 }).catch(() => {}); const c = JSON.parse(new TextDecoder().decode(await itx.files.get(d + "context.json").bytes())); const urls = {}; for (const n of c.pictures) urls[n] = (await itx.files.get(d + n).url()).url; const me = await itx.whoami(); if (me.path.startsWith("/agents/")) await itx.agents.get(me.path).message({ message: "The capture's pictures", files: await Promise.all(c.pictures.map(async (n) => ({ contentType: "image/jpeg", filename: n, data: await itx.files.get(d + n).bytes() }))) }, { trigger: false }); return { ...c, urls }; }`,
           ]
         : []),
       ...(wordsPending

@@ -570,8 +570,10 @@ to the pictures:
 ```
 [capture 0:15 · Ghostty “my project” · jonas.mac → example.com]
 The words point at red marks on the screen: look at the pictures before you answer. Each # is a numbered picture.
-On jonas.mac: read sheet.jpg and 1.jpg, 2.jpg together, in /Users/…/iterate-mac-app/captures/<id>. Those files are the whole capture: answer from them, and open nothing else in that folder
-If you cannot read that folder (you are an agent of the mind example.com, or you have its MCP tool and no file tool), run this as your first step. It answers the words and the marks, and it shows you the pictures as images: async (itx) => { … one script, about 600 characters: it waits for capture/ready, reads context.json, and shows the pictures … }
+Get the pictures in one of these ways, then answer from them and the lines below alone:
+- On jonas.mac: read sheet.jpg and 1.jpg, 2.jpg together, in /Users/…/iterate-mac-app/captures/<id> (open nothing else there).
+- Anywhere else, through the mind example.com: run this itx script. It answers the words, the marks and a download link for each picture ("urls") … The iterate MCP tool "run" takes it as it is. In your own codemode, or with the iterate CLI (iterate itx run --mind example.com --eval '…'), run only its body …
+async (itx) => { … one script: it waits for capture/ready, reads context.json, makes a signed link for each picture, and sends the pictures to an agent of the mind as images … }
 - #1 (0:06) drew “what is this here?”
 - #2 (0:12) clicked “Save” “and this is slow”
 ```
@@ -593,6 +595,7 @@ takes its place on the clipboard a moment later, unless you copied something els
 | On this Mac (Claude Code, Codex)                  | Reads the numbered pictures from the folder | Yes                                                                                                                                            |
 | In the mind (the Dash, Slack)                     | Runs the text's script                      | Yes: the script sends them to that agent as the files of a message                                                                             |
 | Elsewhere, with the mind's MCP tool and a shell   | Runs the text's script                      | Yes                                                                                                                                            |
+| Elsewhere, with the iterate CLI and a shell       | Runs the script's body with `iterate itx run --eval`, then downloads the links in `urls` | Yes, from the downloaded files (25 Nov 2026: an agent on Beelink found no way to the pictures before) |
 | With the mind's MCP tool alone (no shell, no web) | Runs the text's script                      | Yes: the tool answers the pictures as images. A mind that does not have that yet answers text, with `seen`: what a model read off each picture |
 
 Each of them answers in one turn: one reply to the one message with the text.
