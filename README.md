@@ -261,6 +261,28 @@ has no switch of its own: it is part of `state()`, which any agent the Mac is le
 macOS asks no permission for any of the three (`CGEventSource.secondsSinceLastEventType`,
 `CGSessionCopyCurrentDictionary`, `CGDisplayIsAsleep`).
 
+### Keep the Mac awake: Amphetamine
+
+The app does not keep the Mac awake itself. When [Amphetamine](https://apps.apple.com/app/amphetamine/id937984704)
+is installed, an agent drives it through `mac.run` with `osascript`. The first call shows macOS's
+question whether `iterate` may control Amphetamine, once.
+
+```js
+const amph = (script) => mac.run(["osascript", "-e", `tell application "Amphetamine" to ${script}`]);
+await amph("session is active"); // stdout "true" or "false": the person may have one running
+await amph("start new session with options {duration:2, interval:hours, displaySleepAllowed:true}");
+await amph("session time remaining"); // seconds; 0 no end, -1 a trigger, -2 an app or a date, -3 none
+await amph("end session");
+```
+
+- Amphetamine has **one** session for the whole Mac. A new one ends the one before, the person's
+  own too. So read `session is active` first, and do not end a session that you did not start.
+- Always give a duration, so that a session ends when the agent stops. `duration:0, interval:0` never ends.
+- `displaySleepAllowed:true` keeps the Mac awake and lets the screen sleep.
+- With the lid closed, the Mac sleeps anyway, unless closed-display mode is on: `enable closed
+  display mode`. That needs the separate Amphetamine Enhancer helper, which the person installs.
+- `osascript` exits with an error when Amphetamine is not installed: then nothing keeps the Mac awake.
+
 ### Banners
 
 A banner is an output of this Mac, beside the speakers. `mac.banner.show` puts one on the screen:
