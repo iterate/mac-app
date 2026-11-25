@@ -8,10 +8,12 @@ import os
 /// session of 24 kHz pcm16 with no turn detection; the sound as it comes; a commit at the end; the
 /// item's `completed` text is the final. Each `delta` adds to the words so far, which `text` hears.
 ///
-/// It is bounded: the socket and the session's setup must be ready within `connectTimeout`, and
-/// the final must come within `finalTimeout` of the commit; else it throws, and the caller
-/// (`StreamRecognizer`) lets the local model hear the sound. Everything runs on URLSession's
-/// queue: `receive` is a chain of callbacks, with no polling.
+/// The socket is an `OpenAISocket`: the direct one with this Mac's key (`DirectSocket`), or the one
+/// that the lent mind's bridge relays with the mind's key (`RelaySocket`). This stream is the same
+/// on both. It is bounded: the socket and the session's setup must be ready within
+/// `connectTimeout`, and the final must come within `finalTimeout` of the commit; else it throws,
+/// and the caller (`StreamRecognizer`) lets the local model hear the sound. Everything runs on the
+/// socket's callbacks, with no polling.
 public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     /// gpt-live-transcribe's price, by audio duration (its model page, 25 Nov 2026).
     public static let dollarsPerMinute = 0.017
@@ -54,7 +56,7 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
 
         public var errorDescription: String? {
             switch self {
-            case .noKey: "no token of a mind and no OpenAI key of this Mac"
+            case .noKey: "no mind with an OpenAI key and no OpenAI key of this Mac"
             case .timedOut(let what): "no \(what) in time"
             case .failed(let reason): reason
             case .cancelled: "cancelled"
@@ -62,11 +64,8 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         }
     }
 
-    /// A shared session with no delegate: each stream is one task of it.
-    private static let urlSession = URLSession(configuration: .ephemeral)
-
     private let setup: Setup
-    private let task: URLSessionWebSocketTask
+    private let socket: OpenAISocket
     /// Under the lock: a standby (`OpenAIStandby`) hands them over when a dictation takes it.
     private var text: @Sendable (String) -> Void
     private var failed: @Sendable (String) -> Void
@@ -80,6 +79,10 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     private var billed: [String: Double] = [:]
     /// When the socket was made: a standby may wait minutes, which OpenAI does not bill.
     public let made = Date()
+    /// The seconds from the start of the socket to OpenAI's `session.created`: the socket's own
+    /// opening, through the mind or direct.
+    public var createdAfter: Double? { lock.withLock { created } }
+    private var created: Double?
     private var failure: Failure?
     private var isClosed = false
     private var isCommitted = false
@@ -90,24 +93,29 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     /// Samples at 24 kHz sent so far.
     private var sent = 0
 
-    private init(setup: Setup, key: String, text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void) {
+    private init(setup: Setup, socket: OpenAISocket, text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void) {
         self.setup = setup
-        var request = URLRequest(url: setup.url)
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        task = Self.urlSession.webSocketTask(with: request)
+        self.socket = socket
         self.text = text
         self.failed = failed
     }
 
-    /// Opens a socket and configures the session. `text` hears the words so far at each delta;
+    /// Opens `socket` and configures the session. `text` hears the words so far at each delta;
     /// `failed` hears a failure that comes while the sound streams (not one that `open` or
     /// `finish` throws).
     public static func open(
-        _ setup: Setup, key: String, text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void
+        _ setup: Setup, socket: OpenAISocket, text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void
     ) async throws -> OpenAIStream {
-        let stream = OpenAIStream(setup: setup, key: key, text: text, failed: failed)
+        let stream = OpenAIStream(setup: setup, socket: socket, text: text, failed: failed)
         try await stream.connect()
         return stream
+    }
+
+    /// With this Mac's key, on the direct socket to `setup.url`.
+    public static func open(
+        _ setup: Setup, key: String, text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void
+    ) async throws -> OpenAIStream {
+        try await open(setup, socket: DirectSocket(url: setup.url, key: key), text: text, failed: failed)
     }
 
     /// A standby taken by a dictation: from now on `text` and `failed` are the dictation's. False
@@ -125,17 +133,13 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     /// dead with no sign (a sleep, another network), so a dictation asks before it takes it.
     func ping(within: Double) async -> Bool {
         guard lock.withLock({ failure == nil && !isClosed && isOpen }) else { return false }
-        let once = Once()
-        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            once.set(continuation)
-            task.sendPing { error in once.resume(error == nil) }
-            DispatchQueue.global().asyncAfter(deadline: .now() + within) { once.resume(false) }
-        }
+        return await socket.ping(within: within)
     }
 
     private func connect() async throws {
-        task.resume()
-        receive()
+        socket.start(
+            heard: { [weak self] text in self?.handle(Data(text.utf8)) },
+            ended: { [weak self] why in self?.fail(.failed(why)) })
         send(setup.sessionUpdate)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             lock.withLock {
@@ -201,33 +205,21 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
             defer { isClosed = true }
             return isClosed
         }
-        if !wasClosed { task.cancel(with: .normalClosure, reason: nil) }
+        if !wasClosed { socket.close(normal: true) }
     }
 
     private func send(_ message: [String: Any]) {
         guard let data = try? JSONSerialization.data(withJSONObject: message), let string = String(data: data, encoding: .utf8) else { return }
-        task.send(.string(string)) { [weak self] error in
-            if let error { self?.fail(.failed("the socket did not send: \(error.localizedDescription)")) }
-        }
-    }
-
-    private func receive() {
-        task.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .success(.string(let string)): handle(Data(string.utf8))
-            case .success(.data(let data)): handle(data)
-            case .success: break
-            case .failure(let error): return fail(.failed("the connection ended: \(error.localizedDescription)"))
-            }
-            receive()
-        }
+        socket.send(string)
     }
 
     private func handle(_ data: Data) {
         guard let event = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any], let type = event["type"] as? String else { return }
         let message = ((event["error"] as? [String: Any])?["message"] as? String) ?? type
         switch type {
+        case "session.created":
+            let after = Date().timeIntervalSince(made)
+            lock.withLock { if created == nil { created = after } }
         case "session.updated":
             let continuation: CheckedContinuation<Void, Error>? = lock.withLock {
                 defer { opened = nil }
@@ -298,32 +290,7 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         waiting.opened?.resume(throwing: reason)
         waiting.final?.resume(throwing: reason)
         if waiting.opened == nil, waiting.final == nil, waiting.streaming, reason != .cancelled { waiting.failed(reason.localizedDescription) }
-        task.cancel(with: .goingAway, reason: nil)
-    }
-}
-
-/// A continuation answered once: by the first of a ping's pong and its time out.
-private final class Once: @unchecked Sendable {
-    private let lock = NSLock()
-    private var continuation: CheckedContinuation<Bool, Never>?
-    private var answer: Bool?
-
-    func set(_ continuation: CheckedContinuation<Bool, Never>) {
-        let given: Bool? = lock.withLock {
-            if answer == nil { self.continuation = continuation }
-            return answer
-        }
-        if let given { continuation.resume(returning: given) }
-    }
-
-    func resume(_ value: Bool) {
-        let continuation: CheckedContinuation<Bool, Never>? = lock.withLock {
-            guard answer == nil else { return nil }
-            answer = value
-            defer { self.continuation = nil }
-            return self.continuation
-        }
-        continuation?.resume(returning: value)
+        socket.close(normal: false)
     }
 }
 

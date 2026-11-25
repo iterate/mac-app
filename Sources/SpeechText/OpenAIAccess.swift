@@ -1,64 +1,55 @@
 import Foundation
 
-/// WHAT OPENS A SOCKET AT OPENAI (README, "Dictation"): a token of 60 s that the lent mind mints
-/// with its own key (`bridge/openai.mjs`: the key stays in the mind's vault), else this Mac's own
-/// key in the login Keychain (`OpenAIKey`), else nothing.
-///
-/// A credential is got for each socket, just before it opens (a standby's too), and used at once:
-/// none is kept. A token opens a socket within 60 s of its mint and does nothing after; the socket
-/// it opened stays open.
+/// WHAT OPENS A SOCKET AT OPENAI (README, "Dictation"): the lent mind, whose bridge opens the socket
+/// through the mind with the mind's own key (`RelaySocket`, `bridge/openai.mjs`: the key stays in
+/// the mind's vault), else this Mac's own key in the login Keychain (`OpenAIKey`, `DirectSocket`),
+/// else nothing. A socket of the mind that does not open falls back to this Mac's key, when there
+/// is one; with none, the caller's local model hears.
 public enum OpenAISource: Sendable, Equatable {
-    /// A token of this mind, with the mind's key.
-    case mindToken(String)
+    /// Through this mind, with its key.
+    case mind(String)
     /// The key of this Mac's Keychain.
     case ownKey
 
-    /// For the speech log: `mind token` or `own key`. Never the token or the key.
+    /// For the speech log: `mind` or `own key`. Never a key.
     public var words: String {
         switch self {
-        case .mindToken: "mind token"
+        case .mind: "mind"
         case .ownKey: "own key"
         }
     }
 }
 
-/// What the lent mind can do with OpenAI, as far as this session knows: found out with a mint at
-/// each new connection, and by each dictation's mint.
-public enum MindMint: Sendable, Equatable {
+/// Whether the lent mind opens OpenAI's sockets, as far as this session knows: found out with a
+/// socket opened and closed at each new connection of its bridge, and by each dictation's socket.
+public enum MindOpenAI: Sendable, Equatable {
     /// Not asked yet, or the last ask had no answer (no connection, no time).
     case unknown
-    /// It minted a token: the mind has `/secrets/openai`.
+    /// A socket opened: the mind has `/secrets/openai`, and OpenAI takes it.
     case yes
     /// It said no: no `/secrets/openai`, or OpenAI refused its key.
     case no
 }
 
-public struct OpenAICredential: Sendable {
-    /// The token or the key: only for the Authorization header.
-    public let value: String
-    public let source: OpenAISource
-
-    public init(value: String, source: OpenAISource) {
-        self.value = value
-        self.source = source
-    }
-}
-
 public struct OpenAIAccess: Sendable {
-    /// Where the next socket's credential comes from, as far as is known now, with no mint: a
-    /// standby of another source does not fit. Nil: none.
-    public var source: @Sendable () async -> OpenAISource?
-    /// One credential, for one socket that opens now.
-    public var credential: @Sendable () async throws -> OpenAICredential
+    public typealias Open = @Sendable (
+        _ setup: OpenAIStream.Setup, _ text: @escaping @Sendable (String) -> Void, _ failed: @escaping @Sendable (String) -> Void
+    ) async throws -> (stream: OpenAIStream, source: OpenAISource)
 
-    public init(source: @escaping @Sendable () async -> OpenAISource?, credential: @escaping @Sendable () async throws -> OpenAICredential) {
+    /// Where the next socket comes from, as far as is known now, with no socket opened: a standby
+    /// of another source does not fit. Nil: none.
+    public var source: @Sendable () async -> OpenAISource?
+    /// One stream on a socket that opens now, and where it came from.
+    public var open: Open
+
+    public init(source: @escaping @Sendable () async -> OpenAISource?, open: @escaping Open) {
         self.source = source
-        self.credential = credential
+        self.open = open
     }
 
     /// The order. A lent mind that did not say no comes first; then this Mac's key.
-    public static func order(mind: String?, mint: MindMint, hasKey: Bool) -> OpenAISource? {
-        if let mind, mint != .no { return .mindToken(mind) }
+    public static func order(mind: String?, state: MindOpenAI, hasKey: Bool) -> OpenAISource? {
+        if let mind, state != .no { return .mind(mind) }
         return hasKey ? .ownKey : nil
     }
 
@@ -66,38 +57,40 @@ public struct OpenAIAccess: Sendable {
     public static func ownKey(_ key: @escaping @Sendable () -> String?) -> OpenAIAccess {
         OpenAIAccess(
             source: { key() == nil ? nil : .ownKey },
-            credential: {
+            open: { setup, text, failed in
                 guard let value = key() else { throw OpenAIStream.Failure.noKey }
-                return OpenAICredential(value: value, source: .ownKey)
+                return (try await OpenAIStream.open(setup, key: value, text: text, failed: failed), .ownKey)
             })
     }
 
-    /// The mind first, then the key. `mind` is the lent mind and what it can do now; `mint` asks it
-    /// for a token (bounded by its caller); `key` reads this Mac's key. A mint that fails falls back
-    /// to the key when there is one (`log` says why); with none it throws, and the local model hears.
+    /// The mind first, then the key. `mind` is the lent mind and what it can do now; `socket`
+    /// makes a socket of its bridge (the stream opens it, within its `connectTimeout`); `key`
+    /// reads this Mac's key. A socket of the mind that does not open falls back to the key when
+    /// there is one (`log` says why); with none it throws, and the local model hears.
     public static func mindFirst(
-        mind: @escaping @Sendable () async -> (name: String, mint: MindMint)?,
-        mint: @escaping @Sendable () async throws -> String,
+        mind: @escaping @Sendable () async -> (name: String, state: MindOpenAI)?,
+        socket: @escaping @Sendable () async throws -> OpenAISocket,
         key: @escaping @Sendable () -> String?,
         log: @escaping @Sendable (String) -> Void = { _ in }
     ) -> OpenAIAccess {
         OpenAIAccess(
             source: {
                 // the key is read only when the mind does not come first: a read may ask the person
-                if let mind = await mind(), mind.mint != .no { return .mindToken(mind.name) }
+                if let mind = await mind(), mind.state != .no { return .mind(mind.name) }
                 return key() != nil ? .ownKey : nil
             },
-            credential: {
-                if let mind = await mind(), mind.mint != .no {
+            open: { setup, text, failed in
+                if let mind = await mind(), mind.state != .no {
                     do {
-                        return OpenAICredential(value: try await mint(), source: .mindToken(mind.name))
+                        let stream = try await OpenAIStream.open(setup, socket: try await socket(), text: text, failed: failed)
+                        return (stream, .mind(mind.name))
                     } catch {
                         guard key() != nil else { throw error }
-                        log("no token from \(mind.name) (\(error.localizedDescription)): your own key")
+                        log("no socket through \(mind.name) (\(error.localizedDescription)): your own key")
                     }
                 }
                 guard let value = key() else { throw OpenAIStream.Failure.noKey }
-                return OpenAICredential(value: value, source: .ownKey)
+                return (try await OpenAIStream.open(setup, key: value, text: text, failed: failed), .ownKey)
             })
     }
 }

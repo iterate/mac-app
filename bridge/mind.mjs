@@ -17,13 +17,13 @@
 //   capture  one capture into the mind, by its id                               (capture.mjs)
 //   input    one input into the mind, by its id                                 (input.mjs)
 //   words    the mind's word list into a file                                   (words.mjs)
-//   openai   a 60 s token for OpenAI with the mind's own key, by its id         (openai.mjs)
+//   openai   sockets of OpenAI's realtime transcription through the mind, by id  (openai.mjs)
 //
 // stdin and stdout are JSON lines, each with its `job`: `{ job, … }`. `events`, `live` and
 // `record` run from `{ job, start: true }` (record's also names `spool`) to `{ job, stop: true }`,
 // and record hears `{ job, slot: <t> }` for each slot the recorder seals;
-// a capture's lines name it (`capture`), an input's line names it (`input`), and a token's line
-// names it (`openaiToken`), and what each says names it again. A line with no `job` is the
+// a capture's lines name it (`capture`), an input's line names it (`input`), and an OpenAI
+// socket's lines name it (`socket`), and what each says names it again. A line with no `job` is the
 // process's own: `{ connected: true }`, `{ connected: false, failed }`, and `{ failed }` for the
 // app's log. When stdin closes (the app is
 // gone, or no job of this mind is left), the jobs end: the events that wait go, the last byes of
@@ -38,7 +38,7 @@ import { deviceEvents } from "./events.mjs";
 import { inputJob } from "./input.mjs";
 import { deviceLive } from "./live.mjs";
 import { lastingConnection } from "./mind-connection.mjs";
-import { openaiTokenJob } from "./openai.mjs";
+import { openaiSockets } from "./openai.mjs";
 import { recordUploads } from "./record.mjs";
 import { wordsJob } from "./words.mjs";
 
@@ -72,6 +72,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
   };
   const started = {};
   const captures = new Map();
+  const openai = openaiSockets({ link, say: (said) => say({ job: "openai", ...said }) });
 
   function takeOne(line) {
     const { job } = line;
@@ -114,7 +115,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
     if (job === "input")
       return track(inputJob({ line, name, link, say: (said) => say({ job, input: line.input, ...said }) }));
     if (job === "words") return track(wordsJob({ line, link, say: (said) => say({ job, ...said }) }));
-    if (job === "openai") return track(openaiTokenJob({ line, link, say: (said) => say({ job, ...said }) }));
+    if (job === "openai") return track(openai.take(line));
     throw new Error(`no job "${job}"`);
   }
 
@@ -125,13 +126,15 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
         takeOne(line);
       } catch (error) {
         // one bad line fails its own job, never the process
-        const of = Object.fromEntries(["job", "capture", "input", "openaiToken"].filter((key) => key in line).map((key) => [key, line[key]]));
+        const of = Object.fromEntries(["job", "capture", "input", "socket"].filter((key) => key in line).map((key) => [key, line[key]]));
         say({ ...of, failed: describe(error) });
       }
     },
     /** Every job ends; then the connection. */
     async end() {
       for (const job of Object.keys(started)) takeOne({ job, stop: true });
+      // the OpenAI sockets close first: one that still opens closes when it comes
+      openai.end();
       while (running.size) await Promise.all(running);
       link.stop();
     },

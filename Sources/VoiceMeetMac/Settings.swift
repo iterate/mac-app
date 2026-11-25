@@ -613,10 +613,10 @@ private struct DictationPage: View {
                 ForEach(SpeechModel.all) { model in
                     modelRow(model)
                 }
-                if let mind = speech.mintingMind {
+                if let mind = speech.openAIMind {
                     SettingsRow(
                         title: "OpenAI through \(mind): the mind's key",
-                        detail: "The key stays in the mind. For each socket the mind makes a token that opens it within 60 s."
+                        detail: "The key stays in the mind. Each socket opens through the mind, which puts the key in on the way."
                     ) {
                         DotLine(words: "The mind's key", color: Theme.ok, text: Theme.okText)
                             .accessibilityIdentifier("settings.openAIMind")
@@ -741,7 +741,7 @@ private struct DictationPage: View {
     }
 }
 
-/// The person's own OpenAI key, for a Mac whose lent mind makes no token: whether it is set, a
+/// The person's own OpenAI key, for a Mac whose lent mind opens no socket: whether it is set, a
 /// secure field to set it, and Remove. The key goes into the login Keychain (`OpenAIKey`); this
 /// view never shows it.
 private struct OpenAIKeyRow: View {
@@ -751,10 +751,10 @@ private struct OpenAIKeyRow: View {
     var body: some View {
         SettingsRow(
             title: "Your own key (optional)",
-            detail: speech.mintingMind != nil
+            detail: speech.openAIMind != nil
                 ? (speech.hasKey
-                    ? "Set, in your login Keychain. Used only when the mind makes no token."
-                    : "Not needed: the mind's key is used. A key of your own is used only when the mind makes no token.")
+                    ? "Set, in your login Keychain. Used only when no socket opens through the mind."
+                    : "Not needed: the mind's key is used. A key of your own is used only when no socket opens through the mind.")
                 : (speech.hasKey
                     ? "Set, in your login Keychain. Dictation and the input bar send their sound with it."
                     : "Not set. With a key, or a lent mind with one, GPT Live Transcribe is the default. It is kept in your login Keychain.")

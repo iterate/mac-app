@@ -40,7 +40,7 @@ public protocol SpeechStream: AnyObject, Sendable {
 /// model hears what was kept and what comes after (`fallback`), and the log says why. Its events
 /// are then this recognizer's.
 public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
-    /// The stream, and where it came from for the log (`standby, mind token`, `new, own key`).
+    /// The stream, and where it came from for the log (`standby, mind`, `new, own key`).
     public typealias Open = @Sendable (_ text: @escaping @Sendable (String) -> Void, _ failed: @escaping @Sendable (String) -> Void) async throws -> (stream: SpeechStream, from: String)
     public typealias Fallback = @Sendable (_ heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void) -> SpeechRecognizer
 
@@ -94,7 +94,9 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
                 }
                 if isLate { return stream.cancel() }
                 let milliseconds = Int((Date().timeIntervalSince(started) * 1000).rounded())
-                heard(.note("\(name) is ready \(milliseconds) ms after the start (\(from)), with \(words.entries.count) terms"))
+                // a new socket's own opening: from its start to OpenAI's `session.created`
+                let created = (stream as? OpenAIStream)?.createdAfter.map { "; session.created \(Int(($0 * 1000).rounded())) ms after the socket's start" } ?? ""
+                heard(.note("\(name) is ready \(milliseconds) ms after the start (\(from)), with \(words.entries.count) terms\(from.hasPrefix("new") ? created : "")"))
                 heard(.ready)
             } catch {
                 _ = fallBack(error.localizedDescription)
@@ -191,12 +193,12 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
 
 /// The recognizer of an online model for `SpeechSession`, or nil for a local one.
 public enum OnlineSpeech {
-    /// `access` gives the credential of each socket (off the main thread, at each start): a token of
-    /// the lent mind, else this Mac's key (`OpenAIAccess`); `local` is the model that hears when
+    /// `access` opens each socket (off the main thread, at each start): through the lent mind, else
+    /// with this Mac's key (`OpenAIAccess`); `local` is the model that hears when
     /// OpenAI fails. `setup` and `fallback` stand in for OpenAI's address and time outs and for the
     /// local recognizer, for a test. `standby` is the socket that waits for the next listening
     /// (`OpenAIStandby`): taken at the start when it fits, opened again at the end. The log says
-    /// where each socket came from: `(standby, mind token)`, `(new, own key)`.
+    /// where each socket came from: `(standby, mind)`, `(new, own key)`.
     public static func recognizer(
         _ model: SpeechModel, words: WordList, access: OpenAIAccess, local: SpeechModel = .default,
         setup: OpenAIStream.Setup? = nil, fallback: StreamRecognizer.Fallback? = nil, standby: OpenAIStandby? = nil,
@@ -213,9 +215,8 @@ public enum OnlineSpeech {
                     if stream.attach(text: text, failed: failed) { return (stream, "standby, \(from.words)") }
                     stream.cancel()
                 }
-                // a token is minted for this socket and used at once
-                let credential = try await access.credential()
-                return (try await OpenAIStream.open(setup, key: credential.value, text: text, failed: failed), "new, \(credential.source.words)")
+                let (stream, source) = try await access.open(setup, text, failed)
+                return (stream, "new, \(source.words)")
             },
             fallback: fallback ?? { heard in SpeechRecognizer(model: local, words: words, heard: heard) },
             ended: { [setup] in standby?.prepare(setup, access: access) },
