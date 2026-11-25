@@ -308,7 +308,10 @@ struct RecordSection: View {
                 }
                 .help("On a new app or window, a click, a pause after typing, the end of a scroll; at most every 2 s. Never of a password manager.")
             }
-            if let line { Text(line).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2).textSelection(.enabled).padding(.horizontal, 2) }
+            if let line {
+                Text(line).font(.system(size: 11)).lineSpacing(1.5).foregroundStyle(Theme.t3).lineLimit(2).textSelection(.enabled)
+                    .padding(.horizontal, 2)
+            }
             ForEach(held) { item in
                 MissingPermission(words: "\(item.title) is off: macOS has not allowed \(item.permission.title)") { allow(item.permission) }
             }
@@ -324,16 +327,16 @@ struct RecordSection: View {
         if record.isRecording {
             HStack(spacing: 5) {
                 if record.isPaused {
-                    Circle().strokeBorder(Color.red, lineWidth: 1.5).frame(width: 8, height: 8)
+                    Circle().strokeBorder(Theme.live, lineWidth: 1.5).frame(width: 7, height: 7)
                 } else {
-                    Circle().fill(Color.red).frame(width: 8, height: 8)
+                    Circle().fill(Theme.live).frame(width: 7, height: 7)
                 }
                 Text(record.isPaused ? "Paused" : "Recording")
             }
-            .font(.system(size: 12))
-            .foregroundStyle(Palette.redText)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(Theme.liveText)
         } else {
-            Text("Off").font(.system(size: 12)).foregroundStyle(.secondary)
+            Text("Off").font(.system(size: 12)).foregroundStyle(Theme.t3)
         }
     }
 
@@ -350,7 +353,7 @@ struct RecordSection: View {
             set(!isOn)
         } label: {
             VStack(spacing: 3) {
-                Image(systemName: symbol).font(.system(size: 13))
+                Image(systemName: symbol).font(.system(size: 13, weight: .regular))
                 Text(title).font(.system(size: 11)).lineLimit(1).minimumScaleFactor(0.85)
             }
         }

@@ -910,12 +910,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         pill.startedAt = startedAt
         pill.progress = progress
         let screen = self.screen ?? NSScreen.main
-        // room for the dot, the clock and the two buttons while it records
-        let controls: CGFloat = startedAt == nil ? 60 : 250
-        let face: CGFloat = pill.mind == nil ? 0 : 26
-        let bar: CGFloat = progress == nil ? 0 : 110
-        let width = min(controls + face + bar + CGFloat(text.count * 8), 760)
-        let frame = NSRect(x: (screen?.frame.midX ?? 400) - width / 2, y: (screen?.visibleFrame.maxY ?? 800) - 48, width: width, height: 36)
+        let width = CapturePillView.width(of: pill)
+        let frame = NSRect(
+            x: (screen?.frame.midX ?? 400) - width / 2, y: (screen?.visibleFrame.maxY ?? 800) - 48, width: width, height: CapturePillView.height)
         let panel = pillPanel ?? self.panel(frame, level: NSWindow.Level.statusBar.rawValue + 1)
         if pillPanel == nil {
             // in no picture and no movie of the screen: the ink is, the pill is not
@@ -937,32 +934,56 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     }
 }
 
-private struct CapturePillView: View {
+struct CapturePillView: View {
     @ObservedObject var pill: CapturePill
     let send: () -> Void
     let discard: () -> Void
+    /// A drawing's clock: the time since the start at that moment, with no timer.
+    var now: Date?
+
+    static let height: CGFloat = 36
+
+    /// Room for the dot, the clock and the two buttons while it records, the face, the bar, the words.
+    static func width(of pill: CapturePill) -> CGFloat {
+        let controls: CGFloat = pill.startedAt == nil ? 60 : 250
+        let face: CGFloat = pill.mind == nil ? 0 : 26
+        let bar: CGFloat = pill.progress == nil ? 0 : 110
+        return min(controls + face + bar + CGFloat(pill.text.count * 8), 760)
+    }
 
     var body: some View {
         HStack(spacing: 10) {
             if let mind = pill.mind { MindAvatar(mind: mind, size: 22) }
             if let startedAt = pill.startedAt {
-                Circle().fill(.red).frame(width: 9, height: 9)
-                Text(startedAt, style: .timer).monospacedDigit()
+                Circle().fill(Theme.live).frame(width: 9, height: 9)
+                Group {
+                    if let now {
+                        let seconds = max(0, Int(now.timeIntervalSince(startedAt)))
+                        Text(String(format: "%d:%02d", seconds / 60, seconds % 60))
+                    } else {
+                        Text(startedAt, style: .timer)
+                    }
+                }
+                .font(.system(size: 13, weight: .semibold))
+                .monospacedDigit()
             }
             Text(pill.text).lineLimit(1).truncationMode(.middle)
-            if let progress = pill.progress { ProgressView(value: min(max(progress, 0), 1)).frame(width: 90) }
+            if let progress = pill.progress {
+                ProgressView(value: min(max(progress, 0), 1)).progressViewStyle(.linear).controlSize(.small).tint(Theme.t2).frame(width: 90)
+            }
             if pill.startedAt != nil {
-                Button("Send", action: send).accessibilityIdentifier("capture.send")
-                Button("Discard", action: discard).accessibilityIdentifier("capture.discard")
+                Spacer(minLength: 0)
+                Button("Discard", action: discard).buttonStyle(FillButtonStyle()).accessibilityIdentifier("capture.discard")
+                Button("Send", action: send).buttonStyle(FillButtonStyle(prominent: true)).accessibilityIdentifier("capture.send")
             }
         }
-        .font(.system(size: 13, weight: .medium))
-        .controlSize(.small)
+        .font(.system(size: 13))
+        .foregroundStyle(Theme.t1)
         .padding(.leading, pill.mind == nil ? 14 : 7)
-        .padding(.trailing, 14)
+        .padding(.trailing, pill.startedAt == nil ? 14 : 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(.separator))
+        .background(Theme.surface, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.edge, lineWidth: 1))
     }
 }
 
@@ -1012,5 +1033,28 @@ private final class InkView: NSView {
             }
             path.stroke()
         }
+    }
+}
+
+extension CapturePillView {
+    /// The pill while a capture records, 15 s after its start, with the last words heard, light and
+    /// dark: `capture-pill-<tone>.png` in `folder` (`--render-capture <folder>`).
+    @MainActor
+    static func render(to folder: URL) -> Bool {
+        _ = NSApplication.shared
+        Rendering.fixFaces()
+        let pill = CapturePill()
+        pill.text = "…and this is slow"
+        pill.mind = Rendering.minds[0].mind
+        pill.startedAt = Rendering.now.addingTimeInterval(-15)
+        var drawn = true
+        for (dark, tone) in [(false, "light"), (true, "dark")] {
+            // around it, the see-through panel's margin
+            let view = CapturePillView(pill: pill, send: {}, discard: {}, now: Rendering.now)
+                .frame(width: width(of: pill), height: height)
+                .padding(12)
+            drawn = Rendering.png(of: view, dark: dark, to: folder.appendingPathComponent("capture-pill-\(tone).png")) && drawn
+        }
+        return drawn
     }
 }

@@ -7,12 +7,13 @@ import VoiceMeetCore
 
 /// A menu-bar-only app: the iterate mark, and a panel under it (`Panel`). No window, no Dock icon.
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var model = AppModel()
     private let log = AppLog("app")
     private let panelState = PanelState()
     private let lend = Lend()
-    private let popover = NSPopover()
+    /// The panel under the mark (`MenuBarPanel`).
+    private let panelWindow = MenuBarPanel()
     private var statusItem: NSStatusItem?
     private var recordDot: RecordDotView?
     /// What the mark shows now: it is written again only when it changes.
@@ -81,25 +82,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         let panel = Panel(
             state: panelState,
             model: model,
-            speech: speechChoice,
             changed: { [weak self] in self?.choiceChanged() },
             allow: { [weak self] permission in self?.guide(permission) },
             copyPrompt: { [weak self] in self?.copyPrompt() },
             pressBanner: { [weak self] index in
-                self?.popover.performClose(nil)
+                self?.panelWindow.performClose(nil)
                 if let index { self?.model.banners.press(index) } else { self?.model.banners.dismiss() }
             },
             actions: PanelActions(
                 capture: { [weak self] in
-                    self?.popover.performClose(nil)
+                    self?.panelWindow.performClose(nil)
                     if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() }
                 },
                 openInput: { [weak self] in
-                    self?.popover.performClose(nil)
+                    self?.panelWindow.performClose(nil)
                     self?.input.toggle()
                 },
                 dictate: { [weak self] in
-                    self?.popover.performClose(nil)
+                    self?.panelWindow.performClose(nil)
                     // a tap of ⌥⇧D: a dictation that stays on until the next press
                     self?.dictation.shortcutPressed()
                     self?.dictation.shortcutReleased()
@@ -119,17 +119,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         )
         if #unavailable(macOS 15.0) { panelState.canCapture = false }
         pageWatch = panelState.$isActivityOpen.removeDuplicates().dropFirst().sink { [weak self] isOpen in
-            guard let self, self.popover.isShown else { return }
+            guard let self, self.panelWindow.isShown else { return }
             if isOpen { self.stopPreviews() } else { self.startPreviews() }
         }
         let host = NSHostingController(rootView: panel)
         // The panel is as tall as its rows need.
         host.sizingOptions = [.preferredContentSize]
-        popover.contentViewController = host
+        panelWindow.contentViewController = host
         // A test's copy is not the app in front, and a click elsewhere would close it at once: its
         // panel closes by its mark alone.
-        popover.behavior = environment.hasOwnHome ? .applicationDefined : .transient
-        popover.delegate = self
+        panelWindow.closesByItself = !environment.hasOwnHome
+        panelWindow.onShow = { [weak self] in self?.panelDidShow() }
+        panelWindow.onClose = { [weak self] in self?.panelDidClose() }
 
         model.onChange = { [weak self] in self?.stateDidChange() }
         // the address as the CLI says it (`iterate.example.com`), not the config's short name
@@ -394,7 +395,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             "minds": lend.config?.minds.map(\.mind) ?? [],
             "session": lend.session.map { ["generation": $0.generation, "mind": $0.mind, "name": $0.name, "authorized": lend.isAuthorized] } ?? NSNull(),
             "panel": [
-                "visible": popover.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen,
+                "visible": panelWindow.isShown, "switcherOpen": panelState.isSwitcherOpen, "activityOpen": panelState.isActivityOpen,
                 "page": panelState.isActivityOpen ? "activity" : "main",
             ],
             "input": input.controlState(),
@@ -454,7 +455,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     /// "Add a Mind…": its address (the iterate CLI's profiles are offered) and the name this Mac
     /// is available under. The CLI's `add` makes the key and opens the link where a member allows it.
     private func addMind() {
-        popover.performClose(nil)
+        panelWindow.performClose(nil)
         lend.profiles { [weak self] profiles in
             guard let self else { return }
             let known = Set(self.lend.config?.minds.map(\.mind) ?? [])
@@ -476,7 +477,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     private func removeMind(_ mind: String) {
-        popover.performClose(nil)
+        panelWindow.performClose(nil)
         FormWindow.show(
             title: "Remove \(mind)?",
             RemoveMindForm(
@@ -519,7 +520,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         showLend()
         configChanged()
         // the things, their choices and the permissions are read for an open panel only
-        if popover.isShown { refreshPanel() }
+        if panelWindow.isShown { refreshPanel() }
         if settings.isVisible { refreshSettings() }
     }
 
@@ -551,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: - The Activity window
 
     private func openActivityWindow() {
-        popover.performClose(nil)
+        panelWindow.performClose(nil)
         refreshPanel()
         activityWindow.show()
     }
@@ -577,7 +578,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     // MARK: - Settings
 
     private func openSettings(_ page: SettingsState.Page) {
-        popover.performClose(nil)
+        panelWindow.performClose(nil)
         settingsState.page = page
         refreshSettings()
         settings.show()
@@ -746,26 +747,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     @objc private func togglePanel() {
         guard let button = statusItem?.button else { return }
-        if popover.isShown {
-            popover.performClose(nil)
+        if panelWindow.isShown {
+            panelWindow.performClose(nil)
         } else {
             // a lend that waits for its next start starts now: the owner looks at it
             lend.panelOpened()
             stateDidChange()
             refreshPanel()
             NSApp.activate(ignoringOtherApps: true)
-            popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            panelWindow.show(under: button)
         }
     }
 
     /// While the panel is open, a thing that is not off shows what a mind would get: a camera runs
     /// for its picture, and a display's picture is a new small one every second.
-    func popoverDidShow(_ notification: Notification) {
+    private func panelDidShow() {
         log.info("the panel opens")
         if !panelState.isActivityOpen { startPreviews() }
     }
 
-    func popoverDidClose(_ notification: Notification) {
+    private func panelDidClose() {
         stopPreviews()
         panelState.isSwitcherOpen = false
         panelState.isActivityOpen = false
@@ -786,7 +787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
     /// A new picture each second, only while a display's picture shows.
     private func syncDisplayTimer() {
-        let wanted = previewsShow && popover.isShown && !shownDisplays.isEmpty
+        let wanted = previewsShow && panelWindow.isShown && !shownDisplays.isEmpty
         guard wanted != (displayPictureTimer != nil) else { return }
         displayPictureTimer?.invalidate()
         displayPictureTimer = nil
@@ -825,7 +826,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         log.info("sharing: " + Shareable.all.map(Self.line).joined(separator: "; "))
         stateDidChange()
         model.liveChoicesChanged()
-        if popover.isShown { syncPreviews() }
+        if panelWindow.isShown { syncPreviews() }
         // A thing was turned on whose permission macOS has not given: the guide starts.
         if let permission = Shareable.all.first(where: { $0.sharing != .off && !$0.isPermitted })?.power.permission,
             grantWatch == nil
@@ -856,7 +857,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         syncDisplayTimer()
         for thing in shown {
             Task { @MainActor in
-                guard let picture = try? await Screen.image(of: Screen.id(of: thing), maxWidth: 60), popover.isShown, !panelState.isActivityOpen else { return }
+                guard let picture = try? await Screen.image(of: Screen.id(of: thing), maxWidth: 60), panelWindow.isShown, !panelState.isActivityOpen else { return }
                 panelState.displayPictures[thing.id] = picture
             }
         }
@@ -909,7 +910,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                     waiting.remove(permission)
                     self.log.info("macOS gave \(permission.title)")
                     self.stateDidChange()
-                    if self.popover.isShown { self.syncPreviews() }
+                    if self.panelWindow.isShown { self.syncPreviews() }
                 }
                 if watch.probes(at: Date(), waitsForScreenRecording: waiting.contains(.screenRecording)) {
                     Task { @MainActor [weak self] in

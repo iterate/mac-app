@@ -110,8 +110,8 @@ private final class ActivityPillWindow {
         shown.mind = mind
         shown.others = max(running.count - 1, 0)
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main
-        let width: CGFloat = 340
-        let height: CGFloat = lead.detail == nil ? 40 : 56
+        let width = ActivityPillView.width
+        let height = ActivityPillView.height(hasDetail: lead.detail != nil)
         let frame = NSRect(
             x: (screen?.visibleFrame.maxX ?? 800) - width - 12, y: (screen?.visibleFrame.maxY ?? 600) - height - 10, width: width, height: height)
         let panel = self.panel ?? makePanel(frame)
@@ -174,33 +174,39 @@ private struct ActivityPillView: View {
     @ObservedObject var shown: ShownActivity
     var dismiss: () -> Void = {}
 
+    static let width: CGFloat = 380
+    static let shape = RoundedRectangle(cornerRadius: Theme.Radius.panel, style: .continuous)
+
+    /// The pill's height: two lines with a detail, one without.
+    static func height(hasDetail: Bool) -> CGFloat { hasDetail ? 52 : 48 }
+
     var body: some View {
-        HStack(spacing: 9) {
+        HStack(spacing: 10) {
             if let entry = shown.entry {
-                if let mind = shown.mind { MindAvatar(mind: mind, size: 24) }
+                if let mind = shown.mind { MindAvatar(mind: mind, size: 26) }
                 VStack(alignment: .leading, spacing: 1) {
                     Text(ActivityLine.title(of: entry) + (shown.others > 0 ? " · \(shown.others) more" : ""))
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .semibold))
                         .lineLimit(1)
                     if let detail = entry.detail {
-                        Text(detail).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                        Text(detail).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.t3).lineLimit(1).truncationMode(.tail)
                     }
                 }
-                Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if entry.isRunning { ProgressView().controlSize(.small) }
                 Button(action: dismiss) {
-                    Image(systemName: "xmark").font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                    Image(systemName: "xmark").font(.system(size: 12, weight: .regular)).foregroundStyle(Theme.t2)
                         .frame(width: 18, height: 18).contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Hide until the next act. The panel's Activity keeps the list.")
             }
         }
-        .padding(.leading, 8)
-        .padding(.trailing, 12)
+        .foregroundStyle(Theme.t1)
+        .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.separator))
+        .background(Theme.surface, in: Self.shape)
+        .overlay(Self.shape.strokeBorder(Theme.edge, lineWidth: 1))
     }
 }
 
@@ -240,22 +246,16 @@ struct ActivitySummary: View {
     @Binding var isOpen: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 7) {
             SectionTitle(title: "Activity") {
                 HStack(spacing: 8) {
                     if !log.rows.isEmpty {
-                        Text("\(log.rows.count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                        Text("\(log.rows.count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3)
                     }
                     Button {
                         isOpen = true
                     } label: {
-                        HStack(spacing: 3) {
-                            Text("All")
-                            Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
-                        }
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .contentShape(Rectangle())
+                        TitleLink(title: "All").contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .help("What a mind did with this Mac: the acts on this Mac's context in the mind")
@@ -263,11 +263,13 @@ struct ActivitySummary: View {
                     .accessibilityIdentifier("activity.all")
                 }
             }
-            if log.rows.isEmpty {
-                Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 2)
+            VStack(alignment: .leading, spacing: 0) {
+                if log.rows.isEmpty {
+                    Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
+                        .font(.system(size: 11)).foregroundStyle(Theme.t3).padding(.horizontal, 2)
+                }
+                ForEach(log.rows.prefix(2)) { ActivityRow(entry: $0) }
             }
-            ForEach(log.rows.prefix(2)) { ActivityRow(entry: $0) }
         }
     }
 }
@@ -282,54 +284,59 @@ struct ActivityPage: View {
     var openWindow: () -> Void = {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                isOpen = false
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
-                    Text("Activity").font(.system(size: 15, weight: .semibold))
-                    if !log.rows.isEmpty {
-                        Text("\(log.rows.count)").font(.system(size: 12).monospacedDigit()).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Button {
+                    isOpen = false
+                } label: {
+                    HStack(spacing: 2) {
+                        Image(systemName: "chevron.left").font(.system(size: 11, weight: .semibold)).frame(width: 14)
+                        Text("Activity").font(.system(size: 13, weight: .semibold))
                     }
-                    Spacer(minLength: 0)
-                }
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("Back to the panel")
-            .accessibilityLabel("Back")
-            .accessibilityIdentifier("activity.back")
-            .overlay(alignment: .trailing) {
-                Button(action: openWindow) {
-                    HStack(spacing: 3) {
-                        Text("Open in a Window")
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
-                    }
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Theme.t1)
                     .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Back to the panel")
+                .accessibilityLabel("Back")
+                .accessibilityIdentifier("activity.back")
+                if !log.rows.isEmpty {
+                    Text("\(log.rows.count)").font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3)
+                }
+                Spacer(minLength: 0)
+                Button(action: openWindow) {
+                    TitleLink(title: "Open in a Window").contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .help("Every event of this context, in a window of its own")
                 .accessibilityLabel("Open in a Window")
                 .accessibilityIdentifier("activity.window")
             }
-            Text(log.contextLine).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            .padding(.horizontal, 12)
+            .padding(.top, 10)
+            Text(log.contextLine).font(.system(size: 11, design: .monospaced)).foregroundStyle(Theme.t2).lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("activity.context")
+                .padding(.horizontal, 14)
+                .padding(.top, 8)
             Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.system(size: 12))
+                .tint(Theme.accent)
                 .accessibilityIdentifier("activity.showsPill")
-            VStack(alignment: .leading, spacing: 2) {
+                .padding(.horizontal, 14)
+                .padding(.top, 10)
+                .padding(.bottom, 4)
+            VStack(alignment: .leading, spacing: 0) {
                 if log.rows.isEmpty {
                     Text(log.path == nil ? "No mind has used this Mac since the app started." : "No act on this context yet.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 11)).foregroundStyle(Theme.t3)
                 }
-                ForEach(log.rows.prefix(shown)) { ActivityRow(entry: $0) }
+                ForEach(log.rows.prefix(shown)) { ActivityRow(entry: $0, inset: 0, vertical: 4) }
+                if log.rows.count > shown {
+                    Text("and \(log.rows.count - shown) before these").font(.system(size: 11)).foregroundStyle(Theme.t3).padding(.top, 6)
+                }
             }
-            if log.rows.count > shown {
-                Text("and \(log.rows.count - shown) before these").font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 2)
-            }
+            .padding(.horizontal, 14)
+            .padding(.top, 4)
         }
     }
 
@@ -339,32 +346,34 @@ struct ActivityPage: View {
 /// detail in monospace, the orange cloud while it is not yet in the mind, and how long it took.
 struct ActivityRow: View {
     let entry: ActivityLog.Row
+    var inset: CGFloat = 2
+    var vertical: CGFloat = 3
 
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
-            Text(Lend.clock(entry.startedAt)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).frame(width: 52, alignment: .leading)
+            Text(Lend.clock(entry.startedAt)).font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3).frame(width: 50, alignment: .leading)
             Image(systemName: ActivityLine.symbol(entry.thing))
-                .font(.system(size: 12))
-                .frame(width: 18)
-                .foregroundStyle(entry.isRunning || entry.failure != nil ? Palette.redText : Color.secondary)
+                .font(.system(size: 12, weight: .regular))
+                .frame(width: 14)
+                .foregroundStyle(entry.isRunning || entry.failure != nil ? Theme.liveText : Theme.t2)
             VStack(alignment: .leading, spacing: 1) {
-                Text(ActivityLine.title(of: entry)).font(.system(size: 12)).lineLimit(2).fixedSize(horizontal: false, vertical: true)
+                Text(ActivityLine.title(of: entry)).font(.system(size: 12)).lineSpacing(1.3).lineLimit(2).fixedSize(horizontal: false, vertical: true)
                 if let detail = entry.detail {
-                    Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                    Text(detail).font(.system(size: 10.5, design: .monospaced)).foregroundStyle(Theme.t3).lineLimit(1).truncationMode(.tail)
                         .textSelection(.enabled)
                 }
             }
-            Spacer(minLength: 0)
+            .frame(maxWidth: .infinity, alignment: .leading)
             if !entry.isInMind {
-                Image(systemName: "icloud.slash").font(.system(size: 11)).foregroundStyle(Palette.waitText)
+                Image(systemName: "icloud.slash").font(.system(size: 12, weight: .regular)).foregroundStyle(Theme.warnText)
                     .help("Not yet in the mind: it goes when the connection is back")
             }
             if let took = ActivityLine.took(entry) {
-                Text(took).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary)
+                Text(took).font(.system(size: 11).monospacedDigit()).foregroundStyle(Theme.t3)
             }
         }
-        .padding(.horizontal, 2)
-        .padding(.vertical, 3)
+        .padding(.horizontal, inset)
+        .padding(.vertical, vertical)
         .frame(minHeight: 30)
     }
 }
@@ -419,9 +428,10 @@ extension ActivityLog {
         shown.mind = log.mind
         var drawn = true
         for (dark, tone) in [(false, "light"), (true, "dark")] {
-            let pill = ActivityPillView(shown: shown).frame(width: 340, height: 56).padding(12).background(Color(nsColor: .windowBackgroundColor))
+            let pill = ActivityPillView(shown: shown).frame(width: ActivityPillView.width, height: ActivityPillView.height(hasDetail: true)).padding(12)
             drawn = Rendering.png(of: pill, dark: dark, to: folder.appendingPathComponent("activity-pill-\(tone).png")) && drawn
-            let list = ActivityPage(log: log, isOpen: .constant(true)).frame(width: 376).padding(12).background(Color(nsColor: .windowBackgroundColor))
+            let list = ActivityPage(log: log, isOpen: .constant(true)).foregroundStyle(Theme.t1).frame(width: 398).padding(.bottom, 12)
+                .background(Theme.surface)
             drawn = Rendering.png(of: list, dark: dark, to: folder.appendingPathComponent("activity-list-\(tone).png")) && drawn
         }
         return drawn

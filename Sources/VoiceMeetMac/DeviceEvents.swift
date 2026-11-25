@@ -311,49 +311,51 @@ struct DeviceEventsSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             SectionTitle(title: "Events to the mind") {
-                Text("Presence and the app in front: always")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .help(help)
+                TitleNote("Presence and the app in front: always").help(help)
             }
-            Card(padding: 10) {
-                HStack(alignment: .top, spacing: 8) {
+            Card {
+                HStack(alignment: .center, spacing: 8) {
                     Image(systemName: "keyboard")
-                        .font(.system(size: 14))
-                        .frame(width: 30, height: 18)
-                        .foregroundStyle(events.sharesInput ? Palette.redText : Color.secondary)
-                    VStack(alignment: .leading, spacing: 4) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text("Keyboard and mouse").font(.system(size: 13))
-                            Text(events.sharesInput ? "Every key goes to the mind, a password too" : "Every key you type, click, move and scroll")
-                                .font(.system(size: 11))
-                                .foregroundStyle(events.sharesInput ? Palette.redText : Color.secondary)
-                                .lineLimit(1)
-                        }
-                        if events.sharesInput {
-                            Toggle("Keep these events in the mind's log", isOn: $events.keepsInput)
-                                .toggleStyle(.checkbox)
-                                .font(.system(size: 12))
-                                .accessibilityIdentifier("device.keep")
-                                .help("Off: an event reaches whoever listens at that moment, and is in no log")
-                            if accessibilityMissing {
-                                MissingPermission(words: "macOS has not allowed Accessibility yet: no key arrives") { allow(.accessibility) }
-                                    .padding(.top, 2)
-                            }
-                        }
-                        if let failure = events.failure {
-                            Text("Not published: \(failure)")
-                                .font(.system(size: 11))
-                                .foregroundStyle(Palette.waitText)
-                                .lineLimit(2)
-                                .textSelection(.enabled)
-                        }
+                        .font(.system(size: 13, weight: .regular))
+                        .frame(width: Theme.Metric.leadColumn)
+                        .foregroundStyle(events.sharesInput ? Theme.liveText : Theme.t2)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Keyboard and mouse").font(.system(size: Theme.Size.row))
+                        Text(events.sharesInput ? "Every key goes to the mind, a password too" : "Every key you type, click, move and scroll")
+                            .font(.system(size: 11))
+                            .foregroundStyle(events.sharesInput ? Theme.liveText : Theme.t3)
+                            .lineLimit(1)
                     }
                     Spacer(minLength: 6)
-                    Toggle("", isOn: $events.sharesInput).toggleStyle(.switch).controlSize(.small).labelsHidden()
+                    PanelSwitch(title: "Keyboard and mouse", isOn: $events.sharesInput)
                         .accessibilityIdentifier("device.input")
                 }
+                .padding(.leading, 6)
+                .padding(.trailing, 8)
+                .frame(minHeight: 42)
+                VStack(alignment: .leading, spacing: 8) {
+                    if events.sharesInput {
+                        Toggle("Keep these events in the mind's log", isOn: $events.keepsInput)
+                            .toggleStyle(.checkbox)
+                            .font(.system(size: 12))
+                            .tint(Theme.accent)
+                            .accessibilityIdentifier("device.keep")
+                            .help("Off: an event reaches whoever listens at that moment, and is in no log")
+                        if accessibilityMissing {
+                            MissingPermission(words: "macOS has not allowed Accessibility yet: no key arrives") { allow(.accessibility) }
+                        }
+                    }
+                    if let failure = events.failure {
+                        Text("Not published: \(failure)")
+                            .font(.system(size: 11))
+                            .foregroundStyle(Theme.warnText)
+                            .lineLimit(2)
+                            .textSelection(.enabled)
+                    }
+                }
+                .padding(.leading, 44)
+                .padding(.trailing, 8)
+                .padding(.bottom, events.sharesInput || events.failure != nil ? 8 : 0)
             }
         }
     }
