@@ -126,6 +126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         model.onChange = { [weak self] in self?.stateDidChange() }
         // the address as the CLI says it (`iterate.example.com`), not the config's short name
         model.banners.activeMind = { [weak self] in self?.lend.state.mindAddress }
+        model.lendState = { [weak self] in self.map { ["phase": $0.lend.state.phase.name, "line": $0.lend.state.statusLine(now: Date(), clock: Lend.clock)] } ?? [:] }
         model.record.onChange = { [weak self] in self?.stateDidChange() }
         model.banners.onChange = { [weak self] in self?.stateDidChange() }
         model.start()

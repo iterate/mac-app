@@ -228,7 +228,7 @@ enum ActivityLine {
         if thing.hasPrefix("record.") {
             return DeviceRecord.switches.first { "record.\($0.source.rawValue)" == thing }?.symbol ?? "text.viewfinder"
         }
-        let things: [Shareable] = [.microphone, .speaker, .accessibility, .commands, .live, .banners]
+        let things: [Shareable] = [.microphone, .speaker, .accessibility, .commands, .live, .banners, .pages]
         return things.first { $0.id == thing }?.symbol ?? "circle"
     }
 }

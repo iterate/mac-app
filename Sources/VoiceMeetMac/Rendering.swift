@@ -38,7 +38,7 @@ enum Rendering {
         let things: [Shareable] = [
             Shareable(id: "screen.1", power: .screen, title: "Built-in Retina Display", does: "see the display \"Built-in Retina Display\"", symbol: "display"),
             Shareable(id: "camera.fixture", power: .camera, title: "FaceTime HD Camera", does: "see the camera \"FaceTime HD Camera\"", symbol: "video"),
-            .microphone, .speaker, .banners, .accessibility, .commands,
+            .microphone, .speaker, .banners, .accessibility, .commands, .pages,
         ]
         for thing in things { thing.sharing = sharing[thing.id] ?? .off }
         return things

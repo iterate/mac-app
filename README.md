@@ -225,6 +225,7 @@ await mac.call.ring({ agent: "/agents/lunch", from: "Lunch planner", reason: "Fr
 // { accepted: true }, or { accepted: false, why: "declined" | "no answer" | "replaced" | "off", words }
 await mac.record.state(); // { sources: { screens, cameras, mics, speakers }, windowText, recording, paused, line, tracks, … }
 await mac.record.set({ screens: true, mics: false }); // the new state; "on" is a use, as a snapshot is
+await mac.http({ path: "/state.json" }); // { status, headers, body }: this Mac's own pages (below)
 ```
 
 ### Presence
@@ -459,6 +460,35 @@ its connection as you, subscribes to `device/live-signal`, appends the Mac's sig
 asks the facet `record` for the ICE servers (STUN alone when it has none). It subscribes again on
 each new connection, and once a minute it checks that its subscription still hears (an ephemeral
 `device/live-ping` that only it hears); watches that run go on through a reconnect, peer to peer.
+
+## This Mac's pages: a small site, served through the lend
+
+The app ships a site of its own: the files of `pages/`, served by `mac.http({ method, path, query,
+headers })` (`bridge/pages.mjs`), which answers `{ status, headers, body }`. A mind's site passes it
+on to a member's browser; `pages/MIND-ROUTE.md` has that code (not deployed in any mind yet).
+
+| Path | What it answers |
+| --- | --- |
+| `/` | One HTML page with no build step: this Mac's name, its lend, the record, the newest acts, and a live view on a press of **Watch the Display**. The system's font, light and dark. |
+| `/state.json` | The same data as JSON: what the app already knows, nothing it asks for. |
+| `/live.mjpeg` | The main display (or `?display=N`) as `multipart/x-mixed-replace` JPEG frames. |
+
+- **Pages** is a thing in "A mind can use", beside Commands: Off (the default), Ask or Shared. Every
+  request is a use of it. Off is a `403` with your words; a mind's site passes them on.
+- **The live view is also a use of the display**, as a snapshot is: password managers are left out,
+  and one question covers the whole view when Pages or the display is on Ask. It is an act in
+  Activity ("Showing the display … live in a page") from its start to its end, and it ends at once
+  when you turn Pages or the display Off.
+- **Bounded.** At most 4 frames a second, 1280 px wide, made off the main thread; at most 2 views
+  at once; each ends after 10 minutes. A frame is made only when the reader took the one before:
+  for a slow reader the frames between drop, and the bridge holds at most one. Over capnweb the
+  connection carries at most its flow window (256 KB at the start: 3 frames of 150 KB in a test,
+  then no more until the mind reads). A cancel of the body (the browser went away) ends the view in
+  the app at once; a view whose bridge asks no frame for 15 s ends too.
+
+How it is built: `bridge/pages.mjs` serves the files and the stream; it asks the app on its socket
+(`pages.state`, `pages.live.start`, `pages.live.frame`, `pages.live.stop`), and the app decides
+(`Sources/VoiceMeetMac/PagePowers.swift`).
 
 ## Capture: show an agent what you mean
 
@@ -924,6 +954,11 @@ then silence; no audio device opens, and the copy loads the speech model in the 
 installed app does. A Swift test passes the file to `FixturePlayer`, or its own source and engine
 to `SpeechSession`.
 
+**The frame fixture.** With `ITERATE_MAC_FRAME_FIXTURE=<image file|synthetic>`, the live view of
+this Mac's pages shows that image (or a gradient of 2560 × 1600 pixels), with a bar that moves at
+each frame, in place of the display: no screen capture and no Screen Recording. The display's
+choice still decides.
+
 **The drawings** (`--render-*`) take nothing from this Mac: fixed minds and faces, a fixed clock
 (UTC), the things of a Mac with one display and one camera, the scroll bars, accent and locale held
 in the process, 2 pixels to a point. `node harness/snapshots.mjs` draws every view and compares it
@@ -947,7 +982,9 @@ runs at once in the fake mind, and its answer is the app's copy of the list), `a
 command run through the endpoint is `device/act-started` and `device/act-ended` in the fake mind,
 and `ui.state` shows its row once, echoed from the context), `record-upload` (a slot that waits in
 the home's spool goes to the fake mind, its file before `record/slot-stored`, and leaves the
-spool), `approval` (a
+spool), `pages-live` (Pages at Off refuses `/state.json`; at Shared, with the frame fixture,
+`/live.mjpeg` gives 3 JPEGs between multipart boundaries, and the cancel ends the view and its
+act), `approval` (a
 command on Ask is approved and denied through the socket, then through the question's buttons, and
 "Approve for 30 Minutes" lets the next use run with no question), `log-window` (on a context that
 holds mixed events, "Open in a Window" reads the newest page of every kept type and no ephemeral

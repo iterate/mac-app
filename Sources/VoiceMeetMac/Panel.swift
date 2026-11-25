@@ -472,7 +472,7 @@ private struct CanUseSection: View {
     let cameraLayer: ((String) -> CALayer)?
     let bigPicture: (Shareable) async -> CGImage?
 
-    private static let groups: [[Power]] = [[.screen, .camera, .microphone, .accessibility], [.speaker, .banners], [.commands]]
+    private static let groups: [[Power]] = [[.screen, .camera, .microphone, .accessibility], [.speaker, .banners], [.commands, .pages]]
 
     var body: some View {
         let busy = busyWords()
