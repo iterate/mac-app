@@ -38,7 +38,7 @@ final class AudioFixtureTests: XCTestCase {
     }
 
     func testAFixtureThatDoesNotReadFailsAtOnce() {
-        XCTAssertThrowsError(try FixturePlayer(URL(fileURLWithPath: "/nonexistent/fixture.wav")).start { _ in }) { error in
+        XCTAssertThrowsError(try FixturePlayer(URL(fileURLWithPath: "/nonexistent/fixture.wav")).start({ _ in }, failed: { _ in })) { error in
             XCTAssertTrue(error.localizedDescription.contains("fixture.wav"))
         }
     }

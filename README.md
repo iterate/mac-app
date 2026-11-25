@@ -567,7 +567,8 @@ Return closes the bar at once. One input goes at a time: while it goes, the bar 
 no new one. The input goes up as you, as a capture does: the job `input` of that mind's process
 (`bridge/input.mjs`) uses the iterate CLI's own sign-in to that mind (`iterate login <mind>`, once). When it did not go
 (no sign-in, no network, a file that failed), the bar comes back with your text, your files and the
-reason, and Return sends the same input again. The line under the panel's three buttons says how
+reason, and Return sends the same input again (the same id: the mind keeps it once). An input you
+changed first is another input, with a new id. The line under the panel's three buttons says how
 the newest of the last capture, input and dictation ended, in orange when it failed.
 
 **What the mind gets.** Each file is a file of the mind, and then ONE event is on the context
@@ -603,10 +604,11 @@ dictation on until the next press. The panel's **Dictate** button starts one tha
 at the bottom of the screen shows the words on one row while you talk, the newest at the right,
 with a lock while it stays on and the time since the start.
 
-- **fn needs Accessibility.** The app hears fn with one event tap of the session, which macOS
-  gives only to an app with Accessibility (the permission that also writes the text for you). The
-  tap swallows one key: Esc while a dictation stays on, so that Esc does not reach the app in
-  front. Without the permission, ⌥⇧D still works, its first use opens the permission's guide, and
+- **fn needs Accessibility.** The app hears fn with event taps of the session, which macOS
+  gives only to an app with Accessibility (the permission that also writes the text for you). One
+  tap hears the modifier keys; the tap for key presses is on only while fn is down or a dictation
+  goes, so the rest of the Mac's typing passes no tap of this app. It swallows one key: Esc while
+  a dictation stays on, so that Esc does not reach the app in front. Without the permission, ⌥⇧D still works, its first use opens the permission's guide, and
   the panel's speech row and Settings › Dictation say so. macOS can act on 🌐 too (the emoji
   picker, or its own dictation): when System Settings › Keyboard › "Press 🌐 key to" is not "Do
   Nothing", Settings › Dictation says to set it, with **Open Keyboard Settings**. The app changes

@@ -477,6 +477,23 @@ const scenarios = {
         await run.control("dictation.esc");
         const cancelled = (await until("Esc's end", 10, () => ended(3))).lastLine;
         if (!/^Cancelled at /.test(cancelled)) throw new Error(`Esc: the line is "${cancelled}"`);
+        // Astra 16: a hold again at once, before the last words of the one before came. Those come
+        // once; the new hold keeps its key and its pill, and its own release writes it.
+        await pause(600);
+        await fn(true);
+        await until("a hold's words", 60, async () => /doppler/i.test((await dictation()).text));
+        await fn(false);
+        await fn(true);
+        const again = await dictation();
+        if (!again.running || again.key !== "pressed") throw new Error(`the second hold: ${JSON.stringify(again)}`);
+        await until("the first hold's end", 60, async () => (await dictation()).ends === 4);
+        const during = await dictation();
+        if (!during.running || during.key !== "pressed" || during.phase !== "listening")
+          throw new Error(`the second hold after the first one's words: ${JSON.stringify(during)}`);
+        await pause(800);
+        await fn(false);
+        const second = await until("the second hold's end", 60, () => ended(5));
+        if (!/^(Heard|Wrote)/.test(second.lastLine)) throw new Error(`the second hold: the line is "${second.lastLine}"`);
       } finally {
         await run.quit();
       }

@@ -80,6 +80,29 @@ final class InputDraftTests: XCTestCase {
         XCTAssertEqual(json(draft.submit(at: now))["id"] as? String, "a")
     }
 
+    /// Astra 9: the mind may have kept an input whose answer was lost. The same input goes again as
+    /// it was, byte for byte; an input changed after it is another one, with a new id.
+    func testARetryOfTheSameInputIsTheSameBytesAndAChangedOneHasANewId() {
+        var draft = InputDraft(id: "a")
+        draft.text = "x"
+        draft.attach(name: "a.pdf", local: "/a.pdf", bytes: 10, contentType: "application/pdf")
+        let first = draft.submit(at: now)
+        _ = draft.senderSaid(["failed": "no answer"], next: "z")
+        // a minute later, unchanged: the same id, the same time, the same files
+        XCTAssertEqual(draft.submit(at: now.addingTimeInterval(60), newId: { "b" }), first)
+        _ = draft.senderEnded(status: 1)
+        // edited: another input
+        draft.text = "x, and y"
+        let edited = json(draft.submit(at: now.addingTimeInterval(120), newId: { "b" }))
+        XCTAssertEqual(edited["id"] as? String, "b")
+        XCTAssertEqual(edited["text"] as? String, "x, and y")
+        XCTAssertEqual(draft.id, "b")
+        _ = draft.senderSaid(["failed": "no answer"], next: "z")
+        // a file less is a change too
+        draft.remove(draft.attachments[0].id)
+        XCTAssertEqual(json(draft.submit(at: now, newId: { "c" }))["id"] as? String, "c")
+    }
+
     func testASenderThatEndsWithNoAnswerIsAFailure() {
         var draft = InputDraft(id: "a")
         draft.text = "x"

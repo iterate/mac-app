@@ -70,17 +70,50 @@ public final class SpeechRecognizer: @unchecked Sendable {
         }
         pending.append(contentsOf: samples)
         given += samples.count
-        let most = Int(Self.kept) * SpeechStretch.rate
-        if pending.count > most {
-            dropped += pending.count - most
-            pending.removeFirst(pending.count - most)
-        }
+        // While the model loads the oldest go, 10 s at a time: one move of the kept samples each
+        // 10 s, not one at each push. `take` cuts to `kept` exactly.
+        if pending.count > Self.most + 10 * SpeechStretch.rate { trim() }
+    }
+
+    private static let most = Int(kept) * SpeechStretch.rate
+
+    /// Under the lock: at most `kept` seconds wait.
+    private func trim() {
+        guard pending.count > Self.most else { return }
+        dropped += pending.count - Self.most
+        pending.removeFirst(pending.count - Self.most)
     }
 
     /// Ends the input and answers every segment, the last stretch's too.
     public func finish() async -> [SpeechSegment] {
         end(dropped: false)
         return await work?.value ?? []
+    }
+
+    /// `finish`, waiting at most `seconds`: nil when the time ran out (a model that still comes over
+    /// a slow network). Then the recognizer is cancelled, and no segment comes after the answer.
+    public func finish(within seconds: Double) async -> [SpeechSegment]? {
+        final class Once: @unchecked Sendable {
+            let lock = NSLock()
+            var continuation: CheckedContinuation<[SpeechSegment]?, Never>?
+            func resume(_ answer: [SpeechSegment]?) {
+                lock.withLock {
+                    continuation?.resume(returning: answer)
+                    continuation = nil
+                }
+            }
+        }
+        let once = Once()
+        let answer = await withCheckedContinuation { continuation in
+            once.lock.withLock { once.continuation = continuation }
+            Task { once.resume(await self.finish()) }
+            Task {
+                try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+                once.resume(nil)
+            }
+        }
+        if answer == nil { cancel() }
+        return answer
     }
 
     /// Ends the input. What was not yet written is dropped.
@@ -99,6 +132,7 @@ public final class SpeechRecognizer: @unchecked Sendable {
     private func take() -> (samples: [Float], first: Int, ended: Bool, dropped: Bool, overrun: Int) {
         lock.lock()
         defer { lock.unlock() }
+        trim()
         let samples = pending
         pending.removeAll(keepingCapacity: true)
         let overrun = dropped
