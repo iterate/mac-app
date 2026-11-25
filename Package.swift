@@ -15,9 +15,9 @@ var targets: [Target] = [
 #if os(macOS)
 products.append(.executable(name: "VoiceMeetMac", targets: ["VoiceMeetMac"]))
 targets.append(.executableTarget(name: "VoiceMeetMac", dependencies: ["VoiceMeetCore", "Record", "Live", "SpeechText"]))
-// Speech: the microphone as text, on this Mac (README.md, "Dictation"). Everything that touches the
-// speech model is here. The model is NVIDIA's Parakeet as Core ML, through FluidAudio, the library
-// that the Swift app Hex used.
+// Speech: the microphone as text (README.md, "Dictation"). Everything that touches a speech model is
+// here. On this Mac the model is NVIDIA's Parakeet as Core ML, through FluidAudio, the library that
+// the Swift app Hex used; online it is OpenAI's realtime transcription, over URLSession's WebSocket.
 dependencies.append(.package(url: "https://github.com/FluidInference/FluidAudio", exact: "0.18.4"))
 targets.append(.target(name: "SpeechText", dependencies: ["VoiceMeetCore", .product(name: "FluidAudio", package: "FluidAudio")]))
 targets.append(.testTarget(name: "SpeechTextTests", dependencies: ["SpeechText", "VoiceMeetCore"]))

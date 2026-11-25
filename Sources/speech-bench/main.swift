@@ -26,8 +26,8 @@ let fast = arguments.contains("--fast")
 arguments.removeAll { $0 == "--fast" }
 let modelId = option("--model")
 let words = option("--words").flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }.map(WordList.init(markdown:)) ?? .empty
-guard let model = SpeechModel.all.first(where: { $0.id == modelId }) else {
-    FileHandle.standardError.write(Data("speech-bench --model <\(SpeechModel.all.map(\.id).joined(separator: "|"))> [--words words.md] [--fast] <file> …\n".utf8))
+guard let model = SpeechModel.local.first(where: { $0.id == modelId }) else {
+    FileHandle.standardError.write(Data("speech-bench --model <\(SpeechModel.local.map(\.id).joined(separator: "|"))> [--words words.md] [--fast] <file> …\n".utf8))
     exit(2)
 }
 

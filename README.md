@@ -148,7 +148,8 @@ wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the 
   the one before stays), the version with **Update Now** and **Update by itself** (from npm only:
   a trial and a copy are updated by hand), and **Copy Prompt**.
 - **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on, the
-  orange row when macOS acts on 🌐 too, the speech model and its list, whether the pill shows the
+  orange row when macOS acts on 🌐 too, the speech model and its list, the OpenAI key (set or
+  removed; it is never shown), whether the pill shows the
   words, where the text goes (where the cursor is, or on the clipboard only), and the default
   expression of the word list (below).
 
@@ -514,7 +515,7 @@ If you cannot read that folder (you are an agent of the mind example.com, or you
 
 Each mark and each click gets a numbered picture: the part of the display around it, cut out
 while you talk. `sheet.jpg` is all of them on one. While you talk the pictures go up, and this Mac
-puts your voice into words at each pause, with the speech model of dictation ("Dictation" below)
+puts your voice into words at each pause, with the local speech model of dictation ("Dictation" below)
 and the `words.md` list of the capture's mind; no sound leaves the Mac for it, and no cloud model
 hears it. The pill shows the last words: the sign that the microphone hears you. So at the end
 only your last words can be missing: the first text says so, and the same text with all the words
@@ -575,7 +576,8 @@ listens: talk, type, or both, and press **Return**. That is all the bar knows: i
 and no list of actions. What happens with your words is the mind's own matter.
 
 - **The microphone.** The bar starts by listening. What you say is written into the text as you
-  say it, on this Mac ("Dictation" below), with the word list of the mind the input goes to. The
+  say it, with the model of dictation ("Dictation" below: at OpenAI with a key, else on this Mac),
+  with the word list of the mind the input goes to. The
   button at the right shows the loudness; a click, or **⌘D**, turns the microphone off, and again
   on. Words that you change by hand stay as you made them: only what you say after that comes in.
   The microphone is open only while the bar is open: Escape, Return and ⌥⇧Space close it. A bar
@@ -649,23 +651,51 @@ with a lock while it stays on and the time since the start.
 - **One listening at a time.** Dictation and the input bar share one microphone listening
   (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
   are written where they belonged.
-- **It runs on this Mac.** The speech model runs as Core ML through
-  [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. No
-  sound and no text leaves the Mac. Settings › Dictation (the panel's Settings button opens it) chooses the model for dictation,
-  the input and captures; each one shows its size and whether it is on this Mac:
+- **GPT Live Transcribe at OpenAI, when this Mac has an OpenAI key; else on this Mac.** Settings ›
+  Dictation (the panel's Settings button opens it) chooses the model of dictation and the input
+  bar. A capture always uses a local model (the chosen one, or Parakeet v3).
 
-  | Model                       | Download | License   | Note                                                     |
-  | --------------------------- | -------- | --------- | -------------------------------------------------------- |
-  | Parakeet TDT 0.6B v3        | 480 MB   | CC BY 4.0 | The default: 25 European languages                       |
-  | Parakeet Ultra              | 632 MB   | CC BY 4.0 | A post-training of v3, which FluidAudio 0.18.4 recommends |
+  | Model                       | Runs         | Download | License   | Note                                                     |
+  | --------------------------- | ------------ | -------- | --------- | -------------------------------------------------------- |
+  | GPT Live Transcribe         | OpenAI       | none     | OpenAI    | The default with a key. $1/hour of talking; the sound leaves this Mac |
+  | Parakeet TDT 0.6B v3        | this Mac     | 480 MB   | CC BY 4.0 | The default with no key, and the model behind OpenAI     |
+  | Parakeet Ultra              | this Mac     | 632 MB   | CC BY 4.0 | A post-training of v3, which FluidAudio 0.18.4 recommends |
 
+  Why OpenAI is the default: on the owner's own voice (`harness/speech-bench`, 25 November 2026)
+  `gpt-live-transcribe` with delay `low` had WER 10.3 and got 130 of 146 terms; Parakeet v3 had
+  WER 21.8. It costs $0.017 a minute of sound, about $1 an hour of talking.
+
+  The app opens a WebSocket to `wss://api.openai.com/v1/realtime?intent=transcription` at fn down,
+  with the session that the bench measured: `gpt-live-transcribe`, delay `low`, 24 kHz pcm16, no
+  turn detection, the mind's word list terms as `keywords`, and the bench's prompt. The sound is
+  kept from fn down, so a socket that opens late loses no word (its setup costs about 0.8 s). Each
+  delta is the pill's text; at the end a commit asks for the final, which the word list repairs.
+  The socket closes after each dictation. When OpenAI fails (no session within 5 s, an error
+  while you talk, no final within 5 s of the end, or no key), Parakeet v3 hears what was kept and
+  what comes after, and `app.log` says why ("gpt-live-transcribe failed after 0.31 s (…): the local
+  model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the socket),
+  `StreamRecognizer.swift` (the stream, with the local model behind it).
+- **The OpenAI key is in the login Keychain**: a generic password of the service
+  `com.iterate.mac-app.openai` and the account `api-key`. It is never in a file, a log, `ui.state`
+  (which says only `speech.openAIKey`: true or false) or a process's arguments. Settings ›
+  Dictation says whether it is set, takes a new one in a secure field, and removes it. Or from a
+  terminal: `OPENAI_API_KEY=… npx @iterate-com/mac-app --openai-key-from-env` gives the key to
+  `security` on its standard input, trusts /Applications/iterate.app to read it, and says only
+  "OpenAI key stored". A copy with a home of its own uses the service with `.` and the first 12
+  hex digits of the SHA-256 of its home's path, so a test never reads or writes the owner's item.
+  With no stored choice, a key that comes makes GPT Live Transcribe the model, and a key that goes
+  makes it Parakeet v3; a choice in Settings stays.
+- **The local models run on this Mac** as Core ML through
+  [FluidAudio](https://github.com/FluidInference/FluidAudio), the library of the Swift Hex. With
+  them no sound and no text leaves the Mac. Each one shows its size and whether it is on this Mac.
   A model that is not on this Mac downloads when you choose it, with its progress in the panel,
   into `~/Library/Application Support/FluidAudio`, and is the model once it loaded. The choice is
-  kept in the app's defaults (`speechModel`). It needs Apple silicon. v3 stays the default: on the
-  owner's own captures and a fixture of the list's hard terms, Ultra got more terms wrong
+  kept in the app's defaults (`speechModel`). It needs Apple silicon. v3 stays the local default:
+  on the owner's own captures and a fixture of the list's hard terms, Ultra got more terms wrong
   (`harness/speech-bench`, 24 November 2026).
 - **No wait on first use.** Core ML prepares a model for the Neural Engine at its first load after
-  each start of the app (about 25 s on a MacBook Pro). The app loads the chosen model in the
+  each start of the app (about 25 s on a MacBook Pro). The app loads the chosen local model (with
+  GPT Live Transcribe chosen: Parakeet v3, for captures and for a failure of OpenAI) in the
   background a few seconds after it starts, when its files are on this Mac, so the first
   dictation is at once. You can talk during a load: the microphone is open and what you say is
   kept (the last 60 s). The pill says "Getting the speech model: N%" only while files download,
@@ -702,15 +732,21 @@ with a lock while it stays on and the time since the start.
 - **Permissions.** The microphone, at the first use. The line under the panel's three buttons
   says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
 
-While you talk, the text is written again twice a second from the stretch of speech that is going.
-A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment; then its text is final:
-one segment, with its times from the start.
+With a local model, while you talk, the text is written again twice a second from the stretch of
+speech that is going. A stretch ends at a pause of 0.7 s, or after 14 s at its quietest moment;
+then its text is final: one segment, with its times from the start. With GPT Live Transcribe the
+whole dictation is one segment, with no times of its words.
 
-## Online and local (a proposal, not built)
+## Online and local: what the bench measured, and what is not built
+
+The owner's own voice (`--set owner`, 25 November 2026) confirmed the synthetic set, and
+GPT Live Transcribe is now the default with a key ("Dictation" above), with the key on this Mac
+and Parakeet only when OpenAI fails. What follows is the measure and the proposal before it; the
+parts not built are local always (both models on every dictation), the wait of X for OpenAI's
+final, and the key in the mind.
 
 What the speech bench measured on 24 November 2026 (`harness/speech-bench`, the synthetic set: 48
-clips of `say -o`, two voices; an M4 Max on a home connection). The owner's own voice
-(`--set owner`) must confirm it before anything is built.
+clips of `say -o`, two voices; an M4 Max on a home connection).
 
 | Engine | WER % (Daniel / Anna) | Terms right, false | End of audio → final, p50 / p90 | First partial | $ / min |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -960,7 +996,8 @@ The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copy
 `capture.discard`, `speech.model.<id>` (a model in the list of Settings › Dictation), `panel.settings`, and in Settings `settings.page.general`,
 `settings.page.dictation`, `settings.page.mind.<address>`, `settings.addMind`, `settings.login`,
 `settings.showsPill`, `settings.approvalMinutes`, `settings.key.capture`, `settings.key.input`,
-`settings.doubleTap`, `settings.dictationKey`, `settings.pillWords`, `settings.write`,
+`settings.doubleTap`, `settings.dictationKey`, `settings.pillWords`, `settings.write`, `settings.speechWhere`,
+`settings.openAIKey` (and `.set`, `.remove`),
 `settings.wordsExpression`, `settings.mind.name`, `settings.mind.wordsSource`,
 `settings.mind.expression` (and `.save`), `settings.mind.fetch`, `settings.mind.use`, `settings.mind.remove`. The tree is read in the app's own process and needs no permission of macOS; to
 have SwiftUI's elements in it, the socket sets the app's "enhanced user interface" attribute, as an

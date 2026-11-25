@@ -55,6 +55,8 @@ public final class SpeechSession {
     public var authorization: () -> AVAuthorizationStatus = { environmentFixture != nil ? .authorized : AVCaptureDevice.authorizationStatus(for: .audio) }
     /// A line for the app's log: counts and times, never the words.
     public var log: (String) -> Void = { _ in }
+    /// The recognizer of a model that runs online (`OnlineSpeech.recognizer`); nil for a local one.
+    public var online: (SpeechModel, WordList, @escaping @Sendable (SpeechRecognizer.Event) -> Void) -> SpeechListening? = { _, _, _ in nil }
 
     private let makeSource: () -> SpeechSource
     private let engine: (@Sendable (SpeechModel, WordList) async throws -> SpeechEngine)?
@@ -69,7 +71,7 @@ public final class SpeechSession {
         let client: SpeechClient
         let round: Int
         let source: SpeechSource
-        let recognizer: SpeechRecognizer
+        let recognizer: SpeechListening
     }
 
     private var current: Listening?
@@ -113,9 +115,10 @@ public final class SpeechSession {
         let round = round
         let model = model()
         let engine = self.engine.map { make in { @Sendable in try await make(model, words) } }
-        let recognizer = SpeechRecognizer(model: model, words: words, engine: engine) { [weak self] event in
+        let heard: @Sendable (SpeechRecognizer.Event) -> Void = { [weak self] event in
             DispatchQueue.main.async { MainActor.assumeIsolated { self?.heard(event, round: round, client: client) } }
         }
+        let recognizer = online(model, words, heard) ?? SpeechRecognizer(model: model, words: words, engine: engine, heard: heard)
         let source = makeSource()
         let audio = SpeechAudio()
         do {

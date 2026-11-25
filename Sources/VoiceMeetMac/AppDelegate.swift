@@ -264,7 +264,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let capture = Capture()
         capture.onChange = { [weak self] in self?.stateDidChange() }
         capture.allow = { [weak self] permission in self?.guide(permission) }
-        capture.speech = { [weak self] in self?.speechChoice.chosen ?? .default }
+        // a capture hears with a local model, also when dictation runs at OpenAI
+        capture.speech = { [weak self] in self?.speechChoice.local ?? .default }
         capture.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
@@ -288,7 +289,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fn and ⌥⇧D dictate into the app in front, with the word list of the mind this Mac is lent to
     /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
     private func startDictation() {
-        speech.model = { [weak self] in self?.speechChoice.chosen ?? .default }
+        speech.model = { [weak self] in
+            // the key may have come (cli.mjs) or gone: the next listening knows
+            self?.speechChoice.refreshKey()
+            return self?.speechChoice.chosen ?? .default
+        }
+        // GPT Live Transcribe at OpenAI, with Parakeet v3 behind it (README, "Dictation")
+        let openAIKey = speechChoice.openAIKey
+        speech.online = { model, words, heard in
+            OnlineSpeech.recognizer(model, words: words, key: { openAIKey?.read() }, heard: heard)
+        }
         speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
         let speechLog = AppLog("speech")
         speech.log = { speechLog.info($0) }
@@ -319,13 +329,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         register(.dictation, "dictation", "held, dictates; tapped, stays on", pressed: { [weak self] in self?.dictation.shortcutPressed() }, released: { [weak self] in self?.dictation.shortcutReleased() })
     }
 
-    /// The chosen speech model, loaded in the background a moment after the start when its files
-    /// are on this Mac: the first dictation is then at once, not after Core ML prepared the model
-    /// for the Neural Engine (24.8 s, seen on 24 Nov 2026). A home of its own loads it only for an
-    /// audio fixture; a drawing never gets here.
+    /// The chosen local speech model, loaded in the background a moment after the start when its
+    /// files are on this Mac: the first dictation is then at once, not after Core ML prepared the
+    /// model for the Neural Engine (24.8 s, seen on 24 Nov 2026). With dictation at OpenAI it is
+    /// the model of captures and the one that hears when OpenAI fails. A home of its own loads it
+    /// only for an audio fixture; a drawing never gets here.
     private func preloadSpeech() {
         guard !environment.hasOwnHome || environmentFixture != nil else { return }
-        let model = speechChoice.chosen
+        let model = speechChoice.local
         DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [log] in
             guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
             Task { @MainActor in
