@@ -18,6 +18,7 @@
 //   input    one input into the mind, by its id                                 (input.mjs)
 //   words    the mind's word list into a file                                   (words.mjs)
 //   openai   sockets of OpenAI's realtime transcription through the mind, by id  (openai.mjs)
+//   call     this Mac's camera or a screen in a call on an agent, by publication (call.mjs)
 //
 // stdin and stdout are JSON lines, each with its `job`: `{ job, … }`. `events`, `live` and
 // `record` run from `{ job, start: true }` (record's also names `spool`) to `{ job, stop: true }`,
@@ -33,6 +34,7 @@ import { dirname, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { callJob } from "./call.mjs";
 import { captureUpload } from "./capture.mjs";
 import { deviceEvents } from "./events.mjs";
 import { inputJob } from "./input.mjs";
@@ -73,6 +75,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
   const started = {};
   const captures = new Map();
   const openai = openaiSockets({ link, say: (said) => say({ job: "openai", ...said }) });
+  const call = callJob({ link, say: (said) => say({ job: "call", ...said }) });
 
   function takeOne(line) {
     const { job } = line;
@@ -116,6 +119,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
       return track(inputJob({ line, name, link, say: (said) => say({ job, input: line.input, ...said }) }));
     if (job === "words") return track(wordsJob({ line, link, say: (said) => say({ job, ...said }) }));
     if (job === "openai") return track(openai.take(line));
+    if (job === "call") return track(call.take(line));
     throw new Error(`no job "${job}"`);
   }
 
@@ -126,7 +130,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
         takeOne(line);
       } catch (error) {
         // one bad line fails its own job, never the process
-        const of = Object.fromEntries(["job", "capture", "input", "socket"].filter((key) => key in line).map((key) => [key, line[key]]));
+        const of = Object.fromEntries(["job", "capture", "input", "socket", "publication"].filter((key) => key in line).map((key) => [key, line[key]]));
         say({ ...of, failed: describe(error) });
       }
     },
@@ -135,6 +139,7 @@ export function mindBridge({ mind, name, connect, say, sleep, now, record: recor
       for (const job of Object.keys(started)) takeOne({ job, stop: true });
       // the OpenAI sockets close first: one that still opens closes when it comes
       openai.end();
+      track(call.end());
       while (running.size) await Promise.all(running);
       link.stop();
     },

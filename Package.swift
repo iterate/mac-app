@@ -39,6 +39,10 @@ targets.append(.binaryTarget(
 ))
 targets.append(.target(name: "Live", dependencies: ["Record", "VoiceMeetCore", "LiveKitWebRTC"]))
 targets.append(.executableTarget(name: "live-run", dependencies: ["Live", "Record", "VoiceMeetCore"]))
+// `call-run` sends the synthetic picture into a call on an agent through the bridge's job `call`,
+// receives it back through the SFU as another page, and measures each step (README, "A call's
+// camera or screen from this Mac").
+targets.append(.executableTarget(name: "call-run", dependencies: ["Live", "Record", "VoiceMeetCore"]))
 #endif
 
 let package = Package(
