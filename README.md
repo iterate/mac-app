@@ -131,8 +131,20 @@ The 𝑖 in the menu bar shows the lend at a glance: plain while live, dimmed wh
 reconnects, and dimmed with a slash through it while it is not lent (no mind, stopped, not allowed,
 incompatible). Green, red and orange (a banner, a use, the microphone or a camera on) show over it
 while they last. A small red dot at its lower right is the record: filled while it records, a ring
-while it is paused, none while it is off. `--render-icons <folder>` draws each mark on a light and
-a dark bar, and `marks-light.png` and `marks-dark.png`: each colour of the mark with each dot.
+while it is paused, none while it is off.
+
+When the active mind has an icon kept (`faces/`, read again at most every five minutes), the menu
+bar shows that mind's face in place of the 𝑖: its icon in a circle, 18 points across, in colour.
+The face shows the same states. It is plain while live, dimmed while it connects, and dimmed with a
+slash while it is not lent. Green, red and orange are a ring at its edge, and the lend's tone stays
+under the ring. The record is the red dot at its lower right, and Always listen is the orange dot at
+its upper left. With no mind, or no icon read yet, or an icon that does not load, the menu bar
+shows the 𝑖. A switch of mind shows the new face at once, from disk. The words of the status
+item (its tooltip and VoiceOver label) do not change. `--render-icons <folder>` draws each mark on
+a light and a dark bar, and `marks-light.png` and `marks-dark.png`: each colour of the mark with each
+dot. It also draws `faces-light.png` and `faces-dark.png`: each tone and ring of the face with each
+dot. And `menubar-light.png` and `menubar-dark.png`: the bar at its own size, with the mark and the
+face in five states.
 
 Needs macOS 14 or later and Node 22.18 or later.
 
@@ -886,8 +898,8 @@ the microphone. Each layer has its events, and the layer above reads them.
   stretch where the cursor is: with Always listen, also what you said with no key held.
 - **Always listen** (Settings › Dictation; `listen.always` in the defaults) is OFF unless you turn
   it on. On, the microphone stays open with no key, each stretch of speech is put into words on
-  this Mac, and the segments go into the record. The mark in the menu bar has a small orange dot at
-  its upper left while it listens; the rest of the mark does not change. Off, nothing listens
+  this Mac, and the segments go into the record. The mark (or the mind's face) in the menu bar has a
+  small orange dot at its upper left while it listens; the rest of it does not change. Off, nothing listens
   without a key, and everything works as before, through the same layers.
 
 `ui.state`'s `listening` has the counts: whether Always listen runs, the stretches it found, the

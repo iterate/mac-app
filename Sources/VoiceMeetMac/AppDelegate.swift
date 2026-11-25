@@ -18,8 +18,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// The mark: the status item's button, or a test copy's own (`OffScreen.markButton`).
     private var markButton: NSStatusBarButton?
     private var recordDot: RecordDotView?
-    /// What the mark shows now: it is written again only when it changes.
-    private var shownMark: MenuBarMark?
+    /// The face or the mark the status item shows now, and the face's icon it was drawn from: it
+    /// is written again only when one of them changes.
+    private var shownIcon: MenuBarIcon?
+    private var shownFaceIcon: NSImage?
+    /// The active mind's face is read again every five minutes, and a new one shows at once.
+    private var faceTimer: Timer?
+    private var faceWatch: AnyCancellable?
     private var shownLabel = ""
     /// The one look again at the end of a use's red (`MenuBarMark.inUse`).
     private var useEnds: DispatchWorkItem?
@@ -96,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             recordDot = RecordDotView.attach(to: markButton, imageSize: markSize)
             listenSign = ListenSignView.attach(to: markButton, imageSize: markSize)
         }
+        watchFaces()
         // after the mark: the first lines look for the cameras, which can take a moment
         logRunStart()
 
@@ -822,7 +828,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// The iterate mark: green while a banner shows, red for 3 seconds at each use by a
+    /// The menu bar shows the active mind's face (`MenuBarIcon`, `FaceIcon`): a face read again
+    /// (`MindFaces.read`) shows in the next look, and the timer reads it again at most every five
+    /// minutes, as a view that shows a face does. A read that changes nothing writes nothing.
+    private func watchFaces() {
+        faceWatch = MindFaces.shared.objectWillChange.sink { [weak self] in
+            // before the change: the face is new after this turn
+            DispatchQueue.main.async { self?.updateStatusButton() }
+        }
+        let timer = Timer(timeInterval: 300, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                if let mind = self?.lend.activeMind?.mind { MindFaces.shared.refresh(mind) }
+            }
+        }
+        timer.tolerance = 30
+        RunLoop.main.add(timer, forMode: .common)
+        faceTimer = timer
+    }
+
+    /// The image of `icon`: the mark's, or the face of `face` drawn with its badges.
+    private func image(of icon: MenuBarIcon, face: NSImage?) -> NSImage {
+        switch icon {
+        case .mark(let mark, _):
+            return environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark)
+        case .face(_, let badges):
+            guard let face else { return IterateIcon.plain }
+            let drawn = FaceIcon.image(face, badges)
+            return environment.hasOwnHome ? IterateIcon.testImage(of: drawn) : drawn
+        }
+    }
+
+    /// The face of the active mind with its badges, or with no mind or no icon kept the iterate
+    /// mark: green while a banner shows, red for 3 seconds at each use by a
     /// mind, orange while the microphone or a camera is on. Else the lend at a glance: plain while
     /// live, dimmed while it connects, dimmed and slashed while it is not lent. The record adds a
     /// red dot at its lower right, filled while it records, a ring while it is paused, and does not
@@ -848,20 +885,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
             glance: glance, dot: mark.dot, tracks: record.tracks.count, pausedBecause: record.pausedBecause)
             + (listening.isAlwaysListening ? ". Always listen: the microphone is open" : "")
+        let listens = listening.isAlwaysListening
+        // the face kept on disk: a switch of mind shows the new one at once
+        let mind = lend.activeMind?.mind
+        let face = mind.flatMap { MindFaces.shared.face(of: $0).icon }
+        if let mind { MindFaces.shared.refresh(mind) }
+        let icon = MenuBarIcon.of(mark: mark, glance: glance, listens: listens, mind: mind, hasIcon: face != nil)
         // the button is written only when what it shows changed
-        guard mark != shownMark || label != shownLabel else { return }
+        guard icon != shownIcon || face !== shownFaceIcon || label != shownLabel else { return }
         Perf.count("statusWrites")
         // a test copy's mark is its own: the owner never quits the installed app for it
-        if mark != shownMark { button.image = environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark) }
-        recordDot?.dot = mark.dot
-        listenSign?.isOn = listening.isAlwaysListening
+        if icon != shownIcon || face !== shownFaceIcon { button.image = image(of: icon, face: face) }
+        // the mark's dots are views over its template image; a face has its own drawn in
+        let isMark = if case .mark = icon { true } else { false }
+        recordDot?.dot = isMark ? mark.dot : .none
+        listenSign?.isOn = isMark && listens
         let shown = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path). \(label)" : label
         button.toolTip = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path)" : label
         button.setAccessibilityLabel(shown)
         // the cell is the accessibility element (`ui.tree`, VoiceOver)
         button.cell?.setAccessibilityLabel(shown)
-        if mark != shownMark { log.info("menu-bar icon: the iterate mark, \(mark.name)") }
-        (shownMark, shownLabel) = (mark, label)
+        if icon != shownIcon { log.info("menu-bar icon: \(icon.name)") }
+        (shownIcon, shownFaceIcon, shownLabel) = (icon, face, label)
     }
 
     @objc private func togglePanel() {
