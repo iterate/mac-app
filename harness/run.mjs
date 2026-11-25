@@ -275,6 +275,19 @@ async function launchSeries(app, minds, args) {
   return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its main run loop in the third second ---\n${runLoop}\n--- its log ---\n${log}\n${systemLog(run.pid, t0)}--- end ---\n`;
 }
 
+/** The same seconds of a start of AppKit with nothing of the app (harness/launch-baseline.swift):
+ * whether a cost of the start is the app's or every app's on this Mac. */
+function launchBaseline(home) {
+  const binary = join(home, "launch-baseline");
+  try {
+    execFileSync("swiftc", ["-O", "-o", binary, join(root, "harness/launch-baseline.swift")], { stdio: "ignore", timeout: 300000 });
+    const lines = ["plain", "status", "swiftui"].map((variant) => execFileSync(binary, [variant], { encoding: "utf8", timeout: 60000 }).trim());
+    return `--- a start of AppKit alone, each second ---\n${lines.join("\n")}\n--- end ---\n`;
+  } catch (error) {
+    return `--- no start of AppKit alone: ${error.message} ---\n`;
+  }
+}
+
 /** What macOS's own log has of process `pid` from `t0`: its lines each second, by subsystem in
  * the first 12 s, and the lines of its fifth second. */
 function systemLog(pid, t0) {
@@ -350,6 +363,7 @@ const scenarios = {
         // the cost may be the start's and over by now: two more copies, with the lend and
         // without, their figures each second from the start beside their logs
         for (const args of [["--lend"], []]) liveSample += await launchSeries(app, [A, B], args);
+        liveSample += launchBaseline(home);
       }
 
       // a refused key: provide says so and ends; the next try is in 5 minutes
