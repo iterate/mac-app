@@ -4,6 +4,9 @@ import AppKit
 enum VoiceMeetMacApp {
     @MainActor
     static func main() {
+        // A write to a pipe whose reader is gone (a bridge's stdin, a command's) fails with EPIPE
+        // and ends nothing: the default action of SIGPIPE would end the app with no report.
+        signal(SIGPIPE, SIG_IGN)
         // A copy started only to answer one question (Permissions.swift): it opens nothing.
         if CommandLine.arguments.contains(Permission.checkScreenRecordingArgument) {
             exit(CGPreflightScreenCaptureAccess() ? 0 : 1)

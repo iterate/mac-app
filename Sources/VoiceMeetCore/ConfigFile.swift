@@ -1,17 +1,60 @@
 import Foundation
 
 /// The app's `config.json`, as `cli.mjs` writes it (`writeState`): `JSON.stringify(state, null, 2)`
-/// and a newline, into `config.json.new`, then renamed onto `config.json`, so the app's watch of
-/// the folder never reads half a file. The panel's `use` and `remove` change it here; `add` (a new
-/// key, allowed by a member) stays the CLI's.
+/// and a newline, into a temporary file of the writer's own (`config.json.<pid>.new`), then renamed
+/// onto `config.json`, so the app's watch of the folder never reads half a file. The panel's `use`
+/// and `remove` change it here (`update`); `add` (a new key, allowed by a member) and `set` stay
+/// the CLI's. A change reads the file again under `config.json.lock`, the CLI's lock too (a file
+/// that holds the holder's pid), so a change of another process meanwhile stays.
 public enum ConfigFile {
     public enum Failure: Error, CustomStringConvertible, Equatable {
         case noMind(String, known: [String])
+        case locked(String)
 
         public var description: String {
             switch self {
             case let .noMind(mind, known): "No mind \"\(mind)\" on this Mac. Its minds: \(known.isEmpty ? "none" : known.joined(separator: ", "))."
+            case let .locked(file): "Another process holds \(file): try again."
             }
+        }
+    }
+
+    /// Reads `file` again under its lock, changes it with `change` and writes it. What `change`
+    /// throws is thrown, and nothing is written.
+    @discardableResult
+    public static func update(_ file: URL, waitSeconds: TimeInterval = 2, _ change: ([String: Any]) throws -> [String: Any]) throws -> [String: Any] {
+        let lockFile = file.appendingPathExtension("lock")
+        guard takeLock(lockFile.path, waitSeconds: waitSeconds) else { throw Failure.locked(lockFile.path) }
+        defer { unlink(lockFile.path) }
+        let state = try change(read(file))
+        try write(state, to: file)
+        return state
+    }
+
+    /// The lock file of `cli.mjs` (`lock`): made with O_EXCL, with this pid in it. A lock whose
+    /// holder is gone is taken over; one with no pid yet, after 5 s.
+    static func takeLock(_ path: String, waitSeconds: TimeInterval) -> Bool {
+        let deadline = Date().addingTimeInterval(waitSeconds)
+        while true {
+            let descriptor = open(path, O_WRONLY | O_CREAT | O_EXCL, 0o644)
+            if descriptor >= 0 {
+                let pid = Array(String(getpid()).utf8)
+                _ = pid.withUnsafeBufferPointer { Darwin.write(descriptor, $0.baseAddress, $0.count) }
+                close(descriptor)
+                return true
+            }
+            guard errno == EEXIST else { return false }
+            if let text = try? String(contentsOfFile: path, encoding: .utf8) {
+                let holder = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                let age = ((try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate]) as? Date).map { -$0.timeIntervalSinceNow } ?? 0
+                let isStale = holder > 0 ? (kill(holder, 0) != 0 && errno == ESRCH) : age > 5
+                if isStale {
+                    unlink(path)
+                    continue
+                }
+            }
+            if Date() >= deadline { return false }
+            usleep(10_000)
         }
     }
 
@@ -24,9 +67,12 @@ public enum ConfigFile {
     }
 
     public static func write(_ state: [String: Any], to file: URL) throws {
-        let new = file.appendingPathExtension("new")
+        let new = file.appendingPathExtension("\(getpid()).new")
         try Data((stringify(state) + "\n").utf8).write(to: new)
-        guard rename(new.path, file.path) == 0 else { throw CocoaError(.fileWriteUnknown) }
+        guard rename(new.path, file.path) == 0 else {
+            unlink(new.path)
+            throw CocoaError(.fileWriteUnknown)
+        }
     }
 
     private static func minds(of state: [String: Any]) -> [[String: Any]] {

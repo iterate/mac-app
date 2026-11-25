@@ -1,5 +1,7 @@
 // A fake mind for the bridges' tests: connections that end as the mind ends them (1008), that
-// fail to connect, subscriptions that end with no word, appends that fail. Each appended event gets
+// fail to connect, subscriptions that end with no word, appends that fail or whose answer is lost
+// (`dropNextAnswer`), idempotency keys (the same event once; another one with the key is
+// IDEMPOTENCY_CONFLICT). Each appended event gets
 // an offset and a time; `readEvents` reads the kept ones of a path, a page at a time, and each
 // read is in `reads` as `{ after, events }`. A subscription to "*" gets every kept event, as the
 // mind's does (no ephemeral one).
@@ -124,6 +126,13 @@ export function fakeMind({ stored = () => {} } = {}) {
             mind.failNextAppend = undefined;
             throw error;
           }
+          // an idempotency key that the path has: the same event is the one kept, another one a conflict
+          for (const event of events) {
+            const kept = event.idempotencyKey && mind.appended.find((e) => e.path === path && e.idempotencyKey === event.idempotencyKey);
+            if (kept && JSON.stringify(kept.payload) !== JSON.stringify(event.payload))
+              throw Object.assign(new Error(`another event has the key ${event.idempotencyKey}`), { code: "IDEMPOTENCY_CONFLICT" });
+          }
+          events = events.filter((event) => !event.idempotencyKey || !mind.appended.some((e) => e.path === path && e.idempotencyKey === event.idempotencyKey));
           const stored = events.map((event) => ({
             ...event,
             path,
@@ -133,6 +142,11 @@ export function fakeMind({ stored = () => {} } = {}) {
           mind.appended.push(...stored);
           for (const event of stored) mind.order.push(`event ${event.type}`);
           mind.deliver(stored, connection);
+          // the mind keeps the events, and its answer is lost on the way
+          if (mind.dropNextAnswer) {
+            mind.dropNextAnswer = false;
+            throw new Error("Peer closed WebSocket: the answer was lost");
+          }
           return stored;
         },
         async readEvents(afterOffset = 0, limit = 1000) {

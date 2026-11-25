@@ -2,6 +2,7 @@ import AppKit
 import ApplicationServices
 import CoreImage
 import ScreenCaptureKit
+import VoiceMeetCore
 
 /// A still picture of a whole display, at any time. It needs the Screen Recording permission.
 enum Screen {
@@ -131,48 +132,25 @@ enum Accessibility {
 }
 
 /// Runs a command as a child of this app. macOS counts a child's use of the screen, the camera,
-/// the microphone and Accessibility as this app's, so the command has the app's permissions.
+/// the microphone and Accessibility as this app's, so the command has the app's permissions. The
+/// bounds (output, deadline, a process group of its own) are `CommandRun`'s.
 enum Commands {
-    private static let maximumOutputBytes = 8 * 1024 * 1024
-
     static func run(_ argv: [String], stdin: Data, timeout: TimeInterval) async throws -> [String: Any] {
         guard let command = argv.first else { throw EndpointRefusal("run needs a command: argv is a list of strings.") }
-        let process = Process()
         // A bare name is found on the PATH, as in a shell; a path is run as it is.
-        process.executableURL = URL(fileURLWithPath: command.contains("/") ? command : "/usr/bin/env")
-        process.arguments = command.contains("/") ? Array(argv.dropFirst()) : argv
-        let input = Pipe(), output = Pipe(), errors = Pipe()
-        process.standardInput = input
-        process.standardOutput = output
-        process.standardError = errors
+        let executable = command.contains("/") ? command : "/usr/bin/env"
+        let arguments = command.contains("/") ? Array(argv.dropFirst()) : argv
+        let result: CommandRun.Result
         do {
-            try process.run()
+            result = try await CommandRun.run(executable, arguments, stdin: stdin, timeout: timeout)
         } catch {
-            throw EndpointRefusal("The command did not start: \(error.localizedDescription)")
+            throw EndpointRefusal("The command did not start: \(error)")
         }
-        let deadline = DispatchWorkItem { process.terminate() }
-        DispatchQueue.global().asyncAfter(deadline: .now() + timeout, execute: deadline)
-        // The pipes are read off the main thread while the command runs, or a full pipe would stop it.
-        async let standardOutput = read(output)
-        async let standardError = read(errors)
-        input.fileHandleForWriting.write(stdin)
-        try? input.fileHandleForWriting.close()
-        let (out, err) = await (standardOutput, standardError)
-        process.waitUntilExit()
-        deadline.cancel()
         return [
-            "exitCode": Int(process.terminationStatus),
-            "timedOut": process.terminationReason == .uncaughtSignal,
-            "stdoutBase64": out.prefix(maximumOutputBytes).base64EncodedString(),
-            "stderrBase64": err.prefix(maximumOutputBytes).base64EncodedString(),
+            "exitCode": Int(result.status),
+            "timedOut": result.timedOut,
+            "stdoutBase64": result.stdout.base64EncodedString(),
+            "stderrBase64": result.stderr.base64EncodedString(),
         ]
-    }
-
-    private static func read(_ pipe: Pipe) async -> Data {
-        await withCheckedContinuation { continuation in
-            DispatchQueue.global().async {
-                continuation.resume(returning: pipe.fileHandleForReading.readDataToEndOfFile())
-            }
-        }
     }
 }

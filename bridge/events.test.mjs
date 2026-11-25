@@ -241,3 +241,22 @@ test("a new connection while the window is open reads its log again from a reset
   assert.equal(mind.subscriptions.filter((s) => s.alive && s.consumes.includes("*")).length, 1);
   await events.end();
 });
+
+/** A link whose connection never comes, and how often the job asked for it. */
+const nowhere = () => {
+  const link = { asked: 0, each: () => () => {}, now: () => (link.asked++, new Promise(() => {})), broke() {}, current: () => undefined };
+  return link;
+};
+const timeouts = () => process.getActiveResourcesInfo().filter((kind) => kind === "Timeout").length;
+
+test("an idle job runs no timer, and a send that waits for the connection is asked for once", async () => {
+  const link = nowhere();
+  const before = timeouts();
+  const events = deviceEvents({ link, say: () => {}, everyMs: 5 });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(timeouts(), before, "no timer while nothing waits");
+  events.add(presence(1));
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(link.asked, 1, "one send, waiting for the connection; not one more each 5 ms");
+  await events.end(10);
+});

@@ -81,10 +81,10 @@ let bridge = try MainActor.assumeIsolated { () throws -> JSONLineProcess in
 // the peer says these on its own queues: they go to the bridge in order, from the main queue
 peer.send = { signal in
     let line = signal.json
-    DispatchQueue.main.async { MainActor.assumeIsolated { bridge.send(["job": "live", "signal": line]) } }
+    DispatchQueue.main.async { MainActor.assumeIsolated { _ = bridge.send(["job": "live", "signal": line]) } }
 }
 peer.kept = { facts in
-    DispatchQueue.main.async { MainActor.assumeIsolated { bridge.send(facts.merging(["job": "live"]) { $1 }) } }
+    DispatchQueue.main.async { MainActor.assumeIsolated { _ = bridge.send(facts.merging(["job": "live"]) { $1 }) } }
 }
 
 // MARK: statistics, one line a second: CPU of this process, and per watcher and track what is sent

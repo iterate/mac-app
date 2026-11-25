@@ -174,7 +174,7 @@ function readLog(device, say) {
   };
 }
 
-/** The queue and its sender on `link` (mind.mjs): `add(event)`, `send()` (also every `everyMs`),
+/** The queue and its sender on `link` (mind.mjs): `add(event)`, `send()` (also `everyMs` after an event waits),
  *  `log(line)` (the window's read: `{ log: "start" | "older" | "stop", before? }`), `end()`. */
 export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) {
   let endRead = () => {};
@@ -233,13 +233,28 @@ export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) 
       else say({ failed });
     }
   }
-  const send = () => (sending ??= sendOnce().finally(() => (sending = undefined)));
-  const timer = setInterval(() => send().catch(() => {}), everyMs);
+  // One timer, armed by the first event that waits, and again after a send that left some: an
+  // idle job wakes nothing, and a send that waits for the connection is not asked again.
+  let timer;
+  let isEnded = false;
+  const arm = () => {
+    if (timer || sending || isEnded || !waiting.length) return;
+    timer = setTimeout(() => {
+      timer = undefined;
+      send().catch(() => {});
+    }, everyMs);
+  };
+  const send = () =>
+    (sending ??= sendOnce().finally(() => {
+      sending = undefined;
+      arm();
+    }));
 
   return {
     add(event) {
       waiting.push(event);
       bound();
+      arm();
     },
     send,
     waiting: () => waiting,
@@ -257,7 +272,9 @@ export function deviceEvents({ link, say, mostWaiting = 2_000, everyMs = 200 }) 
     },
     /** What waits goes, for at most `ms`; then the read back ends. */
     async end(ms = 5000) {
-      clearInterval(timer);
+      isEnded = true;
+      clearTimeout(timer);
+      timer = undefined;
       const flushed = (async () => {
         while (waiting.length) await send();
       })();

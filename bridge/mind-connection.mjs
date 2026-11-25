@@ -45,18 +45,30 @@ export function lastingConnection({
       let link;
       let upAt;
       let timer;
+      // a connection that hangs is given up; one that comes after that is closed, and runs no hook:
+      // a hook on it would undo the hooks of the connection that is up by then
+      let isGivenUp = false;
+      const late = () => {
+        if (isGivenUp) throw new Error("a connection that came after it was given up");
+      };
       try {
         const attempt = (async () => {
-          link = await connect();
+          const made = await connect();
+          if (isGivenUp) return dispose(made);
+          link = made;
           await connected(link);
-          for (const hook of hooks) await hook(link);
+          late();
+          for (const hook of hooks) {
+            await hook(link);
+            late();
+          }
           return link;
         })();
-        // a connection that hangs is given up; one that comes after that is closed
         await Promise.race([
           attempt,
           new Promise((_, reject) => {
             timer = setTimeout(() => {
+              isGivenUp = true;
               attempt.then(dispose, () => {});
               reject(new Error(`no connection in ${giveUpAfterMs / 1000} s`));
             }, giveUpAfterMs);

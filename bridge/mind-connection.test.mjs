@@ -99,3 +99,26 @@ test("now(ms) gives up after ms with the reason the last connection did not come
   await assert.rejects(link.now(50), /no connection to the mind in 0.05 s: connect ECONNREFUSED/);
   link.stop();
 });
+
+test("a connection that comes after it was given up runs no hook, and the one that is up keeps its own", async () => {
+  const mind = fakeMind();
+  let comeLate;
+  let tries = 0;
+  const ran = [];
+  const { link } = start(mind, {
+    giveUpAfterMs: 30,
+    sleep: () => new Promise((resolve) => setImmediate(resolve)),
+    connect: () => (++tries === 1 ? new Promise((resolve) => (comeLate = resolve)) : mind.connect()),
+  });
+  link.each((connection) => ran.push(connection));
+  const up = await link.now();
+  assert.deepEqual(ran, [up]);
+  // the first try comes now, long after it was given up
+  const late = await mind.connect();
+  comeLate(late);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(ran, [up], "no hook on the late connection");
+  assert.equal(late.isOpen, false, "it is closed");
+  assert.equal(link.current(), up);
+  link.stop();
+});

@@ -16,7 +16,11 @@
 //                   The text goes out AT ONCE ({ copy }), before the movie is whole. Then the last
 //                   words come, a model says what is under each mark (seen.json), summary.md goes
 //                   up, and `capture/ready` is added to the context /captures/<id>
-//   finish: true    the movie and the voice are whole: PUT the rest; `capture/received` is added
+//   finish: true    the movie is whole: PUT the rest, capture.json once; `capture/received` is
+//                   added. With the microphone on it waits first for `heard` (at most 15 s): the
+//                   last words can come after the movie
+// The connection is the one that is up at each call (a capture outlives a reconnect), and each
+// event has the idempotency key `<type>/<id>`.
 //   discard: true   remove what went up
 // A capture whose first line is `finish` stayed on this Mac: it does `copy` and `finish` at once,
 // with the words of its transcript.json (README, "Capture").
@@ -35,6 +39,7 @@
 //     picture once (seen.json): a claim, not an observation.
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { isConnectionError } from "./mind-connection.mjs";
 import { putFile } from "./upload.mjs";
 
 /**
@@ -51,8 +56,30 @@ export function captureUpload({
   kept = false,
   say,
   withinMs = 60_000,
+  lastWordsMs = 15_000,
 }) {
   const directory = `/captures/${capture}`;
+
+  /** `call(itx)` on the connection that is up now, and once more on the next one when the
+   *  connection broke under it: a capture outlives a reconnect. */
+  async function onMind(call) {
+    for (let tries = 1; ; tries++) {
+      const connection = await link.now(withinMs);
+      try {
+        return await call(connection.itx);
+      } catch (error) {
+        if (tries >= 2 || !isConnectionError(error)) throw error;
+        link.broke(connection, error);
+      }
+    }
+  }
+  /** One event of the capture's context, once: a second try of an event that went is no second event. */
+  const append = (type, payload) =>
+    onMind((itx) => itx.cd(directory).append({ type, payload, idempotencyKey: `${type}/${capture}` })).catch((error) => {
+      if (error?.code !== "IDEMPOTENCY_CONFLICT") throw error;
+    });
+  /** What a file needs of the connection: its way through it when the signed route fails. */
+  const r2 = { put: (...args) => onMind((itx) => itx.r2.put(...args)) };
 
   // Every file a capture can have (Capture.swift): the links are asked for before the files exist.
   const names = [
@@ -73,19 +100,20 @@ export function captureUpload({
     ...Array.from({ length: 6 }, (_, index) => `accessibility/${index}.json`),
   ];
 
-  /** The connection, and the links: asked for at once, awaited when first needed. */
+  /** The links: asked for at once, awaited when first needed. They are good on any connection. */
   const ready = (async () => {
-    const { itx } = await link.now(withinMs);
-    const urls = await Promise.all(
-      names.map((name) =>
-        itx.r2.presign({
-          key: `${directory.slice(1)}/${name}`,
-          method: "PUT",
-          expiresInSeconds: 3600,
-        }),
+    const urls = await onMind((itx) =>
+      Promise.all(
+        names.map((name) =>
+          itx.r2.presign({
+            key: `${directory.slice(1)}/${name}`,
+            method: "PUT",
+            expiresInSeconds: 3600,
+          }),
+        ),
       ),
     );
-    return { itx, links: Object.fromEntries(names.map((name, index) => [name, urls[index].url])) };
+    return { links: Object.fromEntries(names.map((name, index) => [name, urls[index].url])) };
   })();
   // a failure is told at `finish`
   ready.catch(() => {});
@@ -108,9 +136,9 @@ export function captureUpload({
         md: "text/markdown; charset=utf-8",
         js: "text/javascript; charset=utf-8",
       }[file.split(".").pop()] ?? "application/octet-stream";
-    const upload = ready.then(({ itx, links }) =>
+    const upload = ready.then(({ links }) =>
       putFile({
-        r2: itx.r2,
+        r2,
         key: `${directory.slice(1)}/${file}`,
         path,
         contentType,
@@ -217,8 +245,14 @@ export function captureUpload({
 
   /** What is under each mark, as a model reads it: for a reader that gets no picture. At most 20
    *  seconds, and a picture that fails is left out. */
-  async function see(itx, panels) {
+  async function see(panels) {
     const seen = {};
+    let itx;
+    try {
+      ({ itx } = await link.now(withinMs));
+    } catch {
+      return undefined;
+    }
     let timer;
     try {
       await Promise.race([
@@ -301,15 +335,15 @@ export function captureUpload({
         }),
       }),
     );
-    const early = Promise.all(
-      ["capture.json", ...filesIn().filter((file) => file.endsWith(".jpg"))].map(put),
-    );
+    // capture.json goes once, at `finish`: it grows until then (the movie's and the voice's
+    // observations), and nothing reads it in the mind before `capture/received`
+    const early = Promise.all(filesIn().filter((file) => file.endsWith(".jpg")).map(put));
     // a failure of these is told at `finish`, which awaits `readying`
     early.catch(() => {});
     heard.catch(() => {});
     readying = (async () => {
-      const { itx } = await ready;
-      const [words, seen] = await Promise.all([heard, see(itx, manifest.panels)]);
+      await ready;
+      const [words, seen] = await Promise.all([heard, see(manifest.panels)]);
       if (seen) {
         writeFileSync(join(folder, "seen.json"), JSON.stringify(seen));
         await put("seen.json");
@@ -348,10 +382,7 @@ export function captureUpload({
       await Promise.all([put("summary.md"), early]);
       // the same text with the last words: it takes the first one's place on the clipboard
       say({ copy: text });
-      await itx.cd(directory).append({
-        type: "capture/ready",
-        payload: { capture, summary: `${directory}/summary.md`, pictures: manifest.panels.length },
-      });
+      await append("capture/ready", { capture, summary: `${directory}/summary.md`, pictures: manifest.panels.length });
     })();
     // a failure is told at `finish`, which awaits it
     readying.catch(() => {});
@@ -359,14 +390,19 @@ export function captureUpload({
 
   async function finish() {
     try {
-      // the words that came are all there are
+      // The app sends the last words and `heard` when its speech model has finished, which can be
+      // after the movie: they are waited for, at most `lastWordsMs`. Then the words that came are
+      // all there are.
+      if (!kept && manifestNow().microphone) {
+        let timer;
+        await Promise.race([voiceWhole, new Promise((resolve) => (timer = setTimeout(resolve, lastWordsMs)))]);
+        clearTimeout(timer);
+      }
       voiceIsWhole();
       if (!readying) copy();
       const manifest = manifestNow();
       const files = filesIn();
-      const { itx } = await ready;
-      // the movie's times are in the manifest now: it goes up again
-      uploads.delete("capture.json");
+      await ready;
       const rest = Promise.all(
         ["capture.json", ...files]
           .sort((a, b) => statSync(join(folder, a)).size - statSync(join(folder, b)).size)
@@ -377,22 +413,15 @@ export function captureUpload({
       await readying;
       await rest;
       const window = manifest.observations.find((observation) => observation.kind === "window");
-      const context = itx.cd(directory);
-      await context.append({
-        type: "events.iterate.com/itx/described",
-        payload: {
-          description: `A capture from ${manifest.by.device}, ${clock(manifest.durationMs)} long${window ? `, of ${window.application}` : ""}: a person talked, clicked and drew on the screen. Its files are under ${directory}/; start with summary.md.`,
-          metadata: { capture },
-        },
+      await append("events.iterate.com/itx/described", {
+        description: `A capture from ${manifest.by.device}, ${clock(manifest.durationMs)} long${window ? `, of ${window.application}` : ""}: a person talked, clicked and drew on the screen. Its files are under ${directory}/; start with summary.md.`,
+        metadata: { capture },
       });
-      await context.append({
-        type: "capture/received",
-        payload: {
-          capture,
-          manifest: `${directory}/capture.json`,
-          summary: `${directory}/summary.md`,
-          files: [...uploads.keys()],
-        },
+      await append("capture/received", {
+        capture,
+        manifest: `${directory}/capture.json`,
+        summary: `${directory}/summary.md`,
+        files: [...uploads.keys()],
       });
       say({ progress: 1 });
       say({ done: true });
@@ -407,9 +436,8 @@ export function captureUpload({
   async function discard() {
     await Promise.allSettled(uploads.values());
     try {
-      const { itx } = await ready;
-      if (uploads.size)
-        await itx.r2.delete([...uploads.keys()].map((file) => `${directory.slice(1)}/${file}`));
+      await ready;
+      if (uploads.size) await onMind((itx) => itx.r2.delete([...uploads.keys()].map((file) => `${directory.slice(1)}/${file}`)));
     } catch {}
     say({ discarded: true });
   }

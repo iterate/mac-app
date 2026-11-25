@@ -125,3 +125,40 @@ test("`finish` puts every file under /captures/<id>/, then adds capture/ready an
     rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test("the last words after the movie still go in, capture.json goes up once, and a reconnect between copy and finish sends it", async () => {
+  const folder = captureFolder();
+  writeFileSync(join(folder, "1.jpg"), "a picture");
+  writeFileSync(join(folder, "2.jpg"), "another picture");
+  const id = basename(folder);
+  const puts = [];
+  const mind = fakeMind({ stored: (key) => puts.push(key) });
+  const said = [];
+  const link = mindLink({ name: "test.mac", connect: mind.connect, sleep: () => new Promise((resolve) => setTimeout(resolve, 5)), say: () => {} });
+  const job = captureUpload({ link, mind: "example.com", capture: id, folder, kept: false, say: (line) => said.push(line), withinMs: 2000 });
+  try {
+    job.take({ copy: true });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // the connection ends between the copy and the finish
+    mind.connections[0].end();
+    // capture.json grows before the finish (the movie's observations)
+    const manifest = JSON.parse(readFileSync(join(folder, "capture.json"), "utf8"));
+    writeFileSync(join(folder, "capture.json"), JSON.stringify({ ...manifest, observations: [{ kind: "screen", t: 0, more: "x".repeat(200) }] }));
+    const finished = job.take({ finish: true });
+    // the speech model ends after the movie
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    job.take(segment(8500, 8900, "the last words"));
+    job.take({ heard: true });
+    await finished;
+    assert.deepEqual(said.at(-1), { done: true });
+    assert.equal(puts.filter((key) => key === `captures/${id}/capture.json`).length, 1, "capture.json went once");
+    assert.match(mind.files.get(`captures/${id}/capture.json`).bytes.toString(), /"screen"/);
+    assert.match(readFileSync(join(folder, "transcript.json"), "utf8"), /the last words/);
+    assert.match(mind.files.get(`captures/${id}/summary.md`).bytes.toString(), /the last words/);
+    const events = mind.appended.filter((event) => event.path === `/captures/${id}`).map((event) => event.type);
+    assert.deepEqual(events, ["capture/ready", "events.iterate.com/itx/described", "capture/received"]);
+  } finally {
+    link.stop();
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
