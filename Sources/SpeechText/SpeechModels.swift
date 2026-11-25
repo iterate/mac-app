@@ -16,7 +16,7 @@ public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
         case onThisMac(AsrModelVersion)
         /// MLX, in the Python process of `FourierModel`, with the files of `FourierRuntime`.
         case mlx
-        /// OpenAI's realtime transcription, with a token of the lent mind (`OpenAIAccess`), else
+        /// OpenAI's realtime transcription, through the lent mind with its key (`OpenAIAccess`), else
         /// the OpenAI key of this Mac (`OpenAIKey`).
         case openAI
     }
@@ -62,7 +62,7 @@ public struct SpeechModel: Equatable, Hashable, Sendable, Identifiable {
     public static let all = local + [gptLiveTranscribe]
 
     /// The model of a stored choice. With no choice (or an id the list does not have) it is
-    /// `gptLiveTranscribe` when OpenAI can be reached (`isOnline`: the lent mind mints tokens, or
+    /// `gptLiveTranscribe` when OpenAI can be reached (`isOnline`: the lent mind opens its sockets, or
     /// this Mac has a key of its own), else `localDefault`. A choice of an online model that cannot
     /// be reached is `localDefault` too. `isOnDisk` says which files are on this Mac.
     public static func chosen(_ id: String?, isOnline: Bool = false, isOnDisk: (SpeechModel) -> Bool = { $0.isOnDisk }) -> SpeechModel {

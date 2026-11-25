@@ -306,15 +306,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return self?.speechChoice.chosen ?? .default
         }
         // GPT Live Transcribe at OpenAI, with the local model behind it, and a socket that waits for
-        // the next dictation (README, "Dictation"). Each socket opens with a token of the lent
-        // mind, minted with the mind's own key; else with this Mac's own key.
+        // the next dictation (README, "Dictation"). Each socket opens through the lent mind, with
+        // the mind's own key (its bridge relays the frames); else with this Mac's own key.
         let openAIKey = speechChoice.openAIKey
-        let mindToken = model.mindToken
+        let mindSockets = model.mindSockets
         let speechLog = AppLog("speech")
         let standby = OpenAIStandby(log: { speechLog.info($0) })
         let access = OpenAIAccess.mindFirst(
-            mind: { await MainActor.run { mindToken.mind.map { ($0, mindToken.mint) } } },
-            mint: { try await mindToken.token() },
+            mind: { await MainActor.run { mindSockets.mind.map { ($0, mindSockets.state) } } },
+            socket: { try await MainActor.run { try mindSockets.socket() } },
             key: { openAIKey?.read() },
             log: { speechLog.info($0) })
         speech.online = { [weak self] model, words, heard in
@@ -325,20 +325,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         speechChoice.onChange = { [weak self] in
             guard let self else { return }
             if speechChoice.chosen.isLocal { standby.drop("the speech model is \(speechChoice.chosen.id)") }
-            else if !speechChoice.isOnline { standby.drop("no mind token and no OpenAI key") }
+            else if !speechChoice.isOnline { standby.drop("no mind with OpenAI and no OpenAI key") }
             stateDidChange()
         }
-        // a standby of another mind holds that mind's token's socket: it goes at a switch
-        var tokenMind = mindToken.mind
-        mindToken.onChange = { [weak self] in
+        // a standby of another mind is a socket through that mind: it goes at a switch
+        var socketsMind = mindSockets.mind
+        mindSockets.onChange = { [weak self] in
             guard let self else { return }
-            if mindToken.mind != tokenMind {
-                standby.drop("the lent mind is now \(mindToken.mind ?? "none")")
-                tokenMind = mindToken.mind
+            if mindSockets.mind != socketsMind {
+                standby.drop("the lent mind is now \(mindSockets.mind ?? "none")")
+                socketsMind = mindSockets.mind
             }
-            speechChoice.mindIs(mindToken.mind, mint: mindToken.mint)
+            speechChoice.mindIs(mindSockets.mind, state: mindSockets.state)
         }
-        speechChoice.mindIs(mindToken.mind, mint: mindToken.mint)
+        speechChoice.mindIs(mindSockets.mind, state: mindSockets.state)
         // a socket that slept is likely dead: the next dictation opens a new one
         standbySleep = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
             standby.drop("the Mac sleeps")

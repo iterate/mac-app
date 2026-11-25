@@ -149,7 +149,7 @@ wide. Its sidebar has two groups. **This Mac** is what holds whichever mind the 
   a trial and a copy are updated by hand), and **Copy Prompt**.
 - **Dictation**: fn to hold and talk (× removes it: ⌥⇧D stays), double-tap to keep it on,
   Always listen (off unless set; "Listening"), the orange row when macOS acts on 🌐 too, the speech model and its list, "OpenAI through <mind>:
-  the mind's key" when the lent mind makes tokens, your own OpenAI key (optional; set or removed;
+  the mind's key" when sockets open through the lent mind, your own OpenAI key (optional; set or removed;
   it is never shown), whether the pill shows the
   words, where the text goes (where the cursor is, or on the clipboard only), and the default
   expression of the word list (below).
@@ -687,48 +687,70 @@ with a lock while it stays on and the time since the start.
   kept from fn down, so a socket that opens late loses no word (its setup costs about 0.8 s). Each
   delta is the pill's text; at the end a commit asks for the final, which the word list repairs.
   Each socket serves one dictation. When OpenAI fails (no session within 5 s, an error
-  while you talk, no final within 5 s of the end, or no token and no key), the local model (Oruk
+  while you talk, no final within 5 s of the end, or no socket through the mind and no key), the local model (Oruk
   Fourier 2B, or Parakeet v3 until Fourier is on this Mac) hears what was kept and
   what comes after, and `app.log` says why ("gpt-live-transcribe failed after 0.31 s (…): the local
-  model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the socket),
-  `StreamRecognizer.swift` (the stream, with the local model behind it).
+  model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the session on a socket),
+  `OpenAISocket.swift` (the two sockets: `DirectSocket`, URLSession's WebSocket with this Mac's
+  key, and `RelaySocket`, relayed by the mind's bridge), `StreamRecognizer.swift` (the stream,
+  with the local model behind it).
 
   A new socket is ready 0.74 to 1.02 s after it opens (p50 0.82 s, measured on 25 November 2026),
   so the live words came late. Thus one **standby socket** waits for the next dictation, opened
   and configured with the same session in the background when a dictation ends. fn down takes it
   when it is open, has the word list's current keywords and answers a ping (0.5 s at most); else
   it closes it and opens a new socket, as before. There is at most one standby, and only while
-  GPT Live Transcribe is the model and a token or a key opens it; each socket it opens gets a fresh
-  token. It closes when the model, the lent mind or the key changes, when the Mac sleeps, and after 10 minutes unused (then the next one opens only after the next
+  GPT Live Transcribe is the model and the mind or a key opens it; it opens the same way as a new
+  socket, through the mind or with the key. It closes when the model, the lent mind or the key changes, when the Mac sleeps, and after 10 minutes unused (then the next one opens only after the next
   dictation, so an idle Mac holds no socket for long). One that the server or the network closes
   is dropped, with a line in the log and nothing else. An open socket with no sound costs nothing:
   OpenAI bills transcription by its audio. The speech log says, for each dictation,
-  `gpt-live-transcribe is ready 12 ms after the start (standby, mind token)`, or `(new, own key)`:
-  where the socket came from, and what opened it. The code: `OpenAIStandby.swift`.
-- **The OpenAI key is the mind's.** A mind keeps its OpenAI key at `/secrets/openai` in its vault
-  and never hands it out. For each socket the app asks the bridge of the mind it is lent to (the
-  job `openai`, `bridge/openai.mjs`, on the connection that the word list uses) for a token: the
-  job sends `POST https://api.openai.com/v1/realtime/client_secrets` through `itx.fetch` with the
-  header `Authorization: Bearer getSecret("/secrets/openai")`, the vault puts the key in on the way,
-  and OpenAI answers a client secret (`ek_…`) that opens one socket within 60 s, as the mind's own
-  Meet captions do. The socket then gets the usual `session.update`, with the keywords. A mint
-  takes 0.3 to 0.6 s on an open connection (25 November 2026); the standby hides it. It has 5 s;
-  a token is used at once and never kept, logged or written. Whether the lent mind can mint is
-  found out with one mint at each new connection of its bridge and by each dictation's: a mind
-  with no `/secrets/openai` (or a key OpenAI refuses) says no, and then Oruk Fourier 2B is the default,
-  unless this Mac has a key of its own. Settings › Dictation says "OpenAI through <mind>: the
-  mind's key" when the mind can mint. The code: `MindToken.swift`, `SpeechText/OpenAIAccess.swift`.
+  `gpt-live-transcribe is ready 8 ms after the start (standby, mind)`, or `(new, own key)`:
+  where the socket came from, and what opened it. A new socket's line, and the standby's, also
+  say when OpenAI's `session.created` came after the socket's start. The ping of a standby
+  through the mind asks the mind's bridge, which answers when it holds the socket open (about
+  8 ms); a direct ping goes to OpenAI (about 140 ms). The code: `OpenAIStandby.swift`.
+- **The OpenAI key is the mind's, and the socket opens through the mind.** A mind keeps its
+  OpenAI key at `/secrets/openai` in its vault and never hands it out. For each socket the app asks
+  the bridge of the mind it is lent to (the job `openai`, `bridge/openai.mjs`, on the connection
+  that the word list uses). The job opens the socket with `itx.fetch` of
+  `https://api.openai.com/v1/realtime?intent=transcription` with `Upgrade: websocket` and the
+  header `Authorization: Bearer getSecret("/secrets/openai")`: the vault puts the key in on the way,
+  and the mind hands the upstream socket back to the bridge (iterate/private #1394, on iterate.com
+  since 25 November 2026). The bridge relays the socket's text frames both ways over its JSON lines
+  (`{ job: "openai", socket: <id>, frame }`, with `open`, `opened`, `ping`/`pong`, `close`,
+  `closed { code, reason }` and `failed { refused? }`). OpenAI's frames are JSON text, the sound
+  base64 inside `input_audio_buffer.append`, so only text goes. The socket gets the usual
+  `session.update`, with the keywords; the stream, the standby, the billed log and the fallbacks
+  are the same as on a socket of this Mac's own key. A drop of the bridge's connection to the mind,
+  or the end of its process, fails every socket of it, and a dictation on one falls back. No key,
+  no token and no frame is logged; the words of a failure have any key cut out.
+
+  Measured on the owner's Mac on 25 November 2026 with the synthetic fixture (`say -o`, 4.4 s, 8
+  dictations each, in a test copy, no word list): from the socket's start to `session.created`,
+  p50 515 ms through iterate.com against 497 ms direct (p90 578 against 535 ms); from the end of
+  the dictation to the final text, p50 0.65 s through the mind against 0.67 s direct (p90 0.72
+  against 0.68 s). With the mind's 59 terms through the mind: 506 ms and 0.67 s.
+
+  Whether the lent mind can open a socket is found out with one socket opened and closed at each
+  new connection of its bridge (no sound, so OpenAI bills nothing), and by each dictation's: a mind
+  with no `/secrets/openai` (or a key OpenAI refuses) says no (`refused`), and then Oruk Fourier 2B
+  is the default, unless this Mac has a key of its own. A failure with no `refused` (no
+  connection, no socket within 5 s, an error of OpenAI's servers) may pass, and the mind is asked
+  again at the next dictation. Settings › Dictation says "OpenAI through <mind>: the mind's key"
+  when a socket opened through the mind. The code: `MindSockets.swift`,
+  `SpeechText/OpenAIAccess.swift`, `SpeechText/OpenAISocket.swift`.
 - **Your own key is optional, and only behind the mind's.** It is used when this Mac is lent to no
-  mind, the mind said no, or a mint failed (the log says "no token from <mind> (…): your own
-  key"). It is in the login Keychain: a generic password of the service
+  mind, the mind said no, or a socket through the mind did not open (the log says "no socket
+  through <mind> (…): your own key"). It is in the login Keychain: a generic password of the service
   `com.iterate.mac-app.openai` and the account `api-key`. It is never in a file, a log, `ui.state`
-  (which says only `speech.openAIKey`: true or false, and `speech.openAIMind`: the mind that mints, or null) or a process's arguments. Settings ›
+  (which says only `speech.openAIKey`: true or false, and `speech.openAIMind`: the mind that sockets open through, or null) or a process's arguments. Settings ›
   Dictation says whether it is set, takes a new one in a secure field, and removes it. Or from a
   terminal: `OPENAI_API_KEY=… npx @iterate-com/mac-app --openai-key-from-env` gives the key to
   `security` on its standard input, trusts /Applications/iterate.app to read it, and says only
   "OpenAI key stored". A copy with a home of its own uses the service with `.` and the first 12
   hex digits of the SHA-256 of its home's path, so a test never reads or writes the owner's item.
-  With no stored choice, a mind that mints or a key that comes makes GPT Live Transcribe the model,
+  With no stored choice, a mind that opens sockets or a key that comes makes GPT Live Transcribe the model,
   and when neither is left it is the local default (Oruk Fourier 2B); a choice in Settings stays.
 - **The local models run on this Mac.** With them no sound and no text leaves the Mac. Each one
   shows its size and whether it is on this Mac. A model that is not on this Mac downloads when you
@@ -844,7 +866,7 @@ the microphone. Each layer has its events, and the layer above reads them.
   0.8 s under 0.35, 0.2 s after the last piece of speech. A stretch of 30 s ends there and the
   next one starts.
 - **The transcription stream.** A key's listening is one stretch (`dictation-<n>`, `input-<n>`):
-  the chosen model hears it as before (GPT Live Transcribe with the mind's token, or the local
+  the chosen model hears it as before (GPT Live Transcribe through the mind, or the local
   model), and each final segment gets its wall times from the stretch's first sample. Always
   listen's stretches (`listen-<n>`) go to the LOCAL model alone, once, when the stretch ends: no
   sound leaves the Mac without a key. While a key listens, Always listen holds: the stretch that
@@ -879,11 +901,12 @@ listen's partials.
 ## Online and local: what the bench measured, and what is not built
 
 The owner's own voice (`--set owner`, 25 November 2026) confirmed the synthetic set, and
-GPT Live Transcribe is now the default with a key ("Dictation" above), with the mind's key through
-a token of 60 s (or this Mac's own key) and Parakeet only when OpenAI fails. What follows is the
+GPT Live Transcribe is now the default with a key ("Dictation" above), with the mind's key on a
+socket opened through the mind (or this Mac's own key) and a local model only when OpenAI fails. What follows is the
 measure and the proposal before it; the parts not built are local always (both models on every
 dictation) and the wait of X for OpenAI's final. The key in the mind is built, in another shape
-than proposed below: the token fixes no session, and the app sends its own `session.update`.
+than proposed below: no client secret, the socket itself opens through the mind, and the app sends
+its own `session.update`.
 
 What the speech bench measured on 24 November 2026 (`harness/speech-bench`, the synthetic set: 48
 clips of `say -o`, two voices; an M4 Max on a home connection).
@@ -962,7 +985,7 @@ job is on it:
 | `capture` | one capture into the mind, by its id                                         | `Capture`          | `capture.mjs`   |
 | `input`   | one input into the mind, by its id                                           | `MindInput`        | `input.mjs`     |
 | `words`   | the mind's `words.md` into the app's copy                                    | `Words`            | `words.mjs`     |
-| `openai`  | a 60 s token for OpenAI, minted with the mind's own key, by its id           | `MindToken`        | `openai.mjs`    |
+| `openai`  | OpenAI's realtime sockets through the mind, with its key, relayed by id      | `MindSockets`      | `openai.mjs`    |
 
 stdin and stdout are JSON lines, each tagged with its job (`{ job, … }`); a line with no job is the
 process's own (`{ connected }`, `{ failed }`). `events`, `live` and `record` run from `{ job, start:

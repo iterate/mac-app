@@ -123,7 +123,7 @@ private func loud(_ seconds: Double) -> [Float] { (0..<Int(seconds * 16_000)).ma
 private let words = WordList(markdown: "- Beelink: bee link\n- iterate\n")
 
 /// The recognizer of the app, against the fake, with a fake local model behind it: with this
-/// Mac's `key`, or with `access` (a mind's tokens).
+/// Mac's `key`, or with `access` (a mind's sockets).
 private func recognizer(
     _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", access: OpenAIAccess? = nil, connect: Double = 2, final: Double = 2,
     standby: OpenAIStandby? = nil
@@ -421,121 +421,275 @@ final class OpenAIStandbyTests: XCTestCase {
     }
 }
 
-/// The mind's tokens (`OpenAIAccess`, `bridge/openai.mjs`): each socket opens with a fresh one,
-/// and this Mac's key is behind them.
+/// The mind's bridge as `RelaySocket` sees it (`bridge/openai.mjs`): it opens each socket "through
+/// the mind" and answers its frames as OpenAI would (`answer`), on a queue of its own. It records
+/// every line it got. `refuses` is the mind's no (no /secrets/openai); `drop()` is a drop of its
+/// link: every socket fails.
+private final class FakeBridge: @unchecked Sendable {
+    private let queue = DispatchQueue(label: "fake-bridge")
+    private let lock = NSLock()
+    private var sockets: [String: RelaySocket] = [:]
+    private var open: Set<String> = []
+    private var got: [[String: Any]] = []
+    private var next = 0
+    let answer: @Sendable ([String: Any]) -> [[String: Any]]
+    var refuses = false
+    var answersPings = true
+
+    init(answer: @escaping @Sendable ([String: Any]) -> [[String: Any]]) {
+        self.answer = answer
+    }
+
+    /// A socket of the mind, as `MindSockets.socket()` makes one.
+    func socket() -> RelaySocket {
+        let id: String = lock.withLock { next += 1; return "\(next)" }
+        let socket = RelaySocket(id: id) { [weak self] line in self?.queue.async { self?.take(line) } }
+        lock.withLock { sockets[id] = socket }
+        return socket
+    }
+
+    var lines: [[String: Any]] { lock.withLock { got } }
+    /// The frames sent to OpenAI, as their types.
+    var types: [String] {
+        lines.compactMap { ($0["frame"] as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] }?["type"] as? String }
+    }
+    var opens: Int { lines.filter { $0["open"] as? Bool == true }.count }
+    var closes: [Int] { lines.compactMap { $0["close"] as? Bool == true ? $0["code"] as? Int : nil } }
+    var openCount: Int { lock.withLock { open.count } }
+
+    func drop() {
+        queue.async { [self] in
+            let all: [RelaySocket] = lock.withLock {
+                defer { open = [] }
+                return open.compactMap { sockets[$0] }
+            }
+            for socket in all { socket.take(["socket": socket.id, "failed": "the connection to the mind ended"]) }
+        }
+    }
+
+    private func take(_ line: [String: Any]) {
+        lock.withLock { got.append(line) }
+        guard let id = line["socket"] as? String, let socket = lock.withLock({ sockets[id] }) else { return }
+        if line["open"] as? Bool == true {
+            if refuses { socket.take(["socket": id, "failed": "itx.fetch: no stored mind secret for getSecret(\"/secrets/openai\")", "refused": true]); return }
+            lock.withLock { _ = open.insert(id) }
+            socket.take(["socket": id, "opened": true])
+            socket.take(["socket": id, "frame": #"{"type":"session.created"}"#])
+        } else if let frame = line["frame"] as? String {
+            guard lock.withLock({ open.contains(id) }), let message = (try? JSONSerialization.jsonObject(with: Data(frame.utf8))) as? [String: Any] else { return }
+            for event in answer(message) {
+                let text = String(decoding: try! JSONSerialization.data(withJSONObject: event), as: UTF8.self)
+                socket.take(["socket": id, "frame": text])
+            }
+        } else if let ping = line["ping"] as? Int {
+            if answersPings, lock.withLock({ open.contains(id) }) { socket.take(["socket": id, "pong": ping]) }
+        } else if line["close"] as? Bool == true {
+            lock.withLock { _ = open.remove(id) }
+        }
+    }
+}
+
+/// A socket of the mind (`OpenAIAccess.mindFirst`, `RelaySocket`, `bridge/openai.mjs`): the same
+/// stream, standby and fallbacks on the bridge's relay as on the direct socket, and this Mac's key
+/// behind the mind.
 final class OpenAIAccessTests: XCTestCase {
-    /// A mind that mints `ek_1`, `ek_2`, … (or fails), and counts its mints.
     private final class Mind: @unchecked Sendable {
-        private let lock = NSLock()
-        private var count = 0
-        var mint: MindMint
         let name: String
-        let fails: Bool
-        init(_ name: String = "example.com", mint: MindMint = .unknown, fails: Bool = false) {
+        let state: MindOpenAI
+        init(_ name: String = "example.com", state: MindOpenAI = .unknown) {
             self.name = name
-            self.mint = mint
-            self.fails = fails
-        }
-        var mints: Int { lock.withLock { count } }
-        func token() throws -> String {
-            let n = lock.withLock { count += 1; return count }
-            if fails { throw NSError(domain: "mind", code: 1, userInfo: [NSLocalizedDescriptionKey: "no token from the mind in 5 s"]) }
-            return "ek_\(n)"
+            self.state = state
         }
     }
 
-    private func access(_ mind: Mind?, key: String? = nil, log: Lines = Lines()) -> OpenAIAccess {
-        .mindFirst(
-            mind: { mind.map { ($0.name, $0.mint) } }, mint: { try mind!.token() }, key: { key }, log: { log.add($0) })
+    private func access(_ mind: Mind?, bridge: FakeBridge, key: String? = nil, log: Lines = Lines()) -> OpenAIAccess {
+        .mindFirst(mind: { mind.map { ($0.name, $0.state) } }, socket: { bridge.socket() }, key: { key }, log: { log.add($0) })
     }
 
-    private func dictate(_ server: FakeOpenAI, _ access: OpenAIAccess, standby: OpenAIStandby? = nil) async -> (notes: [String], text: [String]) {
+    private func dictate(
+        _ server: FakeOpenAI, _ access: OpenAIAccess, standby: OpenAIStandby? = nil, seconds: Double = 0.5, during: () -> Void = {}
+    ) async -> (notes: [String], text: [String]) {
         let heard = Events()
         let listening = recognizer(server, heard: heard, access: access, standby: standby)
         listening.start()
-        await talk(listening, seconds: 0.5)
+        await talk(listening, seconds: seconds / 2)
+        during()
+        await talk(listening, seconds: seconds / 2)
         let segments = await listening.finish()
         return (heard.notes, segments.map(\.text))
     }
 
     func testTheOrderIsTheLentMindUnlessItSaidNoThenTheOwnKey() {
-        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .unknown, hasKey: true), .mindToken("a.com"))
-        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .yes, hasKey: false), .mindToken("a.com"))
-        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .no, hasKey: true), .ownKey)
-        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", mint: .no, hasKey: false), nil)
-        XCTAssertEqual(OpenAIAccess.order(mind: nil, mint: .unknown, hasKey: true), .ownKey)
-        XCTAssertEqual(OpenAIAccess.order(mind: nil, mint: .unknown, hasKey: false), nil)
-        XCTAssertEqual(OpenAISource.mindToken("a.com").words, "mind token")
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", state: .unknown, hasKey: true), .mind("a.com"))
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", state: .yes, hasKey: false), .mind("a.com"))
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", state: .no, hasKey: true), .ownKey)
+        XCTAssertEqual(OpenAIAccess.order(mind: "a.com", state: .no, hasKey: false), nil)
+        XCTAssertEqual(OpenAIAccess.order(mind: nil, state: .unknown, hasKey: true), .ownKey)
+        XCTAssertEqual(OpenAIAccess.order(mind: nil, state: .unknown, hasKey: false), nil)
+        XCTAssertEqual(OpenAISource.mind("a.com").words, "mind")
         XCTAssertEqual(OpenAISource.ownKey.words, "own key")
     }
 
-    func testTheSocketOpensWithTheMindsTokenNotTheKey() async throws {
-        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with the mind's key"))
-        let mind = Mind()
-        let dictation = await dictate(server, access(mind, key: "sk-own"))
-        XCTAssertEqual(server.authorizations, ["Bearer ek_1"])
-        XCTAssertEqual(dictation.text, ["with the mind's key"])
-        XCTAssertTrue(dictation.notes.contains { $0.contains("ms after the start (new, mind token)") }, "\(dictation.notes)")
-        XCTAssertFalse(dictation.notes.contains { $0.contains("ek_") || $0.contains("sk-") }, "no token or key in the log")
+    func testADictationThroughTheMindRelaysEveryFrameAndOpensNoDirectSocket() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: ["the bee"], final: "the bee link is up"))
+        let dictation = await dictate(server, access(Mind(), bridge: bridge, key: "sk-own"))
+        XCTAssertEqual(dictation.text, ["the Beelink is up"])
+        XCTAssertEqual(server.connectionCount, 0, "no direct socket: the mind's key")
+        XCTAssertEqual(bridge.opens, 1)
+        XCTAssertEqual(bridge.types.first, "session.update")
+        XCTAssertEqual(bridge.types.last, "input_audio_buffer.commit")
+        let bytes = bridge.lines.compactMap { ($0["frame"] as? String).flatMap { try? JSONSerialization.jsonObject(with: Data($0.utf8)) as? [String: Any] } }
+            .filter { $0["type"] as? String == "input_audio_buffer.append" }
+            .compactMap { ($0["audio"] as? String).flatMap { Data(base64Encoded: $0) }?.count }.reduce(0, +)
+        XCTAssertEqual(Double(bytes) / 2, 12_000, accuracy: 3, "every sample went, at 24 kHz")
+        // the stream closed it at its end: the bridge closes the upstream with 1000
+        try await until("the close") { bridge.closes == [1000] }
+        XCTAssertTrue(dictation.notes.contains { $0.contains("ms after the start (new, mind)") && $0.contains("session.created") }, "\(dictation.notes)")
+        XCTAssertTrue(dictation.notes.contains { $0.contains("OpenAI billed 4 s") }, "the billed log on the relay too: \(dictation.notes)")
+        XCTAssertFalse(bridge.lines.contains { "\($0)".contains("sk-") }, "no key goes to the bridge")
     }
 
-    func testTheStandbyAsksForAFreshTokenForEachSocket() async throws {
-        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "on the standby"))
+    func testTheStandbyOpensThroughTheMindAndAnswersItsPingThere() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "on the standby"))
         let lines = Lines()
         let standby = OpenAIStandby(log: { lines.add($0) })
-        let mind = Mind(mint: .yes)
-        let access = access(mind)
+        let access = access(Mind(state: .yes), bridge: bridge)
         _ = await dictate(server, access, standby: standby)
         try await until("the standby") { standby.isHeld }
-        XCTAssertTrue(lines.all.contains { $0.hasSuffix("with 2 keywords (mind token)") }, "\(lines.all)")
+        XCTAssertTrue(lines.all.contains { $0.contains("with 2 keywords (mind); session.created ") }, "\(lines.all)")
         let second = await dictate(server, access, standby: standby)
-        XCTAssertTrue(second.notes.contains { $0.contains("(standby, mind token)") }, "\(second.notes)")
+        XCTAssertTrue(second.notes.contains { $0.contains("(standby, mind)") }, "\(second.notes)")
         XCTAssertEqual(second.text, ["on the standby"])
+        XCTAssertTrue(bridge.lines.contains { $0["ping"] != nil }, "the ping goes to the bridge")
         try await until("the next standby") { standby.isHeld }
-        // three sockets, three tokens: none is used twice
-        XCTAssertEqual(server.authorizations, ["Bearer ek_1", "Bearer ek_2", "Bearer ek_3"])
-        XCTAssertFalse(lines.all.contains { $0.contains("ek_") }, "no token in the log")
+        XCTAssertEqual(bridge.opens, 3)
+        XCTAssertEqual(bridge.types.filter { $0 == "session.update" }.count, 3, "each socket is configured once, with the keywords")
     }
 
-    func testAStandbyOfAnotherMindIsClosedAndANewSocketOpens() async throws {
-        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+    func testAStandbyWhoseBridgeDoesNotAnswerThePingIsClosedAndANewSocketOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "new"))
         let lines = Lines()
         let standby = OpenAIStandby(log: { lines.add($0) })
-        standby.prepare(setup(server), access: access(Mind("old.com")))
+        let access = access(Mind(), bridge: bridge)
+        standby.prepare(setup(server), access: access)
         try await until("the standby") { standby.isHeld }
-        let dictation = await dictate(server, access(Mind("new.com")), standby: standby)
-        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, mind token)") }, "\(dictation.notes)")
-        XCTAssertTrue(lines.all.contains("the standby socket is of another credential (mind token): closed, and a new one"), "\(lines.all)")
+        bridge.answersPings = false
+        let dictation = await dictate(server, access, standby: standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, mind)") }, "\(dictation.notes)")
+        XCTAssertTrue(lines.all.contains("the standby socket did not answer a ping: closed, and a new one"), "\(lines.all)")
+        XCTAssertEqual(bridge.closes.first, 1001, "the bridge closes the standby's upstream")
     }
 
-    func testAMintThatFailsFallsBackToTheOwnKey() async throws {
+    func testAStandbyThroughAnotherMindIsClosedAndANewSocketOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "new"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        standby.prepare(setup(server), access: access(Mind("old.com"), bridge: bridge))
+        try await until("the standby") { standby.isHeld }
+        let dictation = await dictate(server, access(Mind("new.com"), bridge: bridge), standby: standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new, mind)") }, "\(dictation.notes)")
+        XCTAssertTrue(lines.all.contains("the standby socket is of another source (mind): closed, and a new one"), "\(lines.all)")
+    }
+
+    func testAMindThatRefusesFallsBackToTheOwnKey() async throws {
         let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with my key"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "never"))
+        bridge.refuses = true
         let log = Lines()
-        let mind = Mind(fails: true)
-        let dictation = await dictate(server, access(mind, key: "sk-own", log: log))
+        let dictation = await dictate(server, access(Mind(), bridge: bridge, key: "sk-own", log: log))
         XCTAssertEqual(server.authorizations, ["Bearer sk-own"])
         XCTAssertEqual(dictation.text, ["with my key"])
         XCTAssertTrue(dictation.notes.contains { $0.contains("(new, own key)") }, "\(dictation.notes)")
-        XCTAssertEqual(log.all, ["no token from example.com (no token from the mind in 5 s): your own key"])
+        XCTAssertEqual(log.all, [#"no socket through example.com (itx.fetch: no stored mind secret for getSecret("/secrets/openai")): your own key"#])
+    }
+
+    func testADropOfTheBridgesLinkWhileTalkingFallsBackToTheLocalModel() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "never"))
+        let dictation = await dictate(server, access(Mind(), bridge: bridge), seconds: 1) { bridge.drop() }
+        XCTAssertEqual(dictation.text, ["heard on this Mac"])
+        XCTAssertTrue(dictation.notes.contains { $0.contains("the connection to the mind ended") && $0.contains("the local model hears it") }, "\(dictation.notes)")
+        XCTAssertFalse(bridge.types.contains("input_audio_buffer.commit"), "no commit after the failure")
     }
 
     func testAMindThatSaidNoIsNotAskedAndTheOwnKeyOpens() async throws {
         let server = try FakeOpenAI(answer: openAI(deltas: [], final: "with my key"))
-        let mind = Mind(mint: .no)
-        _ = await dictate(server, access(mind, key: "sk-own"))
-        XCTAssertEqual(mind.mints, 0)
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "never"))
+        _ = await dictate(server, access(Mind(state: .no), bridge: bridge, key: "sk-own"))
+        XCTAssertEqual(bridge.opens, 0)
         XCTAssertEqual(server.authorizations, ["Bearer sk-own"])
     }
 
-    func testNoTokenAndNoKeyIsTheLocalModel() async throws {
+    func testNoSocketThroughTheMindAndNoKeyIsTheLocalModel() async throws {
         let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
-        let failing = await dictate(server, access(Mind(fails: true)))
-        XCTAssertEqual(failing.text, ["heard on this Mac"])
-        XCTAssertTrue(failing.notes.contains { $0.contains("no token from the mind in 5 s") && $0.contains("the local model hears it") }, "\(failing.notes)")
-        let none = await dictate(server, access(nil))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "never"))
+        bridge.refuses = true
+        let refused = await dictate(server, access(Mind(), bridge: bridge))
+        XCTAssertEqual(refused.text, ["heard on this Mac"])
+        XCTAssertTrue(refused.notes.contains { $0.contains("no stored mind secret") && $0.contains("the local model hears it") }, "\(refused.notes)")
+        let none = await dictate(server, access(nil, bridge: bridge))
         XCTAssertEqual(none.text, ["heard on this Mac"])
         XCTAssertTrue(none.notes.contains { $0.contains("no OpenAI key") }, "\(none.notes)")
         XCTAssertEqual(server.connectionCount, 0)
+    }
+}
+
+/// The relay socket alone, against lines the test writes as the bridge.
+final class RelaySocketTests: XCTestCase {
+    func testItsLinesAndItsEnd() async throws {
+        let sent = Lines()
+        let socket = RelaySocket(id: "9") { line in
+            sent.add(String(decoding: try! JSONSerialization.data(withJSONObject: line, options: .sortedKeys), as: UTF8.self))
+        }
+        let heard = Lines()
+        let ended = Lines()
+        socket.start(heard: { heard.add($0) }, ended: { ended.add($0) })
+        socket.send("a")
+        XCTAssertFalse(socket.take(["socket": "9", "frame": "b"]))
+        XCTAssertEqual(sent.all, [#"{"open":true,"socket":"9"}"#, #"{"frame":"a","socket":"9"}"#])
+        XCTAssertEqual(heard.all, ["b"])
+        // a ping with no pong is no, within its bound
+        let started = Date()
+        let answered = await socket.ping(within: 0.1)
+        XCTAssertFalse(answered)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 1)
+        // OpenAI's close ends it once: nothing is heard or sent after it
+        XCTAssertTrue(socket.take(["socket": "9", "closed": true, "code": 1011, "reason": "server error"]))
+        XCTAssertEqual(ended.all, ["the socket closed (1011: server error)"])
+        socket.take(["socket": "9", "frame": "late"])
+        socket.send("late")
+        socket.close(normal: true)
+        socket.fail("again")
+        XCTAssertEqual(heard.all, ["b"])
+        XCTAssertEqual(ended.all.count, 1)
+        XCTAssertEqual(sent.all.count, 3, "\(sent.all)")
+        let pinged = await socket.ping(within: 1)
+        XCTAssertFalse(pinged)
+    }
+
+    func testTheAppsCloseTellsTheBridgeAndHearsNothing() {
+        let sent = Lines()
+        let socket = RelaySocket(id: "1") { line in sent.add("\(line["close"] != nil ? "close \(line["code"]!)" : "other")") }
+        let ended = Lines()
+        socket.start(heard: { _ in }, ended: { ended.add($0) })
+        socket.close(normal: false)
+        socket.take(["socket": "1", "failed": "the connection to the mind ended"])
+        XCTAssertEqual(sent.all, ["other", "close 1001"])
+        XCTAssertEqual(ended.all, [])
+    }
+
+    func testAFailureThatClosesTellsTheBridgeAndTheStream() {
+        let sent = Lines()
+        let socket = RelaySocket(id: "1") { line in sent.add("\(line["close"] != nil ? "close \(line["code"]!)" : "other")") }
+        let ended = Lines()
+        socket.start(heard: { _ in }, ended: { ended.add($0) })
+        socket.fail("the lent mind changed", closing: true)
+        XCTAssertEqual(sent.all, ["other", "close 1001"])
+        XCTAssertEqual(ended.all, ["the lent mind changed"])
     }
 }
 

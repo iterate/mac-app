@@ -4,15 +4,15 @@ import SwiftUI
 /// THE SPEECH MODEL of dictation, the input bar and capture: the person's stored choice among
 /// `SpeechModel.all` (README, "Dictation"). A model that is not on this Mac is downloaded first,
 /// with its progress in the panel; it is the model once it loaded. With no stored choice the model
-/// is GPT Live Transcribe when OpenAI can be reached (the lent mind mints tokens with its own key,
-/// `MindToken`, or this Mac has a key of its own), else Oruk Fourier 2B. A capture always uses a
+/// is GPT Live Transcribe when OpenAI can be reached (the lent mind opens its sockets with its own
+/// key, `MindSockets`, or this Mac has a key of its own), else Oruk Fourier 2B. A capture always uses a
 /// local model (`local`). While only Parakeet v3 is on this Mac, it stands in for Fourier, and the
 /// installed app gets Fourier in the background (`getDefault`).
 ///
 /// It also holds whether the person's own OpenAI key is set (`OpenAIKey`, in the login Keychain),
 /// and sets and removes it for Settings › Dictation. The key itself is read only by the online
-/// recognizer, at each start of a listening, off the main thread, and only when the lent mind gives
-/// no token.
+/// recognizer, at each start of a listening, off the main thread, and only when the lent mind opens
+/// no socket.
 @MainActor
 final class SpeechChoice: ObservableObject {
     static let key = "speechModel"
@@ -30,11 +30,11 @@ final class SpeechChoice: ObservableObject {
 
     /// Whether this Mac has an OpenAI key of its own. A drawing has none.
     @Published private(set) var hasKey = false
-    /// The lent mind, when it mints OpenAI tokens with its own key (`MindToken`).
-    @Published private(set) var mintingMind: String?
+    /// The lent mind, when it opens OpenAI's sockets with its own key (`MindSockets`).
+    @Published private(set) var openAIMind: String?
 
     /// Whether GPT Live Transcribe can run: through the lent mind, or with this Mac's own key.
-    var isOnline: Bool { mintingMind != nil || hasKey }
+    var isOnline: Bool { openAIMind != nil || hasKey }
 
     private let log = AppLog("speech")
     private var gettingTask: Task<Void, Never>?
@@ -115,12 +115,12 @@ final class SpeechChoice: ObservableObject {
         follow(why: "your own OpenAI key is \(isSet ? "set" : "gone")")
     }
 
-    /// The lent mind, and what it can do with OpenAI (`MindToken.onChange`).
-    func mindIs(_ mind: String?, mint: MindMint) {
-        let minting = mint == .yes ? mind : nil
-        guard minting != mintingMind else { return }
-        mintingMind = minting
-        follow(why: minting.map { "\($0) mints OpenAI tokens" } ?? "no lent mind mints OpenAI tokens")
+    /// The lent mind, and what it can do with OpenAI (`MindSockets.onChange`).
+    func mindIs(_ mind: String?, state: MindOpenAI) {
+        let through = state == .yes ? mind : nil
+        guard through != openAIMind else { return }
+        openAIMind = through
+        follow(why: through.map { "OpenAI opens through \($0)" } ?? "no lent mind opens OpenAI")
     }
 
     /// The default model follows what can reach OpenAI; a stored choice stays.
@@ -201,7 +201,7 @@ final class SpeechChoice: ObservableObject {
                 if case .downloading(let part) = getting.load { return ["id": getting.id, "downloading": part] }
                 return ["id": getting.id, "loading": true]
             } ?? NSNull(),
-            "failure": failure ?? NSNull(), "fnLines": fnLines, "openAIKey": hasKey, "openAIMind": mintingMind ?? NSNull(),
+            "failure": failure ?? NSNull(), "fnLines": fnLines, "openAIKey": hasKey, "openAIMind": openAIMind ?? NSNull(),
         ]
     }
 }

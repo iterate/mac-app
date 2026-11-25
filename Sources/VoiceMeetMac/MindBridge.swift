@@ -5,7 +5,7 @@ import VoiceMeetCore
 /// (the iterate CLI's own sign-in; the lend, `iterate provide` with the Mac's key, is another
 /// process and another identity). Every feature that reaches the mind as the person sends its
 /// lines here, each tagged with its job: `events` (DeviceEvents), `live` (DeviceLive), `record`
-/// (DeviceRecord), `capture` (Capture), `input` (MindInput) and `words` (Words).
+/// (DeviceRecord), `capture` (Capture), `input` (MindInput), `words` (Words) and `openai` (MindSockets).
 ///
 /// There is one bridge for a mind, its name and its helpers (`of`). It runs while someone holds
 /// it: the session while the Mac is lent to that mind (`AppModel`), a capture until it is sent, an
