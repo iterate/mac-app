@@ -74,8 +74,16 @@ public final class SpeechSession {
 
     private var current: Listening?
     private var round = 0
+    /// The newest text of the listening that goes, as heard and with its corrections.
+    private var newest: HeardText?
 
     public func isListening(for client: SpeechClient) -> Bool { current?.client === client }
+
+    /// What `client`'s listening heard so far, with the word list's corrections: the text of its
+    /// newest `.text` event is this one's `text`. Nil when another one listens, or none.
+    public func heard(for client: SpeechClient) -> HeardText? {
+        isListening(for: client) ? newest : nil
+    }
     public var isListening: Bool { current != nil }
 
     /// The line while the model comes, for the pill and the bar alike.
@@ -100,6 +108,7 @@ public final class SpeechSession {
             return .notAllowed
         }
         if let current { finish(current.client) }
+        newest = nil
         round += 1
         let round = round
         let model = model()
@@ -157,7 +166,9 @@ public final class SpeechSession {
         case .loading(.downloading(let part)): client.speech(.phase(.loading(downloading: part)))
         case .loading(.loading): client.speech(.phase(.loading(downloading: nil)))
         case .ready: client.speech(.phase(.listening))
-        case .partial(let said): client.speech(.text(said))
+        case .partial(let said):
+            newest = said
+            client.speech(.text(said.text))
         case .failed(let reason):
             current?.source.stop()
             current?.recognizer.cancel()

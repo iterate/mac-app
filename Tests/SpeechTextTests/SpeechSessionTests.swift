@@ -56,6 +56,23 @@ final class SpeechRecognizerTests: XCTestCase {
         XCTAssertEqual(segments.first?.words.first?.text, "the bee link", "the words stay as the model heard them")
     }
 
+    func testThePartialTextKeepsWhatWasHeardBesideItsCorrections() async {
+        let heard = Heard()
+        let words = WordList(markdown: "- Beelink: b-link\n")
+        let recognizer = SpeechRecognizer(model: .default, words: words, engine: { Engine(text: "on the b link box") }) { heard.add($0) }
+        recognizer.start()
+        recognizer.push(loud(2.5))
+        recognizer.push(quiet(1))
+        try? await Task.sleep(nanoseconds: 1_200_000_000)
+        let segments = await recognizer.finish()
+        let partials = heard.lock.withLock { heard.events.compactMap { if case .partial(let said) = $0 { return said } else { return nil } } }
+        let last = try? XCTUnwrap(partials.last)
+        XCTAssertEqual(last?.heard, "on the b link box")
+        XCTAssertEqual(last?.text, "on the Beelink box")
+        XCTAssertEqual(last?.corrections.map(\.heard), ["b link"])
+        XCTAssertEqual(segments.map(\.text), ["on the Beelink box"], "the written text has the term alone")
+    }
+
     func testTheSoundThatWaitsForTheModelIsBounded() async {
         let heard = Heard()
         let recognizer = SpeechRecognizer(model: .default, words: .empty, engine: {

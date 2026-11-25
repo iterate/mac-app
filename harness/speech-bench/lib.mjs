@@ -42,18 +42,21 @@ export function wordList(markdown) {
 }
 
 const escape = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-const key = (form) => form.toLowerCase().split(/\s+/).filter(Boolean).join(" ");
+/** `WordList.separators`: any run of them between the words of a form matches any other. */
+const separators = "[\\s\\-\\u2010-\\u2015\\u2212_]";
+const key = (form) => form.toLowerCase().split(new RegExp(`${separators}+`, "u")).filter(Boolean).join(" ");
 
 /** The app's `WordList.repair`: each wrong form, and each term in another case, written as the term. */
 export function repairer(entries) {
   const forms = entries
-    .flatMap(({ term, wrong }) => [term, ...wrong].map((form) => ({ form, term })))
-    .filter(({ form }) => form.trim())
+    .flatMap(({ term, wrong }) => [term, ...wrong].map((form) => ({ form: key(form), term })))
+    .filter(({ form }) => form)
     .sort((a, b) => b.form.length - a.form.length);
   if (!forms.length) return (text) => text;
-  const terms = new Map(forms.map(({ form, term }) => [key(form), term]));
+  const terms = new Map();
+  for (const { form, term } of forms) if (!terms.has(form)) terms.set(form, term);
   const pattern = new RegExp(
-    `(?<![\\p{L}\\p{N}])(?:${forms.map(({ form }) => form.split(/\s+/).map(escape).join("\\s+")).join("|")})(?![\\p{L}\\p{N}])`,
+    `(?<![\\p{L}\\p{N}])(?:${forms.map(({ form }) => form.split(" ").map(escape).join(`${separators}+`)).join("|")})(?![\\p{L}\\p{N}])`,
     "giu",
   );
   return (text) => text.replace(pattern, (match) => terms.get(key(match)) ?? match);

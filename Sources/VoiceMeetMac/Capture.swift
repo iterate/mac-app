@@ -781,7 +781,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             segmentsSent += 1
         case .partial(let said):
             // what was just heard, while the capture runs: the sign that the microphone hears the person
-            if isRunning, !said.isEmpty { say("…" + said.suffix(44), startedAt: zero) }
+            if isRunning, !said.text.isEmpty { say("…" + said.text.suffix(44), startedAt: zero) }
         case .note(let note):
             log.info("capture \(id): voice: \(note)")
         case .failed(let reason):

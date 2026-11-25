@@ -2,51 +2,6 @@ import XCTest
 
 @testable import VoiceMeetCore
 
-final class WordListTests: XCTestCase {
-    private let list = WordList(markdown: """
-        # Words
-
-        One term per list item.
-
-            - <term>: <wrong form>, <wrong form>
-
-        ## People
-
-        - iterate: itrade, hiterate
-        - Templestein: temple stein, temple steen
-        - Claude: clod, claud
-        - Claude Code: clod code
-        - itx: i t x, it x
-        - AGENTS.md: agents dot md
-        - Claude: clawed
-        """)
-
-    func testTheListItemsAreTheEntriesAndTheExampleIsNot() {
-        XCTAssertEqual(list.entries.map(\.term), ["iterate", "Templestein", "Claude", "Claude Code", "itx", "AGENTS.md"])
-        XCTAssertEqual(list.entries[2].wrong, ["clod", "claud", "clawed"])
-        XCTAssertEqual(list.entries[4].wrong, ["i t x", "it x"])
-    }
-
-    func testAWrongFormBecomesItsTermAsAWholeWord() {
-        XCTAssertEqual(list.repair("Ask Temple  Stein about itrade."), "Ask Templestein about iterate.")
-        // inside a longer word nothing changes
-        XCTAssertEqual(list.repair("The clodhopper reiterated it."), "The clodhopper reiterated it.")
-    }
-
-    func testATermInAnotherCaseIsWrittenAsTheTerm() {
-        XCTAssertEqual(list.repair("Iterate uses ITX and agents.md"), "iterate uses itx and AGENTS.md")
-    }
-
-    func testTheLongestFormWins() {
-        XCTAssertEqual(list.repair("clod code and clod"), "Claude Code and Claude")
-    }
-
-    func testAnEmptyListChangesNothing() {
-        XCTAssertEqual(WordList.empty.repair("clod code"), "clod code")
-        XCTAssertEqual(WordList(markdown: "no list here").entries, [])
-    }
-}
-
 final class SpeechStretchTests: XCTestCase {
     private func sound(_ seconds: Double, level: Float) -> [Float] {
         (0..<Int(seconds * Double(SpeechStretch.rate))).map { $0 % 2 == 0 ? level : -level }

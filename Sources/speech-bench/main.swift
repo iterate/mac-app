@@ -90,7 +90,7 @@ for path in arguments {
     try file.read(into: buffer)
     let samples = audio.samples(of: buffer)
     let recognizer = SpeechRecognizer(model: model, words: words, engine: { engine }) { event in
-        if case .partial(let text) = event, !text.isEmpty { partials.add(text) }
+        if case .partial(let said) = event, !said.text.isEmpty { partials.add(said.text) }
     }
     partials.reset()
     recognizer.start()

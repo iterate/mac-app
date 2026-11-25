@@ -687,7 +687,12 @@ with a lock while it stays on and the time since the start.
   from anywhere but this setting. The list does two things. A second, small model (Parakeet CTC 110M, 100 MB)
   listens for the terms in what you said and puts a term in where the sound fits it; it works
   with each model above, as all of them share v3's tokenizer. Then each wrong form, and each term
-  in another case, is written as the term. Dictation uses the list of the mind this Mac is lent
+  in another case, is written as the term: whole words only, the longest form first, and any run
+  of separators between a form's words (spaces, `-`, the hyphens and dashes U+2010 to U+2015, the
+  minus U+2212, `_`) matches any other run, so `b link` also catches `b-link` and `B‑Link`. A full
+  stop is no separator: "b. Link the box" ends a sentence. While you dictate, the pill shows each
+  such repair as the heard words struck through and the term after them; the text that is
+  written has the term alone. Dictation uses the list of the mind this Mac is lent
   to; the input bar uses the list of the mind the input goes to; a capture uses its mind's. A mind
   with no `words.md` gives no list.
 - **How the text goes in.** The text is put on the clipboard, ⌘V is pressed for you, and the

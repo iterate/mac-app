@@ -97,6 +97,11 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
  * and `seed` the events its context `/devices/<NAME>` holds before the app connects (as an earlier
  * run of the app left them).
  */
+/** The word list of the speech fixtures: the owner's forms of Beelink (25 November 2026) among them. */
+const WORDS = "- Herdr: herder, hurdur, her dr\n- Beelink: b-link, be link, bee link, b link\n- Doppler: dopler\n";
+/** A heard form of Beelink, with any separator (`WordList.separators`). */
+const WRONG_BEELINK = /(?<![\p{L}\p{N}])(?:b|be|bee)[\s\-\u2010-\u2015\u2212_]+link(?![\p{L}\p{N}])/iu;
+
 function withMind(home, minds = [{ mind: MIND, name: NAME }], { words, seed } = {}) {
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
@@ -760,7 +765,7 @@ const scenarios = {
   "dictation-fixture": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio (about 480 MB) and `say`",
     async run({ app, home }) {
-      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
+      withMind(home, undefined, { words: WORDS });
       const sentence = "Herdr runs on the Beelink with Doppler";
       const fixture = join(home, "fixture.aiff");
       // `say -o` writes a file and plays nothing
@@ -780,6 +785,8 @@ const scenarios = {
         await run.control("dictation.stop");
         const said = await until("the dictation's text", 60, async () => (await run.state()).dictation.lastText);
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
+        // the written text has the terms alone: no heard form of the list, with any separator
+        if (WRONG_BEELINK.test(said)) throw new Error(`"${said}" has a heard form of Beelink`);
         // Core ML compiles the model for the Neural Engine once for each build of the app (its
         // cache, ~/Library/Caches/<bundle or process>/com.apple.e5rt.e5bundlecache, is the
         // build's): the first run after a build waits 12 to 24 s for the model, every later
@@ -799,7 +806,7 @@ const scenarios = {
   "dictation-fn": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
     async run({ app, home }) {
-      withMind(home, undefined, { words: "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n" });
+      withMind(home, undefined, { words: WORDS });
       const fixture = join(home, "fixture.aiff");
       execFileSync("say", ["-o", fixture, "Herdr runs on the Beelink with Doppler"]);
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
@@ -879,7 +886,7 @@ const scenarios = {
       const fixture = join(home, "fixture.aiff");
       execFileSync("say", ["-o", fixture, "[[slnc 2000]] Herdr runs on the Beelink with Doppler"]);
       const words = join(home, "words.md");
-      writeFileSync(words, "- Herdr: herder, hurdur, her dr\n- Beelink: bee link, b link\n- Doppler: dopler\n");
+      writeFileSync(words, WORDS);
       const lines = execFileSync(bench, ["--model", "parakeet-v3", "--words", words, fixture], { encoding: "utf8", timeout: 300_000, stdio: ["ignore", "pipe", "ignore"] })
         .trim()
         .split("\n")
@@ -887,6 +894,7 @@ const scenarios = {
       const segments = lines.at(-1).segments ?? [];
       const text = segments.map((segment) => segment.text).join(" ");
       for (const term of ["Herdr", "Beelink", "Doppler"]) if (!text.includes(term)) throw new Error(`"${text}" has no ${term}`);
+      if (WRONG_BEELINK.test(text)) throw new Error(`"${text}" has a heard form of Beelink`);
       // the words start after the silence, on the capture's clock
       if (!(segments[0].t >= 1500 && segments[0].t < 3500 && segments.at(-1).to > segments[0].t))
         throw new Error(`the segments' times are ${JSON.stringify(segments.map(({ t, to }) => [t, to]))}`);
