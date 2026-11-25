@@ -71,38 +71,55 @@ export function callJob({ link, say, refreshAt = 0.75 }) {
 
   const facetOf = (p) => p.connection.itx.cd(p.context).facets.get("call");
 
+  /** The row, then the facet's join. The publication is known at once, so that an offer that
+   *  comes before the join answers waits only for the row (`offer`). */
   async function join(id, input) {
     const kind = String(input?.kind ?? "");
     const context = String(input?.context ?? "");
     if (!(input?.listen === true && !kind) && !KINDS.includes(kind)) throw new Error(`a call takes a camera or a screen, not "${kind}"`);
     if (!CONTEXT.test(context)) throw new Error(`"${context.slice(0, 100)}" is no agent's path`);
-    const connection = await link.now(20_000);
+    const t0 = Date.now();
     const page = pageOf(input.device ?? "mac", id);
     const admission = randomUUID();
-    const p = { connection, context, kind, page, admission, as: input.as ? String(input.as) : undefined };
+    const p = { context, kind, page, admission, as: input.as ? String(input.as) : undefined };
     publications.set(id, p);
-    // the row first: the facet knows a page by it
-    p.row = await within(
-      connection.itx.cd(context).subscribe({
-        name: page,
-        consumes: [ROW_SET],
-        target: (batch) => {
-          for (const event of JSON.parse(JSON.stringify(batch))) {
-            const payload = event?.payload;
-            if (event?.type === ROW_SET && payload?.target === null && p.as && payload.name === p.as)
-              end(id, "the page that asked for it left the call");
-          }
-        },
-      }),
-      10_000,
-      "the call's row",
+    // the row first: the facet knows a page by it. True when the publication is still there.
+    p.rowMade = (async () => {
+      p.connection = await link.now(20_000);
+      p.row = await within(
+        p.connection.itx.cd(context).subscribe({
+          name: page,
+          consumes: [ROW_SET],
+          target: (batch) => {
+            for (const event of JSON.parse(JSON.stringify(batch))) {
+              const payload = event?.payload;
+              if (event?.type === ROW_SET && payload?.target === null && p.as && payload.name === p.as)
+                end(id, "the page that asked for it left the call");
+            }
+          },
+        }),
+        10_000,
+        "the call's row",
+      );
+      if (publications.get(id) === p) return true;
+      p.row?.[Symbol.dispose]?.();
+      return false;
+    })();
+    p.joined = p.rowMade.then(async (here) => {
+      if (!here) return false;
+      const t1 = Date.now();
+      const answer = await within(facetOf(p).join(page, { admit: admission, seq: 1 }), 15_000, "the call's join");
+      const joined = JSON.parse(JSON.stringify(answer ?? {}));
+      p.admission = joined.admission || admission;
+      refresh(id, joined.ttlS);
+      tell(id, { joined: { iceServers: joined.iceServers ?? [], ttlS: joined.ttlS, page, ms: { row: t1 - t0, join: Date.now() - t1 } } });
+      return true;
+    });
+    p.joined.then(
+      () => (p.joinSettled = true),
+      () => (p.joinSettled = true),
     );
-    if (publications.get(id) !== p) return p.row?.[Symbol.dispose]?.();
-    const answer = await within(facetOf(p).join(page, { admit: admission, seq: 1 }), 15_000, "the call's join");
-    const joined = JSON.parse(JSON.stringify(answer ?? {}));
-    p.admission = joined.admission || admission;
-    refresh(id, joined.ttlS);
-    tell(id, { joined: { iceServers: joined.iceServers ?? [], ttlS: joined.ttlS, page } });
+    await p.joined;
   }
 
   /** The TURN credentials again, at `refreshAt` of their life: a join with the admission. */
@@ -125,23 +142,38 @@ export function callJob({ link, say, refreshAt = 0.75 }) {
     p.timer.unref?.();
   }
 
+  /** The facet's publish. It may go while the join is still on its way (the app sends the offer
+   *  at once when it has one ready): when the facet refuses it before the join answered, it goes
+   *  once more after the join. */
   async function offer(id, input) {
     const p = publications.get(id);
     if (!p) throw new Error("no such publication: join first");
     const sdp = String(input?.sdp ?? "");
     const mid = String(input?.mid ?? "");
     if (!sdp || !mid) throw new Error("an offer has an sdp and a mid");
-    const answer = await within(facetOf(p).signal(p.page, { publish: p.kind, sdp, mid }, p.admission), 15_000, "the call's publish");
+    if (!(await p.rowMade)) return;
+    const t0 = Date.now();
+    const publish = () => within(facetOf(p).signal(p.page, { publish: p.kind, sdp, mid }, p.admission), 15_000, "the call's publish");
+    let answer;
+    let early = !p.joinSettled;
+    try {
+      answer = await publish();
+    } catch (error) {
+      if (!early || !(await p.joined) || publications.get(id) !== p) throw error;
+      early = "again";
+      answer = await publish();
+    }
     if (publications.get(id) !== p) return;
     p.mid = mid;
-    tell(id, { answer: { sdp: String(answer?.sdp ?? "") } });
+    tell(id, { answer: { sdp: String(answer?.sdp ?? ""), ms: Date.now() - t0, early } });
   }
 
   async function step(id, input) {
     const p = publications.get(id);
     if (!p) throw new Error("no such publication: join first");
+    const t0 = Date.now();
     const answer = await within(facetOf(p).signal(p.page, input, p.admission), 15_000, "the call's signal");
-    tell(id, { signaled: JSON.parse(JSON.stringify(answer ?? {})) });
+    tell(id, { signaled: JSON.parse(JSON.stringify(answer ?? {})), ms: Date.now() - t0 });
   }
 
   async function leave(id, why) {
@@ -149,6 +181,8 @@ export function callJob({ link, say, refreshAt = 0.75 }) {
     if (!p) return tell(id, { left: String(why ?? "") });
     publications.delete(id);
     clearTimeout(p.timer);
+    // a leave while the row is still on its way: the row goes when it comes (`join`)
+    if (!p.connection || !p.row) return tell(id, { left: String(why ?? "") });
     const facet = facetOf(p);
     if (p.mid) await within(facet.signal(p.page, { unpublish: p.kind, mid: p.mid }, p.admission), 10_000, "unpublish").catch(() => {});
     await within(facet.leave(p.page, p.admission), 10_000, "leave").catch((error) => tell(id, { failed: `leave: ${describe(error)}` }));
