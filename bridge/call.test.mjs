@@ -62,11 +62,15 @@ test("a publication joins the call as a page of its own, publishes its offer, an
   assert.equal(join.args[1].seq, 1);
   const admission = join.args[1].admit;
   assert.ok(admission);
-  assert.deepEqual(of(said, "joined")[0].joined, { iceServers: [{ urls: "turn:turn.example:3478", username: "u", credential: "c" }], ttlS: 14_400, page });
+  const { ms: joinMs, ...joined } = of(said, "joined")[0].joined;
+  assert.deepEqual(joined, { iceServers: [{ urls: "turn:turn.example:3478", username: "u", credential: "c" }], ttlS: 14_400, page });
+  assert.deepEqual(Object.keys(joinMs), ["row", "join"], "the row's and the join's milliseconds, for call-run");
 
   await job.take({ publication: "p1", offer: { sdp: "v=0 offer", mid: "0" } });
   assert.deepEqual(calls[1].args, [page, { publish: "screen", sdp: "v=0 offer", mid: "0" }, admission]);
-  assert.deepEqual(of(said, "answer")[0], { publication: "p1", answer: { sdp: "v=0 answer" } });
+  const { ms, ...answer } = of(said, "answer")[0].answer;
+  assert.deepEqual(answer, { sdp: "v=0 answer", early: false });
+  assert.equal(typeof ms, "number");
 
   await job.take({ publication: "p1", leave: "a browser screen was chosen" });
   assert.deepEqual(
@@ -163,11 +167,84 @@ test("a page that only listens joins with no kind, and passes its own steps to t
   const page = job.pageOf("rx");
   await job.take({ publication: "rx", signal: { subscribe: ["mac-call-jonas-mac-p1:screen"] } });
   assert.deepEqual(calls[1].args.slice(0, 2), [page, { subscribe: ["mac-call-jonas-mac-p1:screen"] }]);
-  assert.deepEqual(of(said, "signaled")[0], { publication: "rx", signaled: {} });
+  assert.deepEqual(of(said, "signaled")[0], { publication: "rx", signaled: {}, ms: of(said, "signaled")[0].ms });
   await job.end();
   link.stop();
 });
 
 test("a page's name keeps to the facet's characters", () => {
   assert.equal(pageOf("jane's mac/x", "abc-123"), "mac-call-jane-s-mac-x-abc-123");
+});
+
+test("an offer that comes before the join answered goes at once; when the facet refuses it then, it goes again after the join", async () => {
+  const mind = fakeMind();
+  const { calls } = fakeCall(mind);
+  // the facet's join answers only when the test says so; a publish before it is refused, as the
+  // facet refuses a page it does not know yet ("Join the call first.")
+  let joinedNow;
+  let isJoined = false;
+  const answerJoin = new Promise((resolve) => (joinedNow = resolve));
+  const facet = mind.facets.call;
+  mind.facets.call = (path, connection) => {
+    const real = facet(path, connection);
+    return {
+      ...real,
+      async join(page, input) {
+        const answer = await real.join(page, input);
+        await answerJoin;
+        isJoined = true;
+        return answer;
+      },
+      async signal(page, step, admission) {
+        if (!isJoined) {
+          calls.push({ method: "refused", args: [page, step, admission] });
+          throw new Error("Join the call first.");
+        }
+        return real.signal(page, step, admission);
+      },
+    };
+  };
+  const { job, said, link } = start(mind);
+  const joining = job.take({ publication: "p6", join: { context: AGENT, kind: "screen", device: "jonas.mac" } });
+  const offering = job.take({ publication: "p6", offer: { sdp: "v=0 offer", mid: "0" } });
+  await eventually(() => calls.some((c) => c.method === "refused"));
+  assert.equal(of(said, "answer").length, 0, "no answer before the join");
+  joinedNow();
+  await Promise.all([joining, offering]);
+  assert.deepEqual(
+    calls.map((c) => c.method),
+    ["join", "refused", "signal"],
+    "the publish went before the join answered, and once more after it",
+  );
+  assert.equal(of(said, "answer")[0].answer.early, "again");
+  assert.equal(of(said, "failed").length, 0);
+  await job.end();
+  link.stop();
+});
+
+test("an offer that comes before the join answered and that the facet takes needs no second publish", async () => {
+  const mind = fakeMind();
+  const { calls } = fakeCall(mind);
+  const { job, said, link } = start(mind);
+  const joining = job.take({ publication: "p7", join: { context: AGENT, kind: "camera", device: "jonas.mac" } });
+  const offering = job.take({ publication: "p7", offer: { sdp: "v=0 offer", mid: "0" } });
+  await Promise.all([joining, offering]);
+  assert.deepEqual(calls.map((c) => c.method), ["join", "signal"]);
+  assert.equal(of(said, "answer")[0].answer.early, true);
+  await job.end();
+  link.stop();
+});
+
+test("a leave while the row is on its way: the row goes when it comes, and the join is not made", async () => {
+  const mind = fakeMind();
+  const { calls } = fakeCall(mind);
+  const { job, said, link } = start(mind);
+  const joining = job.take({ publication: "p8", join: { context: AGENT, kind: "screen", device: "jonas.mac" } });
+  await job.take({ publication: "p8", leave: "the choice changed" });
+  await joining;
+  assert.equal(of(said, "left")[0].left, "the choice changed");
+  assert.deepEqual(calls.map((c) => c.method), []);
+  await until(() => mind.subscriptions.every((s) => !s.alive));
+  await job.end();
+  link.stop();
 });

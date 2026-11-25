@@ -31,7 +31,14 @@ final class DeviceCall: ObservableObject {
     /// Each publication's act, its capture track, and the step that waits for the job's word.
     private var acts: [String: String] = [:]
     private var tracks: [String: String] = [:]
-    private var waiting: [String: CheckedContinuation<[String: Any], Error>] = [:]
+    /// The word each step waits for (`joined`, `answer`, `connected`) and its continuation.
+    private var waiting: [String: (word: String, continuation: CheckedContinuation<[String: Any], Error>)] = [:]
+    /// The TURN servers of the newest join and until when to use them: a spare connection
+    /// (`prepare`) and an offer made before its join answers take them.
+    private var ice: (servers: [[String: Any]], until: Date)?
+    /// A failure that came while no step waited (a join that failed while the offer was made):
+    /// the next step fails with it.
+    private var failedEarly: [String: String] = [:]
     /// Each wait's own number: a wait's time limit ends that wait alone, never a later step's.
     private var waits: [String: Int] = [:]
     private var waitCount = 0
@@ -55,6 +62,23 @@ final class DeviceCall: ObservableObject {
         for id in publications.all.map(\.id) { end(id, why: "the Mac stopped") }
     }
 
+    /// `call.prepare`: meet's device picker opened, so a choice may come. A connection and its
+    /// offer for a screen and for the camera (`CallSender.prepare`), with the newest TURN servers
+    /// (or Cloudflare's STUN server alone, when no join gave any yet). It reads no screen and no
+    /// camera and asks nothing: the gate stays at `call.publish`.
+    func prepare() -> [String: Any] {
+        guard bridge != nil, session != nil else { return ["prepared": [String]()] }
+        let sender = makeSender()
+        let servers = freshIce() ?? []
+        for kind in ["screen", "camera"] { sender.prepare(kind, iceServers: servers) }
+        return ["prepared": ["screen", "camera"], "seconds": Int(CallSender.spareLife)]
+    }
+
+    private func freshIce() -> [[String: Any]]? {
+        guard let ice, ice.until > Date() else { return nil }
+        return ice.servers
+    }
+
     /// For `call.state()`.
     func state() -> [String: Any] {
         ["publications": publications.all.map { p -> [String: Any] in
@@ -76,18 +100,29 @@ final class DeviceCall: ObservableObject {
         let sender = makeSender()
         tracksChanged()
         do {
-            let joined = try await step(id) { bridge.send("call", ["publication": id, "join": ["context": context, "kind": source.kind, "as": asker as Any, "device": session.name]]) }
-            let ice = (joined["joined"] as? [String: Any])?["iceServers"] as? [[String: Any]] ?? []
-            let offer: (sdp: String, mid: String) = try await withCheckedThrowingContinuation { continuation in
-                sender.offer(id, track: track, iceServers: ice) { result in continuation.resume(with: result.mapError { EndpointRefusal($0.description) }) }
+            let join = { bridge.send("call", ["publication": id, "join": ["context": context, "kind": source.kind, "as": asker as Any, "device": session.name]]) }
+            let makeOffer = { (ice: [[String: Any]]) async throws -> (sdp: String, mid: String) in
+                try await withCheckedThrowingContinuation { continuation in
+                    sender.offer(id, track: track, iceServers: ice) { result in continuation.resume(with: result.mapError { EndpointRefusal($0.description) }) }
+                }
             }
-            let answered = try await step(id) { bridge.send("call", ["publication": id, "offer": ["sdp": offer.sdp, "mid": offer.mid]]) }
+            let offer: (sdp: String, mid: String)
+            if let ice = freshIce() ?? (sender.prepared.contains(source.kind) ? [] : nil) {
+                // a spare connection, or TURN servers known: the join and the offer at once, and
+                // the publish as soon as the offer is ready (the job sends it after the row)
+                join()
+                offer = try await makeOffer(ice)
+            } else {
+                let joined = try await step(id, until: "joined", send: join)
+                offer = try await makeOffer((joined["joined"] as? [String: Any])?["iceServers"] as? [[String: Any]] ?? [])
+            }
+            let answered = try await step(id, until: "answer") { bridge.send("call", ["publication": id, "offer": ["sdp": offer.sdp, "mid": offer.mid]]) }
             let sdp = (answered["answer"] as? [String: Any])?["sdp"] as? String ?? ""
             try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
                 sender.answer(id, sdp: sdp) { error in continuation.resume(with: error.map { .failure(EndpointRefusal($0.description)) } ?? .success(())) }
             }
             // connected meanwhile, or the wait for it
-            if publications.all.first(where: { $0.id == id })?.connected != true { _ = try await step(id) {} }
+            if publications.all.first(where: { $0.id == id })?.connected != true { _ = try await step(id, until: "connected") {} }
             log.info("\(id): \(source.text) in \(context) after \(Int(Date().timeIntervalSince(started) * 1000)) ms")
             return state()
         } catch {
@@ -122,18 +157,19 @@ final class DeviceCall: ObservableObject {
         return made
     }
 
-    /// Sends a line (`send`) and waits for the job's next word about `id`: its answer, a failure,
-    /// the connection's state, or `patience` seconds.
-    private func step(_ id: String, send: () -> Void) async throws -> [String: Any] {
-        try await withCheckedThrowingContinuation { continuation in
+    /// Sends a line (`send`) and waits for the job's `word` about `id` (`joined`, `answer`,
+    /// `connected`), a failure, or `patience` seconds.
+    private func step(_ id: String, until word: String, send: () -> Void) async throws -> [String: Any] {
+        if let failed = failedEarly.removeValue(forKey: id) { throw EndpointRefusal("The call refused: \(failed)") }
+        return try await withCheckedThrowingContinuation { continuation in
             waitCount += 1
             let wait = waitCount
-            waiting[id] = continuation
+            waiting[id] = (word, continuation)
             waits[id] = wait
             send()
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.patience) { [weak self] in
                 guard let self, self.waits[id] == wait else { return }
-                self.waiting.removeValue(forKey: id)?.resume(throwing: EndpointRefusal("The call did not answer in \(Int(Self.patience)) s."))
+                self.waiting.removeValue(forKey: id)?.continuation.resume(throwing: EndpointRefusal("The call did not answer in \(Int(Self.patience)) s."))
             }
         }
     }
@@ -143,36 +179,45 @@ final class DeviceCall: ObservableObject {
             if let failed = line["failed"] { log.error("job: \(failed)") }
             return
         }
-        if let servers = line["iceServers"] as? [[String: Any]] {
+        // fresh TURN servers (a join's, or the refresh's): for this connection, and kept for the
+        // next offers while they last (three quarters of their life)
+        let joined = line["joined"] as? [String: Any]
+        if let servers = (line["iceServers"] ?? joined?["iceServers"]) as? [[String: Any]], !servers.isEmpty {
             sender?.setIceServers(id, servers)
-            return
+            let ttl = (joined?["ttlS"] as? Double) ?? 0
+            if ttl > 0 { ice = (servers, Date().addingTimeInterval(ttl * 0.75)) }
+            if joined == nil { return }
         }
         if let failed = line["failed"] as? String {
             log.error("\(id): \(failed)")
-            waiting.removeValue(forKey: id)?.resume(throwing: EndpointRefusal("The call refused: \(failed)"))
+            guard let wait = waiting.removeValue(forKey: id) else {
+                if publications.all.contains(where: { $0.id == id }) { failedEarly[id] = failed }
+                return
+            }
+            wait.continuation.resume(throwing: EndpointRefusal("The call refused: \(failed)"))
             return
         }
         if let gone = line["gone"] as? String { return end(id, why: gone) }
-        if line["left"] != nil { return }
-        waiting.removeValue(forKey: id)?.resume(returning: line)
+        if let wait = waiting[id], line[wait.word] != nil { waiting.removeValue(forKey: id)?.continuation.resume(returning: line) }
     }
 
     private func connection(_ id: String, connected: Bool) {
         guard publications.all.contains(where: { $0.id == id }) else { return }
         if connected {
             publications.connected(id)
-            waiting.removeValue(forKey: id)?.resume(returning: ["connected": true])
+            if waiting[id]?.word == "connected" { waiting.removeValue(forKey: id)?.continuation.resume(returning: ["connected": true]) }
         } else {
-            waiting.removeValue(forKey: id)?.resume(throwing: EndpointRefusal("The connection to the call's SFU failed."))
+            waiting.removeValue(forKey: id)?.continuation.resume(throwing: EndpointRefusal("The connection to the call's SFU failed."))
             end(id, why: "the connection to the call failed", failure: "the connection to the call failed")
         }
     }
 
     /// The publication ends here and in the call: its sender, its row and page, its act.
     private func end(_ id: String, why: String, failure: String? = nil) {
+        failedEarly[id] = nil
         guard publications.remove(id) != nil else { return }
         log.info("\(id): ended, \(why)")
-        waiting.removeValue(forKey: id)?.resume(throwing: EndpointRefusal("It ended: \(why)."))
+        waiting.removeValue(forKey: id)?.continuation.resume(throwing: EndpointRefusal("It ended: \(why)."))
         sender?.close(id)
         bridge?.send("call", ["publication": id, "leave": why])
         tracks[id] = nil

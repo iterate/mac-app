@@ -304,6 +304,9 @@ final class AppModel {
             return call.unpublish(ids, why: "ended by a call to call.unpublish")
         case "call.state":
             return call.state()
+        case "call.prepare":
+            // No use of the Mac: a connection made ready, nothing read and nothing asked.
+            return call.prepare()
         case "control.start":
             return try await startControl(parameters)
         case "control.input":
@@ -326,7 +329,7 @@ final class AppModel {
             return control.state()
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, call.prepare, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
             )
         }
     }

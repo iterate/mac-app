@@ -537,6 +537,7 @@ When this Mac is lent to that mind now, and lent by that member, the Camera list
 Off. Without such a lend the picker is as it was. A choice asks the Mac:
 
 ```js
+await mac.call.prepare(); // the picker opened: { prepared: ["screen", "camera"], seconds: 60 }
 await mac.call.publish({ context: "/agents/meet/x", source: "screen:0", as: "<the page's row>" });
 // { publications: [{ publication, context, source, since, connected: true, who }] } once the SFU has it
 await mac.call.unpublish({ publication }); // or { context, source? }: always allowed
@@ -553,7 +554,13 @@ await mac.call.state(); // { publications }
 - **One capture.** The record's capture feeds the call (`CaptureSink`), as it feeds live: a
   source that only the call wants starts with it. A screen goes at its own aspect within 1920×1200,
   at most 15 frames a second; the camera goes as three layers (full, half, quarter) so that each
-  page takes what it can show. H.264 in hardware (VideoToolbox).
+  page takes what it can show. H.264 in hardware (VideoToolbox). A still screen gives no frames, so
+  the last frame goes again when the connection connects and when no frame came for 0.2 s: a page
+  that asks for a key frame gets one at once.
+- **Ready before the choice.** When the device picker opens, the page calls `call.prepare()`. The
+  Mac makes a connection and its offer for a screen and for the camera, with no picture in it. It
+  reads no screen and no camera and asks nothing, so it is no use. A choice then takes the ready
+  connection: the join and the publish go at once. A spare that no choice takes ends after 60 s.
 - **It ends** with `call.unpublish`, when the page that asked leaves the call (its row is un-set),
   when you choose a browser device again, when the connection to the mind ends, when the Mac is
   lent to another mind, or when the app quits. At most 4 at once; one screen and one camera for
@@ -563,19 +570,32 @@ How it is built: the job `call` of the mind's process (`bridge/call.mjs`) calls 
 person methods (`join`, `signal`, `leave`) as a member's page does. The facet knows a page by its
 subscription row on the agent's context, so each publication subscribes a row of its own,
 `mac-call-<device>-<id>`; the kit reads that prefix and names the tile "<name>'s Mac". The app's
-own peer connection (`CallSender` in `Sources/Live`, beside `LivePeer`) makes the offer; the
+own peer connection (`CallSender` in `Sources/Live`, beside `LivePeer`) makes the offer (a spare
+one from `call.prepare` when there is one, with the newest join's TURN servers or Cloudflare's STUN
+server alone); the job sends the publish as soon as it has the offer and the row, also before the
+join answers, and once more after the join when the facet did not know the page yet. The
 facet passes it to Cloudflare's SFU and gives back the answer and the TURN servers (fresh ones at
 three quarters of their life). The rules (sources, the gate's words, the list, the size, no TCP
 candidate) are `CallRule.swift` in `VoiceMeetCore`, tested on their own. `DeviceCall` holds the
 steps of each publication; `AppModel.publishToCall` is the gate. The picker is in
 `@iterate-com/ui` (`call-rules.ts`: `liveMacs`, `macSources`; `call-engine.ts`: `chooseMac`).
 
-Measured with `call-run` (below) against iterate.com, a synthetic 1280×720 screen, sender and
-receiver on this Mac through the SFU: the first decoded frame on the other page came 4.4 s, 6.9 s
-and 4.4 s after the choice (the SFU's answer at 1.2–2.7 s, the sender connected at 1.7–3.4 s; the
-6.9 s run waited for a key frame); then 15 frames a second, the picture 130–350 ms behind (p50).
-A browser page subscribes when the call's state reaches it, so add that step; Touch ID under Ask is
-not in these numbers.
+Measured with `call-run` (below) on 2026-11-25 against iterate.com: a synthetic 1280×720 screen,
+sender and receiver on this Mac, through the SFU. The time is from the choice to the first decoded
+frame on the other page, the median of 6 runs:
+
+| The other page | Prepared (the picker opened 1.5 s before) | Not prepared |
+| --- | --- | --- |
+| Receives a picture of the call already (as a page that hears your microphone) | 1.56 s (1.27–2.22) | 2.24 s (1.84–3.01) |
+| Receives nothing yet: a new connection | 2.87 s (2.02–3.72) | 3.08 s (2.53–6.25) |
+
+Before these changes the same runs took 3.0–4.0 s (median 3.2 s) for a page that received nothing
+yet. With a prepared connection the SFU has the picture 0.5–1.0 s after the choice. The rest is
+the other page: its subscribe (0.45–1.8 s; the facet asks the SFU), its answer, and its first key
+frame (about 0.35 s after it connects). A page with a new connection waits 0.35 s for its own
+candidates before it answers; without that wait it was 2.27 s (6 runs, all connected). A still
+screen (`--still`) shows its first frame too, and then 4 frames a second. Touch ID under Ask is not
+in these numbers.
 
 What v0 does not do: the Mac's picture is not in your own tile (that needs the facet to take a
 publication from a second peer connection for one page); a publication does not come back after
@@ -1296,8 +1316,12 @@ test picture and beep (no switch is asked); `--record <spool>` records them too;
 /agents/meet/<call> --node $(which node) --bridge bridge/mind.mjs --iterate <iterate.js> --mind
 <address> --device test.mac --seconds 15` joins a receiving page, publishes the synthetic picture
 (it carries the wall time in a strip) as a screen, subscribes to it, and writes a JSON line for
-each step and each second: frames, the picture's delay, the first frame after the choice. No
-switch, camera, microphone or screen is used.
+each step and each second: frames, the picture's delay, the first frame after the choice, and the milliseconds of
+each call to the facet. "The picker opens" 1.5 s before the choice (`--choose-after`), and the
+sender prepares then; `--no-prepare` makes the steps one after the other, `--warm` lets the
+receiver first receive a camera of the Mac, `--still` sends a screen that does not change, and
+`--answer-at-once` lets the receiver answer without its candidates. No switch, camera, microphone
+or screen is used.
 
 `.build/release/VoiceMeetMac --render-panel panel.png` draws the panel to a file without opening
 anything, with fixed minds, things and clock (see "Testing with no hand"). A third word draws the lend in one phase: `live`, `reconnecting`, `stopped` or
