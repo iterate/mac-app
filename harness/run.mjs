@@ -831,6 +831,9 @@ const scenarios = {
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!said.includes(term)) throw new Error(`"${said}" has no ${term}`);
         // the written text has the terms alone: no heard form of the list, with any separator
         if (WRONG_BEELINK.test(said)) throw new Error(`"${said}" has a heard form of Beelink`);
+        // a test copy makes no sound: the start and the written text are counted silent
+        const { sounds } = await run.state();
+        if (sounds.played !== 0 || sounds.silenced !== 2) throw new Error(`the sounds: ${JSON.stringify(sounds)}`);
         // Core ML compiles the model for the Neural Engine once for each build of the app (its
         // cache, ~/Library/Caches/<bundle or process>/com.apple.e5rt.e5bundlecache, is the
         // build's): the first run after a build waits 12 to 24 s for the model, every later
@@ -912,6 +915,9 @@ const scenarios = {
         await fn(false);
         const second = await until("the second hold's end", 60, () => ended(5));
         if (!/^(Heard|Wrote)/.test(second.lastLine)) throw new Error(`the second hold: the line is "${second.lastLine}"`);
+        // a test copy makes no sound: each cue (the starts, the written texts, Esc) is counted silent
+        const { sounds, choices } = await run.state();
+        if (!choices.sounds || sounds.played !== 0 || sounds.silenced < 6) throw new Error(`the sounds: ${JSON.stringify(sounds)}`);
       } finally {
         await run.quit();
       }

@@ -168,7 +168,7 @@ when it ended and the CLI renews it at its next connection; "Not signed in" with
 The app writes config.json only through `cli.mjs` (`set`, `add`; `use` and `remove` as the panel
 does), and `cli.mjs` keeps every key it does not know, at the top and in each mind. The choices
 of this Mac are in the app's defaults: `approval.minutes`, `key.capture`, `key.input`,
-`dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.write`, `update.byItself`.
+`dictation.key`, `dictation.doubleTap`, `dictation.pill`, `dictation.sounds`, `dictation.write`, `update.byItself`.
 `--render-settings <folder>` draws the pages (General, Dictation, a mind lent with the default
 list, a mind whose own expression fails), light and dark.
 
@@ -759,6 +759,7 @@ with a lock while it stays on and the time since the start.
   clipboard gets back what it held. That needs the **Accessibility** permission. Without it the
   text stays on the clipboard, and the app opens the guide for the permission. Settings ›
   Dictation, "Put the text: On the clipboard only", leaves it there, with no ⌘V.
+- **Sounds.** A soft rising tone when listening starts (fn held 0.2 s, the double tap's lock, ⌥⇧D, the Dictate button, the input bar's microphone), a softer falling one when the text is written, and a low one for Esc: sines made in `SoundCue`, under 150 ms, at a tenth of full scale; the microphone opens first, and Parakeet v3 wrote the same words with the tone over the first word. Settings › Dictation, "Sounds" (`dictation.sounds`), turns them off; a home of its own and a drawing never make one (`ui.state`'s `sounds.silenced` counts them).
 - **Permissions.** The microphone, at the first use. The line under the panel's three buttons
   says how the last dictation ended, when it is the newest. `app.log` holds counts and times, never the words.
 

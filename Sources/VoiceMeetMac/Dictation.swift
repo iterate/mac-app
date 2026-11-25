@@ -118,6 +118,13 @@ final class Dictation: SpeechClient {
     private let pill = DictationPillModel()
     private var panel: NSPanel?
     private var hide: DispatchWorkItem?
+    /// The start sound of a hold of fn, which waits `fnCueDelay`.
+    private var startCue: DispatchWorkItem?
+    /// This dictation made its start sound (or would have, in a home of its own).
+    private var cued = false
+    /// fn down plays the start sound only after this, with fn still held and no other key: a tap
+    /// of fn alone and most fn-arrow combinations make no sound. The microphone opens at once.
+    static let fnCueDelay: TimeInterval = 0.2
 
     init(session: SpeechSession) {
         self.session = session
@@ -183,6 +190,8 @@ final class Dictation: SpeechClient {
             // no double tap: a tap alone ends at once, with no sign
             if Choices.shared.doubleTap { waitForSecondTap(until: until) } else { return self.act(key.windowEnded(at: until)) }
         case .lock:
+            // a double tap of fn: its first press was too short for the start sound
+            cueStart()
             pill.locked = true
             log.info("locked: on until the next press")
             onChange()
@@ -260,6 +269,9 @@ final class Dictation: SpeechClient {
         case nil:
             pill.clock = .since(Date())
             showPill()
+            // after the microphone opened: the sound never holds it up
+            cued = false
+            if key.press == .fn { cueStartAfterHold() } else { cueStart() }
             log.info("start: \(key.press == .fn ? "fn" : "⌥⇧D")")
         case .ownHome:
             ended()
@@ -277,8 +289,30 @@ final class Dictation: SpeechClient {
         onChange()
     }
 
+    private func cueStart() {
+        startCue?.cancel()
+        startCue = nil
+        guard !cued, isRunning else { return }
+        cued = true
+        DictationSound.shared.play(.start)
+    }
+
+    private func cueStartAfterHold() {
+        startCue?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, case .pressed = self.key.state else { return }
+                self.cueStart()
+            }
+        }
+        startCue = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.fnCueDelay, execute: work)
+    }
+
     /// The key knows that no dictation runs.
     private func ended() {
+        startCue?.cancel()
+        startCue = nil
         key.ended()
         keyChanged()
     }
@@ -318,6 +352,7 @@ final class Dictation: SpeechClient {
         guard isRunning else { return ended() }
         session.cancel(self)
         ended()
+        if !quietly, cued { DictationSound.shared.play(.cancelled) }
         guard quietly else { return end("Cancelled at \(Lend.clock(Date()))", failed: nil) }
         log.info("cancelled with no sign")
         hidePill(after: 0)
@@ -329,6 +364,8 @@ final class Dictation: SpeechClient {
         lastText = text
         guard !text.isEmpty else { return end("Heard no words at \(Lend.clock(Date()))", failed: nil) }
         let words = Spoken.wordCount(text)
+        // the text goes in now (or would, in a home of its own, which plays no sound and counts it)
+        DictationSound.shared.play(.written)
         guard !AppEnvironment.current.hasOwnHome else {
             return end("Heard \(words) words at \(Lend.clock(Date())); a home of its own writes them nowhere", failed: nil)
         }

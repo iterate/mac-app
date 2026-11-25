@@ -453,6 +453,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "input": input.controlState(),
             "dictation": dictation.controlState(),
             "speech": speechChoice.controlState(),
+            "sounds": DictationSound.shared.controlState(),
             "activity": [
                 "pillVisible": model.acts.isPillVisible,
                 "context": model.acts.path.map { $0 as Any } ?? NSNull(),
@@ -472,7 +473,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "choices": [
                 "approvalMinutes": choices.approvalMinutes, "captureKey": choices.captureKey?.words ?? NSNull(),
                 "inputKey": choices.inputKey?.words ?? NSNull(), "dictationOnFn": choices.dictationOnFn, "doubleTap": choices.doubleTap,
-                "pillShowsWords": choices.pillShowsWords, "write": choices.write.rawValue,
+                "pillShowsWords": choices.pillShowsWords, "sounds": choices.sounds, "write": choices.write.rawValue,
             ],
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
             "record": model.record.state(),

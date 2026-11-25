@@ -620,6 +620,9 @@ private struct DictationPage: View {
                 SettingsRow(title: "Show the words in one row", detail: "A pill at the bottom of the screen. The newest words are at the right.", isFirst: true) {
                     SettingsSwitch(id: "settings.pillWords", label: "Show the words in one row", isOn: choices.pillShowsWords) { choices.pillShowsWords = $0 }
                 }
+                SettingsRow(title: "Sounds", detail: "A soft sound when listening starts, and a softer one when the text is written.") {
+                    SettingsSwitch(id: "settings.sounds", label: "Sounds", isOn: choices.sounds) { choices.sounds = $0 }
+                }
                 SettingsRow(
                     title: "Put the text",
                     detail: choices.write == .cursor

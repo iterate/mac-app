@@ -320,14 +320,18 @@ final class MindInput: SpeechClient {
     }
 
     /// Opens the microphone. `asking` is true for the person's own click: then a permission that
-    /// macOS refused opens its guide; the bar's own start only says so.
-    private func listen(asking: Bool) {
+    /// macOS refused opens its guide; the bar's own start only says so. `cue`: the start sound
+    /// (`DictationSound`), but not for a listening that only starts again with another mind's words.
+    private func listen(asking: Bool, cue: Bool = true) {
         guard !isListening, model.voice != .finishing, !model.draft.isSending, panel?.isVisible == true else { return }
         model.spoken = SpokenText(base: model.draft.text)
         model.level.level = 0
         switch session.start(self, words: words(model.mind), allowed: { [weak self] in self?.listen(asking: false) }) {
         case nil:
             log.info("listening: on")
+            // after the microphone opened: the sound never holds it up. The bar has no end sound:
+            // its words are in it as they come, and its stop is the person's own click
+            if cue { DictationSound.shared.play(.start) }
             onChange()
         case .ownHome, .asking:
             model.spoken = nil
@@ -373,7 +377,7 @@ final class MindInput: SpeechClient {
     private func hearWithTheMindsWords() {
         guard isListening else { return }
         log.info("listening: again, with the words of the mind chosen now")
-        stopListening(keepingLastWords: true) { [weak self] in self?.listen(asking: false) }
+        stopListening(keepingLastWords: true) { [weak self] in self?.listen(asking: false, cue: false) }
     }
 
     /// Closes the microphone. With `keepingLastWords` the words that were said last are still
