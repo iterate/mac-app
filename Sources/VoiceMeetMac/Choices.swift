@@ -9,12 +9,13 @@ import Carbon.HIToolbox
 /// | Key | What |
 /// | --- | --- |
 /// | `approval.minutes` | How long "Approve for N Minutes" lasts (`Approval`); 30 unless set. |
-/// | `key.capture`, `key.input` | The keys of capture and the input (`HotKey`), or "none". |
+/// | `key.capture`, `key.input`, `key.writeSaid` | The keys of capture, the input and "write what I just said" (`HotKey`), or "none". |
 /// | `dictation.key` | "fn": a hold of fn dictates; "none": fn does nothing (⌥⇧D still works). |
 /// | `dictation.doubleTap` | Two taps of fn keep the dictation on. |
 /// | `dictation.pill` | The dictation pill shows the words; off, the level bars and the time alone. |
 /// | `dictation.sounds` | A gentle sound when a dictation starts, is written and is thrown away (`DictationSound`). |
 /// | `dictation.write` | "cursor": the text is written where the cursor is; "clipboard": it is put on the clipboard only. |
+/// | `listen.always` | Always listen (`Listening`): speech is found and put into words on this Mac with no key. Off unless set. |
 /// | `update.byItself` | The app updates itself once an hour (only when it is from npm). |
 @MainActor
 final class Choices: ObservableObject {
@@ -34,6 +35,8 @@ final class Choices: ObservableObject {
     @Published var approvalMinutes: Int { didSet { defaults.set(approvalMinutes, forKey: "approval.minutes") } }
     @Published var captureKey: HotKey.Combo? { didSet { defaults.set(captureKey?.stored ?? "none", forKey: "key.capture") } }
     @Published var inputKey: HotKey.Combo? { didSet { defaults.set(inputKey?.stored ?? "none", forKey: "key.input") } }
+    @Published var writeSaidKey: HotKey.Combo? { didSet { defaults.set(writeSaidKey?.stored ?? "none", forKey: "key.writeSaid") } }
+    @Published var alwaysListen: Bool { didSet { defaults.set(alwaysListen, forKey: "listen.always") } }
     @Published var dictationOnFn: Bool { didSet { defaults.set(dictationOnFn ? "fn" : "none", forKey: "dictation.key") } }
     @Published var doubleTap: Bool { didSet { defaults.set(doubleTap, forKey: "dictation.doubleTap") } }
     @Published var pillShowsWords: Bool { didSet { defaults.set(pillShowsWords, forKey: "dictation.pill") } }
@@ -46,6 +49,8 @@ final class Choices: ObservableObject {
         approvalMinutes = minutes > 0 ? min(minutes, 24 * 60) : 30
         captureKey = HotKey.Combo.read(defaults.string(forKey: "key.capture"), as: .capture)
         inputKey = HotKey.Combo.read(defaults.string(forKey: "key.input"), as: .input)
+        writeSaidKey = HotKey.Combo.read(defaults.string(forKey: "key.writeSaid"), as: .writeSaid)
+        alwaysListen = defaults.bool(forKey: "listen.always")
         dictationOnFn = defaults.string(forKey: "dictation.key") != "none"
         doubleTap = defaults.object(forKey: "dictation.doubleTap") as? Bool ?? true
         pillShowsWords = defaults.object(forKey: "dictation.pill") as? Bool ?? true

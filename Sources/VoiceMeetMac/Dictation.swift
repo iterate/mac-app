@@ -92,6 +92,8 @@ final class DictationPillModel: ObservableObject {
 @MainActor
 final class Dictation: SpeechClient {
     var words: () -> WordList = { .empty }
+    /// The words of a stretch of the transcription stream between two Unix times (`Listening.said`).
+    var said: (_ from: Double, _ to: Double, _ stretch: String) -> String = { _, _, _ in "" }
     /// Opens the guide for a permission of macOS.
     var allow: (Permission) -> Void = { _ in }
     var onChange: () -> Void = {}
@@ -335,8 +337,30 @@ final class Dictation: SpeechClient {
             // dictation may run already (fn went down again before the last words came): the key
             // is that one's, and only a listening taken by the input bar leaves it to be reset.
             if !isRunning { ended() }
-            write(text)
+            write(spoken(text))
         }
+    }
+
+    /// What this dictation said, from the transcription stream: the words of its stretch between its
+    /// key's down and up (README, "Listening"). They are the listening's own final words; when the
+    /// stream has none of them, the listening's text is written and the log says so.
+    private func spoken(_ text: String) -> String {
+        guard let ending = session.ending else { return text }
+        let fromStream = said(ending.start - 0.5, ending.end + 0.5, ending.stretch)
+        if fromStream.isEmpty, !text.isEmpty {
+            log.error("\(ending.stretch): the stream has no words between the key's down and up; the listening's \(Spoken.wordCount(text)) are written")
+            return text
+        }
+        return fromStream
+    }
+
+    /// ⌥⇧W, "write what I just said": the last finished stretch of the transcription stream, where
+    /// the cursor is, though no key was held while it was said. Nothing while a dictation runs.
+    func writeSaid(_ text: String?) {
+        guard !isRunning else { return log.info("write what I just said: a dictation runs; nothing is written") }
+        guard let text, !text.isEmpty else { return end("Nothing heard to write at \(Lend.clock(Date()))", failed: nil) }
+        log.info("write what I just said: the last stretch, \(Spoken.wordCount(text)) words")
+        write(text)
     }
 
     private func finish() {

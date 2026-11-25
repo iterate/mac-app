@@ -5,6 +5,8 @@ import Foundation
 /// What a recorder may record. Each one is a switch of its own.
 public enum RecordSource: String, CaseIterable, Sendable {
     case screens, cameras, mics, speakers
+    /// The final segments of the transcription stream (`Recorder.transcribed`): no capture.
+    case transcript
     /// A source that needs no permission: a moving picture `test-1` and a beep each second `test-2`.
     case synthetic
 
@@ -15,6 +17,7 @@ public enum RecordSource: String, CaseIterable, Sendable {
         case .cameras: return "camera-"
         case .mics: return "mic-"
         case .speakers: return "speaker-"
+        case .transcript: return "transcript"
         case .synthetic: return "test-"
         }
     }
@@ -36,6 +39,9 @@ public struct RecordOptions: Sendable {
     public var cameraFps = 15
     public var maxWidth: Int?
     public var exclude = ExcludeList()
+    /// The app's microphone stream: `mic-0` reads it, and no microphone opens for the record. Nil:
+    /// each microphone opens on its own (`DeviceCapture`).
+    public var microphone: MicrophoneFeed?
 
     public init(spool: URL, device: String) {
         self.spool = spool
@@ -168,8 +174,9 @@ public final class Recorder: @unchecked Sendable {
         switch kind {
         case .screens: source = Screens(recorder: self)
         case .cameras: source = DeviceCapture(recorder: self, media: .video)
-        case .mics: source = DeviceCapture(recorder: self, media: .audio)
+        case .mics: source = options.microphone.map { FeedMic(recorder: self, feed: $0) } ?? DeviceCapture(recorder: self, media: .audio)
         case .speakers: source = Speakers(recorder: self)
+        case .transcript: source = TranscriptSource(recorder: self)
         case .synthetic: source = Synthetic(recorder: self)
         }
         lock.withLock { sources[kind] = source }
@@ -204,6 +211,15 @@ public final class Recorder: @unchecked Sendable {
 
     func ended(_ track: String) {
         for sink in lock.withLock({ sinks }) { sink.ended(track) }
+    }
+
+    /// A final segment of the transcription stream, as one line of the `transcript` track. False
+    /// when the record has no such track now.
+    @discardableResult
+    public func transcribed(_ line: Data) -> Bool {
+        guard let track = track(TranscriptTrack.name) as? TranscriptTrack else { return false }
+        track.append(line)
+        return true
     }
 
     /// The Mac is locked or its displays sleep: screens and cameras pause and start again by
@@ -264,10 +280,10 @@ public final class Recorder: @unchecked Sendable {
     /// A file that cannot be written gets no entry.
     /// Only while `track` is open in `slot`: after the slot was sealed without it (`sealStale`),
     /// its file is dropped, and the slot's event stays as it was sealed.
-    func finished(track: String, slot: Int64, parts: [Data], size: Int, entry: [String: Any], picture: Data?) {
+    func finished(track: String, slot: Int64, parts: [Data], size: Int, entry: [String: Any], picture: Data?, ext: String = "mp4") {
         let isOpen = { self.open[slot]?.contains(track) == true }
         guard slots.sync(execute: isOpen) else { return log("\(track): slot \(slot) was sealed without it; its file is dropped") }
-        let file = Slot.path(device: options.device, track: track, slot: slot, ext: "mp4")
+        let file = Slot.path(device: options.device, track: track, slot: slot, ext: ext)
         let picturePath = Slot.path(device: options.device, track: track, slot: slot, ext: "jpg")
         let wrote = write(file, parts)
         var entry = entry

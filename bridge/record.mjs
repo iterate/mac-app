@@ -36,10 +36,12 @@ import { putFile } from "./upload.mjs";
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const contentTypes = { audio: "audio/mp4", video: "video/mp4", transcript: "application/x-ndjson" };
+
 /** Every file a slot's event names, with its content type. */
-function filesOf(payload) {
+export function filesOf(payload) {
   return Object.values(payload.tracks).flatMap((track) => [
-    [track.file, track.kind === "audio" ? "audio/mp4" : "video/mp4"],
+    [track.file, contentTypes[track.kind] ?? "video/mp4"],
     ...(track.picture ? [[track.picture, "image/jpeg"]] : []),
   ]);
 }

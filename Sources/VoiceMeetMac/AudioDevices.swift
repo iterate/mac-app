@@ -25,6 +25,17 @@ enum AudioDevices {
         return "\"\(name(of: deviceID))\" (id \(deviceID), \(transportLabel(transport)), \(Int(sampleRate)) Hz)"
     }
 
+    /// The default input's name, and whether it is a Bluetooth headset (the record does not open
+    /// one: that would move the headset to its hands-free mode). Nil with no input.
+    static func defaultInput() -> (name: String, isBluetooth: Bool)? {
+        var deviceID = AudioDeviceID(kAudioObjectUnknown)
+        guard read(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultInputDevice, into: &deviceID), deviceID != kAudioObjectUnknown
+        else { return nil }
+        var transport = UInt32(0)
+        _ = read(deviceID, kAudioDevicePropertyTransportType, into: &transport)
+        return (name(of: deviceID), transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE)
+    }
+
     private static func name(of deviceID: AudioDeviceID) -> String {
         let pointer = UnsafeMutablePointer<Unmanaged<CFString>?>.allocate(capacity: 1)
         pointer.initialize(to: nil)

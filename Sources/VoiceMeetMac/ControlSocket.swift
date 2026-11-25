@@ -10,6 +10,7 @@ import VoiceMeetCore
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
 /// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
 ///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
+/// - `listen.write`: what ⌥⇧W does: the last finished stretch of speech is written (README, "Listening").
 /// - `approval.answer {allow, keep?}`: answers the Ask question that waits, as its panel's buttons
 ///   do, and no Touch ID is asked (`Approval.answersByControl`); `keep` approves for the chosen
 ///   time (`approval.minutes`), as "Approve for 30 Minutes" does.
@@ -39,6 +40,7 @@ final class ControlSocket {
     var dictationReleased: () -> Void = {}
     var dictationFn: (Bool) -> Void = { _ in }
     var dictationEscape: () -> Void = {}
+    var writeSaid: () -> Void = {}
 
     private let endpoint: LocalEndpoint
     private let approval: Approval
@@ -97,6 +99,8 @@ final class ControlSocket {
             dictationFn(down)
         case "dictation.esc":
             dictationEscape()
+        case "listen.write":
+            writeSaid()
         case "approval.answer":
             guard let allow = parameters["allow"] as? Bool else { throw EndpointRefusal("approval.answer needs allow: true or false.") }
             guard approval.answer(allow: allow, keep: parameters["keep"] as? Bool ?? false) else { throw EndpointRefusal("No question waits for an answer.") }
@@ -215,7 +219,7 @@ final class ControlSocket {
             }
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, ui.key, perf.reset, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, approval.answer.")
+                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, ui.key, perf.reset, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, listen.write, approval.answer.")
         }
         return [:]
     }

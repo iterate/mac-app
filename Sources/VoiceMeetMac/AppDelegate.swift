@@ -40,6 +40,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let speechChoice = SpeechChoice()
     /// The one foreground listening, of dictation and the input.
     private let speech = SpeechSession()
+    /// The listening layers: the transcription stream's segments, Always listen, ⌥⇧W (`Listening`).
+    private let listening = Listening()
+    private var alwaysListenWatch: AnyCancellable?
+    /// The sign of Always listen on the mark.
+    private var listenSign: ListenSignView?
     /// The person's input to a mind (⌥⇧Space).
     private lazy var input = MindInput(session: speech)
     /// The person's dictation into the app in front (fn, ⌥⇧D).
@@ -87,7 +92,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // the button's cell is its accessibility element
         markButton?.cell?.setAccessibilityIdentifier("statusItem")
         let markSize = environment.hasOwnHome ? IterateIcon.testImage(MenuBarMark(ink: .live, dot: .none)).size : IterateIcon.plain.size
-        if let markButton { recordDot = RecordDotView.attach(to: markButton, imageSize: markSize) }
+        if let markButton {
+            recordDot = RecordDotView.attach(to: markButton, imageSize: markSize)
+            listenSign = ListenSignView.attach(to: markButton, imageSize: markSize)
+        }
         // after the mark: the first lines look for the cameras, which can take a moment
         logRunStart()
 
@@ -177,6 +185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         openAtLogin()
         startInput()
         startDictation()
+        startListening()
         preloadSpeech()
         stateDidChange()
 
@@ -390,34 +399,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return isRegistered
     }
 
-    /// What the key of capture (`HotKey.Combo.capture.id`) or of the input does.
-    private func pressed(_ id: UInt32) -> () -> Void {
-        if id == HotKey.Combo.capture.id {
-            return { [weak self] in if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() } }
+    /// The keys that Settings › General sets: what each is in the log and in a refusal, and what it does.
+    private static let settableKeys: [UInt32: (what: String, name: String, does: String)] = [
+        HotKey.Combo.capture.id: ("capture", "capture", "starts and ends one"),
+        HotKey.Combo.input.id: ("input", "the input", "opens it"),
+        HotKey.Combo.writeSaid.id: ("write what I just said", "Write what I just said", "writes the last stretch of speech"),
+    ]
+
+    /// The key that Settings set for `id`.
+    private func chosenKey(_ id: UInt32) -> HotKey.Combo? {
+        switch id {
+        case HotKey.Combo.capture.id: return choices.captureKey
+        case HotKey.Combo.writeSaid.id: return choices.writeSaidKey
+        default: return choices.inputKey
         }
-        return { [weak self] in self?.input.toggle() }
     }
 
-    /// Settings recorded a key for capture or the input, or removed it (nil). A key that macOS
-    /// refuses leaves the one before; the answer says so.
+    /// What the key of capture (`HotKey.Combo.capture.id`), of the input or of "write what I just said" does.
+    private func pressed(_ id: UInt32) -> () -> Void {
+        switch id {
+        case HotKey.Combo.capture.id: return { [weak self] in if #available(macOS 15.0, *) { (self?.capture as? Capture)?.toggle() } }
+        case HotKey.Combo.writeSaid.id: return { [weak self] in self?.writeSaid() }
+        default: return { [weak self] in self?.input.toggle() }
+        }
+    }
+
+    /// Settings recorded a key for capture, the input or "write what I just said", or removed it
+    /// (nil). A key that macOS refuses leaves the one before; the answer says so.
     private func setKey(_ id: UInt32, _ combo: HotKey.Combo?) -> String? {
-        let isCapture = id == HotKey.Combo.capture.id
-        let what = isCapture ? "capture" : "input"
-        let before = isCapture ? choices.captureKey : choices.inputKey
-        let other = isCapture ? choices.inputKey : choices.captureKey
+        guard let key = Self.settableKeys[id] else { return nil }
+        let before = chosenKey(id)
         settingsState.keyProblems[id] = nil
-        if let combo, combo.key == other?.key, combo.modifiers == other?.modifiers {
-            return "\(combo.words) is the key of \(isCapture ? "the input" : "capture") already."
+        if let combo, let other = Self.settableKeys.keys.first(where: { $0 != id && chosenKey($0).map { $0.key == combo.key && $0.modifiers == combo.modifiers } == true }) {
+            return "\(combo.words) is the key of \(Self.settableKeys[other]?.name ?? "another action") already."
         }
         HotKey.unregister(id)
-        if let combo, !register(combo, what, isCapture ? "starts and ends one" : "opens it", pressed: pressed(id)) {
-            if let before { register(before, what, "again", pressed: pressed(id)) }
+        if let combo, !register(combo, key.what, key.does, pressed: pressed(id)) {
+            if let before { register(before, key.what, "again", pressed: pressed(id)) }
             let problem = "macOS refused \(combo.words): another app may use it."
             settingsState.keyProblems[id] = problem
             return problem
         }
-        if isCapture { choices.captureKey = combo } else { choices.inputKey = combo }
-        log.info("\(what): the person set the key to \(combo?.words ?? "none")")
+        switch id {
+        case HotKey.Combo.capture.id: choices.captureKey = combo
+        case HotKey.Combo.writeSaid.id: choices.writeSaidKey = combo
+        default: choices.inputKey = combo
+        }
+        log.info("\(key.what): the person set the key to \(combo?.words ?? "none")")
         return nil
     }
 
@@ -425,8 +453,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func recordingKey(_ id: UInt32, _ isRecording: Bool) {
         guard !environment.hasOwnHome else { return }
         if isRecording { return HotKey.unregister(id) }
-        let combo = id == HotKey.Combo.capture.id ? choices.captureKey : choices.inputKey
-        if let combo { _ = HotKey.register(combo, pressed: pressed(id), released: nil) }
+        if let combo = chosenKey(id) { _ = HotKey.register(combo, pressed: pressed(id), released: nil) }
+    }
+
+    /// The listening layers (README, "Listening"): every final segment of dictation, the input bar
+    /// and Always listen goes into the transcript and the record's `transcript` track; Always listen
+    /// runs while its switch is on; ⌥⇧W writes the last finished stretch.
+    private func startListening() {
+        listening.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
+        listening.localModel = { [weak self] in self?.speechChoice.local ?? .default }
+        listening.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
+        listening.record = { [weak self] line in self?.model.record.transcribed(line) }
+        listening.onChange = { [weak self] in
+            self?.model.record.tick()
+            self?.stateDidChange()
+        }
+        model.record.alwaysListens = { [weak self] in self?.listening.isAlwaysListening ?? false }
+        speech.transcribed = { [weak self] event in self?.listening.heard(event) }
+        speech.onListening = { [weak self] isOn in self?.listening.keyListening(isOn) }
+        dictation.said = { [weak self] from, to, stretch in self?.listening.said(from: from, to: to, of: stretch) ?? "" }
+        alwaysListenWatch = choices.$alwaysListen.dropFirst().removeDuplicates().sink { [weak self] isOn in
+            // `@Published` tells before the value is set
+            DispatchQueue.main.async {
+                self?.log.info("always listen: turned \(isOn ? "on" : "off") in Settings")
+                self?.listening.apply()
+            }
+        }
+        control?.writeSaid = { [weak self] in self?.writeSaid() }
+        if let combo = choices.writeSaidKey { register(combo, "write what I just said", "writes the last stretch of speech", pressed: pressed(HotKey.Combo.writeSaid.id)) }
+        listening.apply()
+    }
+
+    /// ⌥⇧W: the last finished stretch of speech, where the cursor is.
+    private func writeSaid() {
+        dictation.writeSaid(listening.lastStretch)
     }
 
     /// The control socket (`ControlSocket`), when the environment asks for it.
@@ -452,6 +512,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ],
             "input": input.controlState(),
             "dictation": dictation.controlState(),
+            "listening": listening.controlState(),
             "speech": speechChoice.controlState(),
             "sounds": DictationSound.shared.controlState(),
             "activity": [
@@ -474,6 +535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 "approvalMinutes": choices.approvalMinutes, "captureKey": choices.captureKey?.words ?? NSNull(),
                 "inputKey": choices.inputKey?.words ?? NSNull(), "dictationOnFn": choices.dictationOnFn, "doubleTap": choices.doubleTap,
                 "pillShowsWords": choices.pillShowsWords, "sounds": choices.sounds, "write": choices.write.rawValue,
+                "alwaysListen": choices.alwaysListen, "writeSaidKey": choices.writeSaidKey?.words ?? NSNull(),
             ],
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
             "record": model.record.state(),
@@ -783,12 +845,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let label = MenuBarMark.label(
             banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
             glance: glance, dot: mark.dot, tracks: record.tracks.count, pausedBecause: record.pausedBecause)
+            + (listening.isAlwaysListening ? ". Always listen: the microphone is open" : "")
         // the button is written only when what it shows changed
         guard mark != shownMark || label != shownLabel else { return }
         Perf.count("statusWrites")
         // a test copy's mark is its own: the owner never quits the installed app for it
         if mark != shownMark { button.image = environment.hasOwnHome ? IterateIcon.testImage(mark) : IterateIcon.image(mark) }
         recordDot?.dot = mark.dot
+        listenSign?.isOn = listening.isAlwaysListening
         let shown = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path). \(label)" : label
         button.toolTip = environment.hasOwnHome ? "iterate test copy: \(environment.folder.path)" : label
         button.setAccessibilityLabel(shown)

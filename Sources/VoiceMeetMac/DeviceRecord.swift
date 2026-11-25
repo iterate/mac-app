@@ -65,6 +65,10 @@ final class DeviceRecord: ObservableObject {
     }
     /// The device's presence: "active", "idle", "locked", "asleep" (`DeviceEvents.presence`).
     var presence: () -> String? = { nil }
+    /// Always listen is on (`Listening`): the transcript is recorded, as with the Microphone switch.
+    var alwaysListens: () -> Bool = { false }
+    /// The record's `mic-0` reads the app's microphone stream.
+    private static let feed = StreamFeed()
     var onChange: () -> Void = {}
 
     private let log = AppLog("record")
@@ -201,12 +205,17 @@ final class DeviceRecord: ObservableObject {
         let permitted = { (sources: Set<RecordSource>) in
             session == nil ? [] : Set(sources.filter { source in Self.switches.first { $0.source == source }?.permission.isGranted ?? true })
         }
-        // the record's switches, and live's watchers: the capture runs for both
-        let wanted = permitted(on), watched = permitted(live)
+        // the record's switches, and live's watchers: the capture runs for both. The transcript
+        // (README, "Listening") is recorded with the Microphone switch, and with Always listen.
+        var wanted = permitted(on)
+        let watched = permitted(live)
+        if session != nil, wanted.contains(.mics) || alwaysListens() { wanted.insert(.transcript) }
         if wanted.union(watched).isEmpty { stopRecorder() }
         if let session, !wanted.union(watched).isEmpty {
             if recorder == nil {
-                let recorder = Recorder(options: RecordOptions(spool: Self.spool(for: session), device: session.name))
+                var options = RecordOptions(spool: Self.spool(for: session), device: session.name)
+                options.microphone = Self.feed
+                let recorder = Recorder(options: options)
                 let stamp = work.stamp
                 recorder.onSeal = { [weak self] t in
                     DispatchQueue.main.async { MainActor.assumeIsolated { self?.sealed(t, stamp: stamp) } }
@@ -233,7 +242,7 @@ final class DeviceRecord: ObservableObject {
                 }
             }
         }
-        lookForPermissions(session != nil && (wanted != on || watched != live))
+        lookForPermissions(session != nil && (wanted.subtracting([.transcript]) != on || watched != live))
         showState(waiting: session == nil ? 0 : waiting, isLent: session != nil)
     }
 
@@ -241,16 +250,19 @@ final class DeviceRecord: ObservableObject {
         var parts: [String] = []
         if !isLent {
             parts.append(on.isEmpty ? "Off" : "Waits for the Mac to be lent to a mind")
-        } else if let recorder, !running.isEmpty {
+        } else if let recorder, !running.subtracting([.transcript]).isEmpty {
             let tracks = recorder.trackIDs.count
             parts.append(paused ? "Paused: \(presence() ?? "locked")" : "Recording \(tracks) track\(tracks == 1 ? "" : "s")")
+        } else if recorder != nil, running.contains(.transcript) {
+            parts.append("Recording what Always listen hears, as text")
         } else {
             parts.append("Off")
         }
         if waiting > 0 { parts.append("\(waiting) slot\(waiting == 1 ? "" : "s") waiting") }
         if let uploadFailure, waiting > 0 { parts.append("upload failing: \(uploadFailure)") }
         let line = parts.joined(separator: " · ")
-        let isRecording = recorder != nil && !running.isEmpty
+        // the transcript alone is no red dot: Always listen has its own sign on the mark
+        let isRecording = recorder != nil && !running.subtracting([.transcript]).isEmpty
         let isPaused = isRecording && paused
         let tracks = isRecording ? recorder?.trackIDs ?? [] : []
         let pausedBecause = isPaused ? presence() ?? "locked" : nil
@@ -261,6 +273,13 @@ final class DeviceRecord: ObservableObject {
         if isRecording != self.isRecording { self.isRecording = isRecording }
         if isPaused != self.isPaused { self.isPaused = isPaused }
         if markChanges { onChange() }
+    }
+
+    /// A final segment of the transcription stream, as a line of the `transcript` track: kept only
+    /// while that track records (the Microphone switch, or Always listen, while lent).
+    func transcribed(_ line: Data) {
+        guard let recorder, running.contains(.transcript) else { return }
+        lifecycle.async { recorder.transcribed(line) }
     }
 
     // MARK: - The upload

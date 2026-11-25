@@ -925,6 +925,65 @@ const scenarios = {
   },
 
   /**
+   * Always listen (README, "Listening"), with the fixture in place of the microphone and no key:
+   * the sentence after 1.5 s of silence is one stretch, put into words on this Mac with the word
+   * list; `listen.write` (⌥⇧W, "write what I just said") writes it; the stretch reaches the fake
+   * mind as one line of the record's `transcript` track. Then 20 s of the fixture's silence with
+   * Always listen on: its figures are in the result (`perf.on`).
+   */
+  "listen-always": {
+    local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`; Silero VAD downloads there at its first use",
+    async run({ app, home }) {
+      const sent = withMind(home, undefined, { words: WORDS });
+      const fixture = join(home, "fixture.aiff");
+      execFileSync("say", ["-o", fixture, "[[slnc 1500]] Herdr runs on the Beelink with Doppler"]);
+      execFileSync("defaults", ["write", join(home, "defaults"), "listen.always", "-bool", "true"]);
+      const started = Date.now();
+      const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
+      try {
+        await until("Always listen on", 20, async () => (await run.state()).listening.always);
+        const last = await until("the stretch's words", 240, async () => (await run.state()).listening.last);
+        const stretchSeconds = Math.round((Date.now() - started) / 100) / 10;
+        for (const term of ["Herdr", "Beelink", "Doppler"]) if (!last.text.includes(term)) throw new Error(`"${last.text}" has no ${term}`);
+        if (WRONG_BEELINK.test(last.text)) throw new Error(`"${last.text}" has a heard form of Beelink`);
+        if (!/^listen-\d+$/.test(last.stretch)) throw new Error(`the stretch is ${last.stretch}`);
+        await sleep(1500);
+        const { listening, dictation } = await run.state();
+        if (listening.stretches !== 1 || listening.listenSegments !== 1) throw new Error(`the fixture is one stretch: ${JSON.stringify(listening)}`);
+        if (dictation.ends !== 0) throw new Error(`no key was held, and a dictation ended: ${dictation.lastLine}`);
+        // write what I just said: the stretch, though no key was held while it was said
+        await run.control("listen.write");
+        const written = await until("the written stretch", 10, async () => (await run.state()).dictation.lastText);
+        if (written !== last.text) throw new Error(`wrote "${written}", the stretch is "${last.text}"`);
+        // the record's transcript track: its slot seals a second after the slot's end
+        const event = await until("the transcript in the mind", 45, () =>
+          sent().find((e) => e.type === "record/slot-stored" && e.payload?.tracks?.transcript),
+        );
+        const track = event.payload.tracks.transcript;
+        if (track.kind !== "transcript" || track.segments !== 1 || !/\/record\/transcript\/.*\.jsonl$/.test(track.file))
+          throw new Error(`the slot's transcript: ${JSON.stringify(track)}`);
+        if (!sent().some((line) => line.file === track.file.slice(1) && line.bytes === track.bytes)) throw new Error(`the mind has no ${track.file}`);
+        if (Object.keys(event.payload.tracks).length !== 1) throw new Error(`Always listen records no sound: ${Object.keys(event.payload.tracks)}`);
+        // the mark says it
+        const tree = JSON.stringify(await run.control("ui.tree"));
+        if (!tree.includes("Always listen: the microphone is open")) throw new Error("the mark's label does not say that Always listen is on");
+        // what Always listen costs in silence
+        await sleep(2000);
+        await run.control("perf.reset");
+        const before = (await run.state()).perf;
+        await sleep(20000);
+        const on = perfDelta(before, (await run.state()).perf);
+        const log = readFileSync(join(home, "logs/app.log"), "utf8");
+        const detector = /always listen: listens: (.+)/.exec(log)?.[1] ?? null;
+        const timing = /always listen: stretch \d+: ([^\n]+)/.exec(log)?.[1] ?? null;
+        return { on, detector, timing, stretchSeconds };
+      } finally {
+        await run.quit();
+      }
+    },
+  },
+
+  /**
    * A capture's voice, as pushed buffers with their times: the fixture, with 2 s of silence first,
    * through the recognizer that a capture uses (speech-bench), gives timed segments with the terms.
    */

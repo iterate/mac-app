@@ -326,7 +326,7 @@ final class MindInput: SpeechClient {
         guard !isListening, model.voice != .finishing, !model.draft.isSending, panel?.isVisible == true else { return }
         model.spoken = SpokenText(base: model.draft.text)
         model.level.level = 0
-        switch session.start(self, words: words(model.mind), allowed: { [weak self] in self?.listen(asking: false) }) {
+        switch session.start(self, words: words(model.mind), origin: .input, allowed: { [weak self] in self?.listen(asking: false) }) {
         case nil:
             log.info("listening: on")
             // after the microphone opened: the sound never holds it up. The bar has no end sound:

@@ -1,3 +1,5 @@
+import AVFoundation
+import CoreMedia
 import XCTest
 
 @testable import Record
@@ -383,5 +385,74 @@ final class CaptureTests: XCTestCase {
         XCTAssertEqual(RecordSource.of(track: "mic-0"), .mics)
         XCTAssertEqual(RecordSource.of(track: "test-2"), .synthetic)
         XCTAssertNil(RecordSource.of(track: "nothing"))
+    }
+}
+
+/// The transcript track: lines of the transcription stream into the slot in which they came, as
+/// one `.jsonl` file that the slot's event names (README, "Listening").
+final class TranscriptTrackTests: XCTestCase {
+    func testLinesGoIntoTheSlotsFileAndItsEvent() throws {
+        let spool = FileManager.default.temporaryDirectory.appendingPathComponent("record-tests-\(UUID().uuidString)")
+        let r = Recorder(options: RecordOptions(spool: spool, device: "test.mac"))
+        r.start()
+        r.set([.transcript])
+        // the source starts on the recorder's queue
+        for _ in 0..<100 where !r.trackIDs.contains("transcript") { Thread.sleep(forTimeInterval: 0.01) }
+        XCTAssertEqual(r.trackIDs, ["transcript"])
+        let lines = [Data("{\"text\":\"one\"}\n".utf8), Data("{\"text\":\"two\"}\n".utf8)]
+        for line in lines { XCTAssertTrue(r.transcribed(line)) }
+        r.stop()
+        XCTAssertFalse(r.transcribed(lines[0]), "no track after the stop")
+        let slots = try FileManager.default.contentsOfDirectory(atPath: spool.appendingPathComponent("slots").path).filter { $0.hasSuffix(".json") }
+        // two lines that came in two slots (a boundary between them) are two slots; else one
+        let tracks = try slots.map { name -> [String: Any] in
+            let payload = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: spool.appendingPathComponent("slots/\(name)"))) as? [String: Any])
+            return try XCTUnwrap((payload["tracks"] as? [String: [String: Any]])?["transcript"])
+        }
+        XCTAssertEqual(tracks.reduce(0) { $0 + ($1["segments"] as? Int ?? 0) }, 2)
+        var written = Data()
+        for track in tracks {
+            XCTAssertEqual(track["kind"] as? String, "transcript")
+            XCTAssertEqual(track["codec"] as? String, "jsonl")
+            let file = try XCTUnwrap(track["file"] as? String)
+            XCTAssertTrue(file.hasPrefix("/devices/test.mac/record/transcript/") && file.hasSuffix(".jsonl"), file)
+            let data = try Data(contentsOf: spool.appendingPathComponent(String(file.dropFirst())))
+            XCTAssertEqual(track["bytes"] as? Int, data.count)
+            written += data
+        }
+        XCTAssertEqual(written, lines.reduce(Data(), +))
+    }
+
+    func testTheSourceOfTheTranscriptTrack() {
+        XCTAssertEqual(RecordSource.of(track: "transcript"), .transcript)
+    }
+
+    /// A buffer of the microphone stream as `mic-0`'s sample: channel 0 alone, at its rate, with its time.
+    func testAStreamBufferIsAMonoSampleOfItsFirstChannel() throws {
+        final class NoFeed: MicrophoneFeed {
+            func open(_ take: @escaping @Sendable (AVAudioPCMBuffer, UInt64) -> Void, failed: @escaping @Sendable (String) -> Void) throws
+                -> (name: String, close: @Sendable () -> Void)
+            { ("none", {}) }
+        }
+        let r = Recorder(options: RecordOptions(spool: FileManager.default.temporaryDirectory, device: "test.mac"))
+        let mic = FeedMic(recorder: r, feed: NoFeed())
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 2))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 480))
+        buffer.frameLength = 480
+        for index in 0..<480 {
+            buffer.floatChannelData![0][index] = Float(index) / 480
+            buffer.floatChannelData![1][index] = -1
+        }
+        let host = mach_absolute_time()
+        let sample = try XCTUnwrap(mic.sample(of: buffer, host: host))
+        XCTAssertEqual(sample.numSamples, 480)
+        XCTAssertEqual(sample.presentationTimeStamp, CMClockMakeHostTimeFromSystemUnits(host))
+        let description = try XCTUnwrap(sample.formatDescription?.audioStreamBasicDescription)
+        XCTAssertEqual(description.mSampleRate, 48_000)
+        XCTAssertEqual(description.mChannelsPerFrame, 1)
+        let mono = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: AVAudioFormat(cmAudioFormatDescription: sample.formatDescription!), frameCapacity: 480))
+        mono.frameLength = 480
+        XCTAssertEqual(CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: 480, into: mono.mutableAudioBufferList), noErr)
+        XCTAssertEqual(mono.floatChannelData![0][240], 0.5)
     }
 }
