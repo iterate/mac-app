@@ -300,6 +300,7 @@ struct Panel: View {
     private var middle: some View {
         VStack(alignment: .leading, spacing: 0) {
             LiveWatching(live: model.live)
+            ControlSection(control: model.control)
             actionsSection(hasMind: true).padding(.top, 12)
             Group {
                 CanUseSection(
@@ -505,6 +506,7 @@ struct Panel: View {
         - One banner at a time; a newer one replaces it, but a plain banner never replaces a call. At most 6 a minute. Show one only when the person asked for it, or for something they said may interrupt them.
         - `await mac.record.state()`: the record of the Mac into the mind's files (`/devices/<name>/record/`): which of `screens`, `cameras`, `mics`, `speakers` and `windowText` are on, whether it records or is paused (locked, asleep), its tracks. Reading it uses nothing.
         - `await mac.record.set({ screens?, cameras?, mics?, speakers?, windowText? })`: turn sources on or off; it answers the new state. Off is always allowed. On is a use of that thing under its `sharing`, as a snapshot is (Screens and Speakers go by the displays, Window text by the window text), and it records until switched off: turn one on only when the person asked for it.
+        - `await mac.control.start({ by, display? })`: a session in which a person (`by`, their name) drives this Mac's mouse, keyboard and clipboard, as in a shared call. It answers `{ session, display }`. Then `await mac.control.input({ session, events })`, with events such as `{ t: "move", x, y }` (0 to 1 on the display), `{ t: "down" | "up", x, y, button }`, `{ t: "scroll", dx, dy }`, `{ t: "key", code: "Enter", down }` (a browser's `KeyboardEvent.code`) and `{ t: "text", text }`; `await mac.control.paste({ session, text, press? })` and `await mac.control.clipboard({ session })` for the clipboard; `await mac.control.end({ session })`. The owner sees a red border around the display, their own mouse and keys always win (`paused: true`), keys into a password are dropped (`withheld`), and a session ends after 30 s with no call. Start one only when the owner asked for it.
 
         The owner sees each use in the menu bar. Say what you looked at or did, and why.
         """
@@ -531,7 +533,7 @@ private struct CanUseSection: View {
     let cameraLayer: ((String) -> CALayer)?
     let bigPicture: (Shareable) async -> CGImage?
 
-    private static let groups: [[Power]] = [[.screen, .camera, .microphone, .accessibility], [.speaker, .banners], [.commands, .pages]]
+    private static let groups: [[Power]] = [[.screen, .camera, .microphone, .accessibility], [.speaker, .banners], [.commands, .pages], [.control]]
 
     var body: some View {
         let busy = busyWords()

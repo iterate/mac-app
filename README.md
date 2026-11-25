@@ -207,7 +207,7 @@ For a minimal app, delete the things it shares and their methods in `AppModel.sw
 bridge: `Camera.swift` and `CameraState.swift`, `AudioOwner.swift`, `AudioDevices.swift` and
 `MicrophoneState.swift`, `Speaker.swift`, `Banner.swift` and `BannerState.swift`, `Powers.swift`
 (screen, window text, commands), `Capture.swift` and `bridge/capture.mjs`, `MindInput.swift`,
-`InputDraft.swift` and `bridge/input.mjs`, `Presence.swift`, and their tests (and their jobs in
+`InputDraft.swift` and `bridge/input.mjs`, `Presence.swift`, both `RemoteControl.swift` (control), and their tests (and their jobs in
 `bridge/mind.mjs`); `swift build` then names what
 still refers to them, in the panel and the app's delegate. Then add your own method: a
 case in `AppModel.swift`, a function in the bridge, a line in its description.
@@ -243,6 +243,8 @@ await mac.call.unpublish({ context: "/agents/meet/x" }); // or { publication }; 
 await mac.record.state(); // { sources: { screens, cameras, mics, speakers }, windowText, recording, paused, line, tracks, … }
 await mac.record.set({ screens: true, mics: false }); // the new state; "on" is a use, as a snapshot is
 await mac.http({ path: "/state.json" }); // { status, headers, body }: this Mac's own pages (below)
+const { session } = await mac.control.start({ by: "Misha" }); // a person drives this Mac (below, "Control")
+await mac.control.input({ session, events: [{ t: "move", x: 0.5, y: 0.5 }, { t: "text", text: "hi" }] });
 ```
 
 ### Presence
@@ -579,6 +581,62 @@ What v0 does not do: the Mac's picture is not in your own tile (that needs the f
 publication from a second peer connection for one page); a publication does not come back after
 the mind's process connects again; no sound from the Mac; a guest has no Mac to choose; and the
 SFU's data channels (remote control, `control.input`) are not used yet.
+
+## Control: somebody drives this Mac
+
+A member of the mind (Misha, on a call with you) drives this Mac's mouse, keyboard and clipboard,
+as in a shared call: both of you have a pointer and keys, and yours win. **Control this Mac** is a
+thing in "A mind can use", Off (the default), Ask or Shared. A page or an agent of the mind calls
+the lend; this Mac posts the events as a mouse and a keyboard would. The picture of the screen
+comes some other way (the call's screen share, or Live).
+
+```js
+const { session, display } = await mac.control.start({ by: "Misha" }); // display: { id, pixelWidth, pixelHeight, pointWidth, pointHeight }
+await mac.control.input({ session, events: [
+  { t: "move", x: 0.42, y: 0.61 },                    // 0–1 on the display, from its top left
+  { t: "down", x: 0.42, y: 0.61, button: 0 },         // 0 left, 1 middle, 2 right; clicks: 2 for a double click
+  { t: "up", x: 0.42, y: 0.61, button: 0 },
+  { t: "scroll", dx: 0, dy: 120 },                    // pixels, as a WheelEvent's deltas
+  { t: "key", code: "KeyC", down: true, mods: ["meta"] }, // a KeyboardEvent.code: a physical key
+  { t: "key", code: "KeyC", down: false, mods: ["meta"] },
+  { t: "text", text: "Grüße" },                       // typed as it is, in any layout
+] }); // { applied, paused, withheld?, skipped?, problem? }
+await mac.control.paste({ session, text: "from my clipboard", press: true }); // the pasteboard, then ⌘V
+await mac.control.clipboard({ session }); // { text } of this Mac's pasteboard, at most 1 MB
+await mac.control.state(); // who drives which display, since when
+await mac.control.end({ session });
+```
+
+- **Your choice decides.** Off refuses (`control.start` fails with your words). Ask asks once for
+  the whole session: "Misha wants to control this Mac", with Touch ID. Shared begins it. `by` is
+  the name as the caller says it. Posting needs macOS's Accessibility, which the app already asks
+  for the window text; without it, `control.start` says so.
+- **You see it.** A thin red border around the controlled display (clicks go through it; it is in
+  no picture of the screen, as the pill is not), a red row in the panel with **End**, and
+  "Controlled by Misha" as a running act in Activity.
+- **You win.** Each move, click, scroll or key of yours pauses every session for 1 s, and lets go
+  of what a session held down, so that your moves are no drags. `control.input` then answers
+  `paused: true` and drops the batch. **⌃⌥⌘Esc** ends every session at once; so do End, Control at
+  Off, and another mind. A session also ends after 30 s with no call from its caller.
+- **Not your passwords.** While the focus is in a password field, a password manager or secure
+  input (`SecretKeys`), `key` and `text` events and `paste`'s ⌘V are dropped and counted as
+  `withheld`. The mouse still works. `control.clipboard` gives no password manager's copy (it is
+  marked concealed): `{ text: null, withheld }`.
+- **Keys are physical**, as a browser's `code` is: "KeyA" is the key left of S on any layout,
+  shortcuts too. Text in the person's own words is `text`; more than 2,000 characters is `paste`.
+  `paste` replaces your clipboard; it does nothing while you have the mouse (`paused`).
+- **Fast.** A batch is applied when it arrives, in order; consecutive moves are one, the last.
+  The app takes about 0.1 ms from a batch's arrival to its last event posted (a test with a fake
+  poster: `RemoteControlTests`); the log says the real figure each 500 batches. The rest is the
+  way there: the page, the mind, the lend and the app's socket. At most 4 sessions at once.
+
+How it is built: `ControlSessions` in `VoiceMeetCore` (`RemoteControl.swift`, with its tests) has
+the rules: the key table, the mapping of 0–1 to the display's points (any display, any scale),
+the moves folded into one, the click counts, the pause, the idle end, the sessions. The app's
+`RemoteControl.swift` posts what they say with `CGEvent` at the HID level, each event with a
+marker in its user data field; an event tap of the session tells the owner's input from the
+app's by that marker. A copy with a home of its own posts nothing (it counts) unless
+`ITERATE_CONTROL_POSTS=1`.
 
 ## This Mac's pages: a small site, served through the lend
 

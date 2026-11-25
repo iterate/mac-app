@@ -39,6 +39,8 @@ final class AppModel {
     let call = DeviceCall()
     /// The lent mind's OpenAI sockets, for dictation (`MindSockets`).
     let mindSockets = MindSockets()
+    /// Control: somebody of the mind drives this Mac (`RemoteControl`).
+    let control = RemoteControl()
     private var presenceWatch: AnyCancellable?
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
@@ -102,6 +104,10 @@ final class AppModel {
         }
         call.began = { [weak self] thing, doing, did in self?.acts.began(thing, doing: doing, did: did) ?? "" }
         call.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
+        control.began = { [weak self] who, display in
+            self?.acts.began(.control, doing: "Controlled by \(who)", did: "Controlled by \(who)", detail: "the display “\(display)”") ?? ""
+        }
+        control.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
         record.start()
     }
 
@@ -112,8 +118,13 @@ final class AppModel {
     /// bridge (`MindBridge`): the old one's process ends once no capture or input of it is left.
     func use(_ session: MindSession?, isAuthorized: Bool) {
         self.isAuthorized = isAuthorized
-        if !isAuthorized { approval.refuse() }
+        if !isAuthorized {
+            approval.refuse()
+            control.endAll(why: "the mind refused this Mac's key")
+        }
         guard session != self.session else { return }
+        // its acts end in the old mind's context, before the device's events turn to the new one
+        control.endAll(why: "the Mac is lent to another mind, or none")
         self.session = session
         let old = bridge
         bridge = session.map(MindBridge.of)
@@ -137,6 +148,7 @@ final class AppModel {
     func shutDown() {
         endpoint.stop()
         endPageStreams(why: "the app quits")
+        control.endAll(why: "the app quits")
         live.stop()
         call.stop()
         acts.stop()
@@ -172,6 +184,8 @@ final class AppModel {
     /// A thing on "Ask" waits for the person's approval. A caller can change no choice and can
     /// bring up no permission prompt: the person does both in the panel.
     private func answer(_ method: String, _ parameters: [String: Any]) async throws -> [String: Any] {
+        // for the log: from a batch's arrival to its events posted (`RemoteControl.input`)
+        let arrived = DispatchTime.now().uptimeNanoseconds
         guard isAuthorized else { throw EndpointRefusal("The mind refuses this Mac's key now: a member allows it again.") }
         let maxWidth = parameters["maxWidth"] as? Int ?? 1600
         switch method {
@@ -290,9 +304,29 @@ final class AppModel {
             return call.unpublish(ids, why: "ended by a call to call.unpublish")
         case "call.state":
             return call.state()
+        case "control.start":
+            return try await startControl(parameters)
+        case "control.input":
+            guard let events = parameters["events"] as? [Any] else { throw EndpointRefusal("control.input needs events, a list.") }
+            return try control.input(try Self.session(parameters), events: events, arrived: arrived)
+        case "control.paste":
+            guard let text = parameters["text"] as? String else { throw EndpointRefusal("control.paste needs text, a string.") }
+            return try control.paste(try Self.session(parameters), text: text, press: parameters["press"] as? Bool ?? false)
+        case "control.clipboard":
+            return try control.clipboard(try Self.session(parameters))
+        case "control.state":
+            return control.state()
+        case "control.end":
+            // ending a session is no use of the Mac: always allowed
+            let id = try Self.session(parameters)
+            guard control.has(id) else {
+                throw EndpointRefusal("control.end: no session \(id.prefix(40)) now.")
+            }
+            control.end(id, why: "ended by a call to control.end")
+            return control.state()
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, call.publish, call.unpublish, call.state, pages.state, pages.live.start, pages.live.frame, pages.live.stop."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
             )
         }
     }
@@ -425,6 +459,58 @@ final class AppModel {
         }
         for item in things where tracks.contains(item.track) { item.things.forEach(count) }
         return (tracks, LiveTracks.nothing(asked: asked, approved: approved))
+    }
+
+    // MARK: - Control
+
+    private static func session(_ parameters: [String: Any]) throws -> String {
+        guard let id = parameters["session"] as? String, !id.isEmpty else {
+            throw EndpointRefusal("This needs session: the one control.start answered.")
+        }
+        return id
+    }
+
+    /// `control.start`: a use of Control this Mac under the owner's choice, through the same gate
+    /// as every use. Off refuses; Ask asks once for the whole session ("<who> wants to control this
+    /// Mac"); Shared begins it. Posting needs Accessibility: without it the call says so.
+    private func startControl(_ parameters: [String: Any]) async throws -> [String: Any] {
+        let thing = Shareable.control
+        let named = (parameters["by"] as? String).map { Self.oneLine($0, limit: 60) } ?? ""
+        let who = named.isEmpty ? "Somebody of the mind" : named
+        let display: (id: CGDirectDisplayID, name: String)
+        if let index = parameters["display"] as? Int {
+            guard Screen.displays.indices.contains(index) else {
+                throw EndpointRefusal("No display \(index): state().things has each display's number.")
+            }
+            display = Screen.displays[index]
+        } else {
+            let main = CGMainDisplayID()
+            display = Screen.displays.first { $0.id == main } ?? (main, "the main display")
+        }
+        let permitted = thing.isPermitted && CGPreflightPostEventAccess()
+        let round = approval.round
+        switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted, approved: approval.isApproved(thing) != nil) {
+        case .off:
+            throw EndpointRefusal("The Mac's owner has \(thing.title) off in the iterate panel: nobody controls this Mac.")
+        case .notPermitted:
+            throw EndpointRefusal(
+                "macOS has not given this app Accessibility, which the mouse and the keys need. The Mac's owner gives it from the iterate panel, at \(thing.title).")
+        case .ask:
+            try await approval.ask(
+                for: [thing], does: "let \(who) control this Mac",
+                what: "\(who) wants to control this Mac: the mouse, the keyboard and the clipboard, on the display “\(display.name)”. It lasts until they stop, 30 s pass with no input from them, or you end it: the panel's End, or ⌃⌥⌘Esc. Your own mouse and keys always win.")
+            try stillAllowed(thing, in: round, permitted: thing.isPermitted && CGPreflightPostEventAccess())
+        case .go:
+            break
+        }
+        count(thing)
+        return try control.start(who: who, display: display.id, name: display.name)
+    }
+
+    /// The owner changed a choice: Control this Mac at Off (or without Accessibility) ends every session.
+    func controlChoicesChanged() {
+        guard control.isRunning, Shareable.control.sharing == .off || !Shareable.control.isPermitted else { return }
+        control.endAll(why: "the owner turned \(Shareable.control.title) off")
     }
 
     // MARK: - The record's switches

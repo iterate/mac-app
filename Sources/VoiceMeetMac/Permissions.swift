@@ -125,6 +125,8 @@ enum Power: String, CaseIterable {
     case banners
     /// This Mac's own pages, served through the lend (`http`, `PagePowers.swift`): compute, beside commands.
     case pages
+    /// Somebody drives this Mac: the mouse, the keyboard and the clipboard (`RemoteControl.swift`).
+    case control
 
     /// The permission of macOS that the power needs. The speakers, commands, banners and pages need none.
     var permission: Permission? {
@@ -132,7 +134,7 @@ enum Power: String, CaseIterable {
         case .screen: return .screenRecording
         case .camera: return .camera
         case .microphone: return .microphone
-        case .accessibility: return .accessibility
+        case .accessibility, .control: return .accessibility
         case .speaker, .commands, .banners, .pages: return nil
         }
     }
@@ -195,11 +197,15 @@ struct Shareable: Identifiable, Hashable {
     static let banners = Shareable(id: "banners", power: .banners, title: "Banners", does: "show banners on the screen", symbol: "bell.badge")
     /// This Mac's pages (`pages/` of the package): its state, and a live view that also goes by the display's choice.
     static let pages = Shareable(id: "pages", power: .pages, title: "Pages", does: "open this Mac's pages", symbol: "globe")
+    /// Somebody of the mind drives this Mac, as in a shared call: one question for each session.
+    static let control = Shareable(
+        id: "control", power: .control, title: "Control this Mac", does: "control this Mac's mouse, keyboard and clipboard",
+        symbol: "cursorarrow.motionlines")
 
     /// Everything on this Mac now, in the panel's order.
     @MainActor
     static var all: [Shareable] {
-        Screen.displays.map(display) + Cameras.list.map(camera) + [microphone, speaker, banners, accessibility, commands, pages]
+        Screen.displays.map(display) + Cameras.list.map(camera) + [microphone, speaker, banners, accessibility, commands, pages, control]
     }
 }
 
