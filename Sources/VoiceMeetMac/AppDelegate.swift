@@ -1038,6 +1038,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         log.info("sharing: " + Shareable.all.map(Self.line).joined(separator: "; "))
         stateDidChange()
         model.liveChoicesChanged()
+        model.controlChoicesChanged()
         if panelWindow.isShown { syncPreviews() }
         // A thing was turned on whose permission macOS has not given: the guide starts.
         if let permission = Shareable.all.first(where: { $0.sharing != .off && !$0.isPermitted })?.power.permission,

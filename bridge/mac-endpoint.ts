@@ -22,7 +22,7 @@ import { pages } from "./pages.mjs";
  *  characters ("a rewrite rule's description is one line: a string of at most 500 chars"), and the
  *  lend then never goes live: keep this well under it. The detail is in `instructions` below. */
 export const description =
-  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, the front window as text. Outputs: speakers, banners with buttons (banner.show; call.ring looks like a call). Compute: commands; http(): its own pages. A record into the mind: record.state, record.set. Live: live.state, live.end. A person is often near it: state().presence says if one is likely there now. The owner sets each thing to off, ask or shared, and sees each use in the menu bar.";
+  "A person's Mac as an endpoint device, through its iterate menu-bar app. Inputs: screen, camera, microphone, front window as text. Outputs: speakers, banners (banner.show; call.ring looks like a call). Compute: commands; http(): its pages. record.state/set: a record into the mind. live.state/end. control.*: a person drives its mouse, keys and clipboard. state().presence: is a person likely there. The owner sets each thing to off, ask or shared, and sees each use.";
 
 /** The app's socket: in its own home when the app has one (`ITERATE_MAC_HOME`, AppEnvironment.swift). */
 const socketPath = process.env.ITERATE_MAC_HOME
@@ -214,6 +214,34 @@ type LiveState = {
   signalling: boolean;
 };
 
+/** One event of `control.input`: coordinates 0–1 on the session's display, from its top left. */
+type ControlEvent =
+  | { t: "move"; x: number; y: number }
+  /** `button` as a browser's MouseEvent.button: 0 left, 1 middle, 2 right. `clicks`: 2 for a
+   *  double click (the Mac counts by itself when left out). */
+  | { t: "down" | "up"; x: number; y: number; button?: 0 | 1 | 2; clicks?: number; mods?: ControlModifier[] }
+  /** Pixels, as a browser's WheelEvent.deltaX and deltaY (positive: right and down). */
+  | { t: "scroll"; dx?: number; dy?: number }
+  /** `code`: a browser's KeyboardEvent.code, a physical key ("KeyA", "Enter", "ArrowLeft", "MetaLeft"). */
+  | { t: "key"; code: string; down: boolean; mods?: ControlModifier[] }
+  /** Text typed as it is, in any language (at most 2,000 characters; a line end is Return). */
+  | { t: "text"; text: string };
+type ControlModifier = "shift" | "ctrl" | "alt" | "meta";
+
+/** `control.input`'s answer: `paused` while the owner's own input wins (1 s after it); `withheld`
+ *  counts keys and text dropped because the focus is in a password. */
+type ControlInputAnswer = { applied: number; paused: boolean; withheld?: number; skipped?: number; problem?: string };
+
+type ControlDisplay = { id: number; pixelWidth: number; pixelHeight: number; pointWidth: number; pointHeight: number };
+
+/** Who drives this Mac now (`control.state`), as RemoteControl.swift gives it. */
+type ControlState = {
+  sharing: "off" | "ask" | "shared";
+  permitted: boolean;
+  paused: boolean;
+  sessions: { session: string; who: string; display: ControlDisplay & { name: string }; since: number; idleSeconds: number }[];
+};
+
 /** THE PROVIDED OBJECT: what `iterate provide` lends. Each call fails with the app's own words
  *  when the owner has the thing off, does not approve the use, or macOS has not given the app the
  *  permission. */
@@ -302,6 +330,30 @@ export default async function macEndpoint() {
       /** Ends one watch now: the page hears `bye`. Always allowed. */
       end: (input: { watcher: string }) => ask("live.end", input) as Promise<LiveState>,
     },
+    control: {
+      /** Begins a session in which `by` (a name, as the caller says it) drives this Mac's mouse,
+       *  keyboard and clipboard, on `display` (the number in `state().things`; the main display
+       *  when left out). Under the owner's choice for "Control this Mac": off refuses; ask asks
+       *  once for the session (Touch ID); shared begins it. The owner sees a red border and a row
+       *  with End; their own mouse and keys win (each pauses the session for 1 s); ⌃⌥⌘Esc ends
+       *  every session. It ends after 30 s with no call. */
+      start: (input: { display?: number; by?: string } = {}) =>
+        ask("control.start", input) as Promise<{ session: string; display: ControlDisplay }>,
+      /** A batch of events, applied in order at once; consecutive moves are one. */
+      input: (input: { session: string; events: ControlEvent[] }) =>
+        ask("control.input", input) as Promise<ControlInputAnswer>,
+      /** Puts text on the Mac's pasteboard (at most 1 MB), and presses ⌘V with `press`. */
+      paste: (input: { session: string; text: string; press?: boolean }) =>
+        ask("control.paste", input) as Promise<{ pasted: boolean; paused: boolean; characters?: number; pressed?: boolean; withheld?: number }>,
+      /** The Mac's pasteboard as text (at most 1 MB); null when it holds no text, or a password
+       *  manager's copy (`withheld` says so). */
+      clipboard: (input: { session: string }) =>
+        ask("control.clipboard", input) as Promise<{ text: string | null; truncated?: boolean; withheld?: string }>,
+      /** Who drives which display, since when. Reading it is no use. */
+      state: () => ask("control.state") as Promise<ControlState>,
+      /** Ends a session now. Always allowed. */
+      end: (input: { session: string }) => ask("control.end", input) as Promise<ControlState>,
+    },
     call: {
       /** A banner that looks like a call: `from` (who calls; the agent's path when none) and
        *  `reason`, Decline and Accept as round phone buttons, the ring sound, 30 s. Accept opens
@@ -324,7 +376,7 @@ export default async function macEndpoint() {
       return {
         instructions: `${description} Say what you looked at or did, and why.`,
         types:
-          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands' | 'pages'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean }; record: { recording: boolean; paused: boolean; line: string }; live: { watchers: string[] } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>; record.state(): Promise<RecordState>; record.set(input: { screens?: boolean; cameras?: boolean; mics?: boolean; speakers?: boolean; windowText?: boolean }): Promise<RecordState> (a source turned on is a use under its power's choice; off is always allowed); live.state(): Promise<LiveState>; live.end(input: { watcher: string }): Promise<LiveState> (ends a watch; always allowed); http(request: { method?: 'GET'; path: '/' | '/state.json' | '/live.mjpeg'; query?: { display?: string }; headers?: Record<string, string> }): Promise<{ status: number; headers: Record<string, string>; body: string | Uint8Array | ReadableStream<Uint8Array> }> (this Mac's own pages; a site returns new Response(body, { status, headers })); type LiveState = { watchers: { watcher: string; who: string; tracks: string[]; since: number }[]; signalling: boolean }; type RecordState = { sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean }; windowText: boolean; recording: boolean; paused: boolean; line: string; tracks: string[]; waitingSlots: number; uploadFailure?: string; mind?: string; device?: string };",
+          "state(): Promise<{ things: { thing: string; kind: 'screen' | 'camera' | 'microphone' | 'speaker' | 'banners' | 'accessibility' | 'commands' | 'pages' | 'control'; name: string; sharing: 'off' | 'ask' | 'shared'; permitted: boolean; uses: number; display?: number }[]; microphone: string; presence: { idleSeconds: number; screenLocked: boolean; displayAsleep: boolean }; record: { recording: boolean; paused: boolean; line: string }; live: { watchers: string[] } }>; screen.snapshot(input?: { display?: number; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; camera.snapshot(input?: { camera?: string; maxWidth?: number }): Promise<{ jpeg: Uint8Array; pixelWidth: number; pixelHeight: number }>; microphone.listen(input?: { seconds?: number }): Promise<{ wav: Uint8Array; seconds: number }>; speaker.play(sound: Uint8Array): Promise<{ seconds: number }>; speaker.say(words: string): Promise<{ characters: number }>; accessibility.frontWindow(input?: { maxDepth?: number; maxNodes?: number }): Promise<{ application: string; bundleIdentifier: string; window?: object; truncated: boolean }>; run(argv: string[], options?: { stdin?: string | Uint8Array; timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: Uint8Array; stderr: Uint8Array }>; appleScript(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; swift(source: string, options?: { timeoutSeconds?: number }): Promise<{ exitCode: number; timedOut: boolean; stdout: string; stderr: string }>; banner.show(input: { title: string; body?: string; buttons?: { label: string; style?: 'accept' | 'decline' | 'plain'; symbol?: string; open?: string }[]; sound?: 'ring' | 'chime' | 'none'; seconds?: number }): Promise<{ pressed: string } | { pressed: null; why: 'no answer' | 'dismissed' | 'replaced' | 'off'; words: string }>; call.ring(input: { agent: string; from?: string; reason?: string; url?: string }): Promise<{ accepted: true } | { accepted: false; why: 'declined' | 'no answer' | 'replaced' | 'off'; words: string }>; record.state(): Promise<RecordState>; record.set(input: { screens?: boolean; cameras?: boolean; mics?: boolean; speakers?: boolean; windowText?: boolean }): Promise<RecordState> (a source turned on is a use under its power's choice; off is always allowed); live.state(): Promise<LiveState>; live.end(input: { watcher: string }): Promise<LiveState> (ends a watch; always allowed); http(request: { method?: 'GET'; path: '/' | '/state.json' | '/live.mjpeg'; query?: { display?: string }; headers?: Record<string, string> }): Promise<{ status: number; headers: Record<string, string>; body: string | Uint8Array | ReadableStream<Uint8Array> }> (this Mac's own pages; a site returns new Response(body, { status, headers })); control.start(input?: { display?: number; by?: string }): Promise<{ session: string; display: ControlDisplay }> (a person drives the mouse, keys and clipboard; a use under the owner's choice; ends after 30 s with no call); control.input(input: { session: string; events: ControlEvent[] }): Promise<{ applied: number; paused: boolean; withheld?: number; skipped?: number; problem?: string }>; control.paste(input: { session: string; text: string; press?: boolean }): Promise<{ pasted: boolean; paused: boolean; pressed?: boolean; withheld?: number }>; control.clipboard(input: { session: string }): Promise<{ text: string | null; truncated?: boolean; withheld?: string }>; control.state(): Promise<ControlState>; control.end(input: { session: string }): Promise<ControlState>; type ControlEvent = { t: 'move'; x: number; y: number } | { t: 'down' | 'up'; x: number; y: number; button?: 0 | 1 | 2; clicks?: number; mods?: ('shift' | 'ctrl' | 'alt' | 'meta')[] } | { t: 'scroll'; dx?: number; dy?: number } | { t: 'key'; code: string; down: boolean; mods?: ('shift' | 'ctrl' | 'alt' | 'meta')[] } | { t: 'text'; text: string } (x, y 0–1 on the session's display; code a KeyboardEvent.code; dx, dy pixels as a WheelEvent's); type ControlDisplay = { id: number; pixelWidth: number; pixelHeight: number; pointWidth: number; pointHeight: number }; type ControlState = { sharing: 'off' | 'ask' | 'shared'; permitted: boolean; paused: boolean; sessions: { session: string; who: string; display: ControlDisplay & { name: string }; since: number; idleSeconds: number }[] }; type LiveState = { watchers: { watcher: string; who: string; tracks: string[]; since: number }[]; signalling: boolean }; type RecordState = { sources: { screens: boolean; cameras: boolean; mics: boolean; speakers: boolean }; windowText: boolean; recording: boolean; paused: boolean; line: string; tracks: string[]; waitingSlots: number; uploadFailure?: string; mind?: string; device?: string };",
       };
     },
   };
