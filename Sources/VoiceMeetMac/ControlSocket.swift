@@ -52,7 +52,23 @@ final class ControlSocket {
         endpoint.onRequest = { [weak self] method, parameters in try self?.answer(method, parameters) ?? [:] }
     }
 
-    func start() { endpoint.start() }
+    func start() {
+        endpoint.start()
+        countWakes()
+    }
+
+    /// The wakes of the main thread (`mainWakes`) and the events it is given (`events.<type>`), for
+    /// `perf`: what wakes an idle copy.
+    private func countWakes() {
+        let observer = CFRunLoopObserverCreateWithHandler(nil, CFRunLoopActivity.afterWaiting.rawValue, true, 0) { _, _ in
+            Perf.count("mainWakes")
+        }
+        CFRunLoopAddObserver(CFRunLoopGetMain(), observer, .commonModes)
+        _ = NSEvent.addLocalMonitorForEvents(matching: .any) { event in
+            Perf.count("events.\(event.type.rawValue)")
+            return event
+        }
+    }
 
     /// SwiftUI makes its accessibility elements only while an assistive app asks for them, and
     /// such an app says so with this attribute: `ui.tree` needs them too. Before the first view.
