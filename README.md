@@ -429,9 +429,25 @@ default input, read from the app's one microphone stream:
 ```
 
 Screens are 10 frames a second at the display's own pixels (only frames that changed), cameras
-720p at 15, both HEVC at quality 0.45 with a keyframe at the slot's start and every 10 s. Sound is
+720p at up to 15, both HEVC at quality 0.45 with a keyframe at the slot's start and every 10 s. Sound is
 AAC at 48 kHz, on the same clock as the picture. Windows of password managers are left out of
 the screens.
+
+What does not change costs almost nothing (`Sources/Record/Quiet.swift`):
+
+- **A camera** keeps a frame only when its picture changed since the last frame it kept (the mean
+  difference of a 32×18 copy of the luma is 1.5 levels or more), and at least one a second. Each
+  kept frame lasts until the next. Measured on the owner's camera: a still room 0.0–0.5, a person
+  who sits and talks 0.5, a head turn or a hand 2–44.
+- **Sound** below a loudness (20 ms RMS under −50 dBFS for a microphone, −70 for the speakers),
+  from 0.5 s after the last sound on, starts no encoder: the file has a silent AAC packet for
+  each 1024 samples, so it plays as long and as true as before, and `rms`, `peak` and `levels`
+  are of every sample. The encoder starts again 250 ms before the next sound. Measured on the
+  owner's microphone: speech −46 dBFS (median), a quiet room −68, typing −60.
+- **The speakers' capture** runs only while another app plays sound (Core Audio's
+  `kAudioProcessPropertyIsRunningOutput` of each process, with listeners), and stops 2 s after the
+  last one stops; meanwhile the track is silence by the clock. The first moments of a sound, while
+  the capture opens again, are not recorded.
 
 The recorder (`Sources/Record`) writes each slot's files into a spool on this Mac first
 (`~/Library/Application Support/iterate-mac-app/record/<mind>/`, a file's path there is its path
@@ -1115,7 +1131,7 @@ view draws as its baseline (`node harness/snapshots.mjs`), and the app runs its 
 ./run-on-mac.sh               # build, install in /Applications, open, follow the logs
 ./run-on-mac.sh --build-only  # build and sign .build/iterate.app only
 ./run-on-mac.sh --logs        # follow the app's log
-swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record, the mark, record.set's rule, live, the input's draft
+swift test                    # the state machines' tests (needs Xcode): microphone, camera, lend, banner, the record (with its camera change rule, sound gate and silent slots), the mark, record.set's rule, live, the input's draft
 node --test 'bridge/*.test.mjs'  # the mind's process and its jobs: a fake mind that ends sessions (1008) and subscriptions
 npx .                         # the installer from this folder
 npx . init /tmp/mac --no-install   # a copy, without building or installing it

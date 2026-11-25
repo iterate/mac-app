@@ -24,7 +24,7 @@ final class Synthetic: Source {
     init(recorder: Recorder) {
         r = recorder
         video = VideoTrack(id: "test-1", recorder: recorder, pausable: false)
-        audio = AudioTrack(id: "test-2", recorder: recorder, channels: 1, bitrate: 64_000)
+        audio = AudioTrack(id: "test-2", recorder: recorder, channels: 1, bitrate: 64_000, thresholdDB: SoundGate.speakersDB)
         let attributes: [CFString: Any] = [
             kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey: Synthetic.width,
             kCVPixelBufferHeightKey: Synthetic.height, kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,

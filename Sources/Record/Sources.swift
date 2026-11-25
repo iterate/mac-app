@@ -359,7 +359,13 @@ final class DeviceCapture: NSObject, Source, AVCaptureVideoDataOutputSampleBuffe
 /// The track's time is ScreenCaptureKit's own stamp, with nothing added: measured on 21 Nov 2026,
 /// it is 1.2 ms after the time the microphone track gives the same sound (MacBook Pro speakers
 /// and microphone). Not measured: a Bluetooth output.
+///
+/// The stream runs only while another process plays sound (`OutputWatch`): it opens when one
+/// starts, and stops 2 s after the last one stopped. Meanwhile the track writes silence by the
+/// clock (`AudioTrack.quiet`). A sound's first moments, while the stream opens, are not recorded.
 final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
+    /// How long the stream runs on after the last sound: a short pause does not close and open it.
+    static let linger = 2.0
     private let r: Recorder
     private let track: AudioTrack
     private let queue = DispatchQueue(label: "record.speakers")
@@ -370,15 +376,62 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     private var restarts = 0, openedAt = 0.0
     /// On `queue`: one stream, whatever asks for an open (`Opens`).
     private var opens = Opens()
+    /// On `queue`: whether another process plays sound, so the stream should run.
+    private var watch: OutputWatch?
+    private var playing = false
+    private var pendingStop: DispatchWorkItem?
 
     init(recorder: Recorder) {
         r = recorder
-        track = AudioTrack(id: "speaker-0", recorder: recorder, channels: 2, bitrate: 128_000)
+        track = AudioTrack(id: "speaker-0", recorder: recorder, channels: 2, bitrate: 128_000, thresholdDB: SoundGate.speakersDB)
     }
 
     func start() {
         guard CGPreflightScreenCaptureAccess() else { return log("speakers: off, no Screen Recording permission") }
-        openAgain(again: true)
+        let playing = queue.sync { () -> Bool in
+            let watch = OutputWatch(queue: queue) { [weak self] in self?.playingChanged($0) }
+            self.watch = watch
+            self.playing = watch.start()
+            return self.playing
+        }
+        if playing {
+            openAgain(again: true)
+        } else {
+            track.quiet()
+            log("speaker-0: nothing plays; the capture opens when a sound does")
+        }
+    }
+
+    /// On `queue`: a process began or ended playing sound.
+    private func playingChanged(_ now: Bool) {
+        guard !stopped else { return }
+        pendingStop?.cancel()
+        pendingStop = nil
+        if now {
+            playing = true
+            guard stream == nil, let number = opens.begin(again: false) else { return }
+            log("speaker-0: a sound plays; the capture opens")
+            Task {
+                await self.open(number)
+                self.queue.sync { self.opens.end(number) }
+            }
+        } else {
+            let item = DispatchWorkItem { [weak self] in self?.nothingPlays() }
+            pendingStop = item
+            queue.asyncAfter(deadline: .now() + Speakers.linger, execute: item)
+        }
+    }
+
+    /// On `queue`: nothing played for `linger`: the stream stops, and the track writes silence.
+    private func nothingPlays() {
+        guard !stopped, !(watch?.playing ?? false) else { return }
+        playing = false
+        pendingStop = nil
+        track.quiet()
+        guard let stream else { return }
+        self.stream = nil
+        Task { try? await stream.stopCapture() }
+        log("speaker-0: nothing plays; the capture stops")
     }
 
     /// A new open, unless one runs and `again` is false.
@@ -419,7 +472,7 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         }
         // a stop or a newer open came during the start: this stream goes
         let keep = queue.sync { () -> Bool in
-            guard !stopped, opens.keeps(number), self.stream == nil else { return false }
+            guard !stopped, playing, opens.keeps(number), self.stream == nil else { return false }
             (self.stream, openedAt) = (stream, ProcessInfo.processInfo.systemUptime)
             return true
         }
@@ -438,11 +491,12 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
         queue.async {
             guard !self.stopped, self.stream === stream else { return }
             self.stream = nil
+            guard self.playing else { return self.track.quiet() }
             self.restarts += 1
             guard self.restarts <= 5 else { return log("speaker-0: stopped (\(error.localizedDescription)); 5 restarts in a row, staying off") }
             log("speaker-0: stopped (\(error.localizedDescription)); opening again in 1 s (restart \(self.restarts) of 5)")
             self.queue.asyncAfter(deadline: .now() + 1) {
-                guard !self.stopped, let number = self.opens.begin(again: true) else { return }
+                guard !self.stopped, self.playing, let number = self.opens.begin(again: true) else { return }
                 Task {
                     await self.open(number)
                     self.queue.sync { self.opens.end(number) }
@@ -452,13 +506,15 @@ final class Speakers: NSObject, Source, SCStreamOutput, SCStreamDelegate {
     }
 
     func resumed() {
-        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { stream == nil }) else { return }
+        guard CGPreflightScreenCaptureAccess(), queue.sync(execute: { stream == nil && playing }) else { return }
         openAgain(again: false)
     }
 
     func stop() {
+        watch?.stop()
         let old = queue.sync { () -> SCStream? in
             stopped = true
+            pendingStop?.cancel()
             opens.stop()
             defer { stream = nil }
             return stream
