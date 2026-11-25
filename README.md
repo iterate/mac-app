@@ -532,18 +532,23 @@ mind's choice, and it can change with no new build of this app.
 ## Dictation: talk, and it is written
 
 Hold **fn** (🌐) in any app and talk. Let go, and what you said is written where the cursor is.
-Tap fn twice to talk with no key held (hands-free), until the next tap of fn; Escape cancels. One
-short tap does nothing, and fn with another key is that key's combination. This is how Wispr
-Flow works. **⌥⇧D** works too, as the open source app [Hex](https://github.com/anomalyco/hex) does
-it: hold it and talk; a short press keeps the dictation on until the next press. A pill at the
-bottom of the screen shows the words while you talk, and how the dictation ends ("let go of fn to
-write", "hands-free · tap fn to stop").
+Double-tap fn (two presses within half a second) and the dictation stays on with no key held: the
+next press of fn ends it and writes the text, and **Esc** ends it and writes nothing. This is how
+Wispr Flow works. A press shorter than 0.35 s listens until half a second after it went down; with
+no second press, the sound is thrown away. fn with another key (fn-arrow, fn-delete) is that key's
+combination: the dictation it started ends with no sign. **⌥⇧D** works too, as the open source
+app [Hex](https://github.com/anomalyco/hex) does it: hold it and talk; a short press keeps the
+dictation on until the next press. The panel's **Dictate** button starts one that stays on. A pill
+at the bottom of the screen shows the words on one row while you talk, the newest at the right,
+with a lock while it stays on and the time since the start.
 
-- **fn needs Accessibility.** The app reads fn from the keyboard's modifier keys in every app,
-  which macOS gives only to an app with Accessibility (the permission that also writes the text
-  for you). Without it, the panel's speech row says so, with a button for the guide. macOS
-  can act on 🌐 too (the emoji picker, or its own dictation): when System Settings › Keyboard ›
-  "Press 🌐 key to" is not "Do Nothing", the panel says to set it. The app changes no setting.
+- **fn needs Accessibility.** The app hears fn with one event tap of the session, which macOS
+  gives only to an app with Accessibility (the permission that also writes the text for you). The
+  tap swallows one key: Esc while a dictation stays on, so that Esc does not reach the app in
+  front. Without the permission, ⌥⇧D still works, its first use opens the permission's guide, and
+  the panel's speech row says so. macOS can act on 🌐 too (the emoji picker, or its own
+  dictation): when System Settings › Keyboard › "Press 🌐 key to" is not "Do Nothing", the panel
+  says to set it. The app changes no setting.
 - **One listening at a time.** Dictation and the input bar share one microphone listening
   (`SpeechSession`). When one starts while the other listens, the other ends first: its last words
   are written where they belonged.
@@ -739,7 +744,7 @@ draws a banner (`ring`, `request` or `notice`; add `dark` for the dark appearanc
 `--render-ring ring.png` is the ring's. `--render-switcher <folder>` draws the mind switcher,
 closed and open, light and dark, four files. `--render-input <folder>` draws the input bar (empty,
 listening, with a text and files, while it sends, not sent) and the dictation pill (loading,
-listening, failed), light and dark, sixteen files. `--render-all <folder>` draws every view, light
+listening, locked, failed), light and dark, eighteen files. `--render-all <folder>` draws every view, light
 and dark.
 
 **The speech bench** (local only, never in CI) compares speech-to-text engines on sentences with
@@ -810,8 +815,8 @@ connection, as the endpoint's; a mind never reaches it.
 | `ui.press {id, label?}` | Presses the control with that accessibility identifier; `label` picks a segment (`{"id":"sharing.commands","label":"Ask"}`) |
 | `ui.type {id, text}` | Types into it (`input.text`) |
 | `input.toggle`, `capture.toggle`, `capture.mark {points}` | ⌥⇧Space, ⌥⇧S, and ink (points of the display from its top left) |
-| `dictation.start`, `dictation.stop` | ⌥⇧D down and up |
-| `dictation.fn {down}` | fn down (`true`) or up (`false`): a hold, or two taps for hands-free |
+| `dictation.start`, `dictation.stop` | A hold of fn: fn down, and fn up at least 0.35 s after it |
+| `dictation.fn {down}`, `dictation.esc` | fn down (`true`) or up (`false`), and Esc: a hold, a tap, or two taps that keep it on |
 | `approval.answer {allow, keep?}` | Answers the Ask question that waits; `keep` approves for 30 minutes. While the socket is open, a question shows no alert and asks for no Touch ID |
 
 The identifiers: `statusItem`, `panel.reconnect`, `panel.openInput`, `panel.copyPrompt`, `panel.quit`,
@@ -857,8 +862,9 @@ command on Ask is approved, then denied, through the socket), `mind-switch` (two
 approval for 30 minutes given while lent to A does not hold after config.json switches to B, and no
 device event reaches A after the switch), and the local ones, which need the speech models in
 `~/Library/Application Support/FluidAudio`: `dictation-fixture` (a sentence from `say -o` is
-written with the word list's Herdr, Beelink and Doppler), `dictation-fn` (one tap of fn does
-nothing; a hold and a double tap each write the sentence), `capture-transcript-fixture` (the
+written with the word list's Herdr, Beelink and Doppler), `dictation-fn` (one tap of fn
+listens until its window ends and leaves no line; a hold writes the sentence; a double tap locks
+it until the next press of fn, which writes it; a lock that Esc ends writes nothing), `capture-transcript-fixture` (the
 sentence after 2 s of silence, pushed as a capture's buffers with their times, gives segments with
 the terms that start after the silence) and `speech-model` (Ultra chosen through `ui.press` is
 the stored choice). CI runs `ci`, every scenario but the local ones. `--keep` keeps the homes and their logs.

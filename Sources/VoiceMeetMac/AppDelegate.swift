@@ -77,9 +77,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 },
                 dictate: { [weak self] in
                     self?.popover.performClose(nil)
-                    // a short press of ⌥⇧D: a dictation that stays on until the next press
-                    self?.dictation.pressed()
-                    self?.dictation.released()
+                    // a tap of ⌥⇧D: a dictation that stays on until the next press
+                    self?.dictation.shortcutPressed()
+                    self?.dictation.shortcutReleased()
                 }
             ),
             lendActions: LendActions(
@@ -227,11 +227,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         dictation.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         dictation.allow = { [weak self] permission in self?.guide(permission) }
         dictation.onChange = { [weak self] in self?.stateDidChange() }
-        control?.dictationPressed = { [weak self] in self?.dictation.pressed() }
-        control?.dictationReleased = { [weak self] in self?.dictation.released() }
+        control?.dictationPressed = { [weak self] in self?.dictation.holdStarted() }
+        control?.dictationReleased = { [weak self] in self?.dictation.holdEnded() }
         control?.dictationFn = { [weak self] down in self?.dictation.fnChanged(down: down) }
-        dictation.watchFn()
-        register(.dictation, "dictation", "held, dictates", pressed: { [weak self] in self?.dictation.pressed() }, released: { [weak self] in self?.dictation.released() })
+        control?.dictationEscape = { [weak self] in self?.dictation.escape() }
+        dictation.watchKeys()
+        register(.dictation, "dictation", "held, dictates; tapped, stays on", pressed: { [weak self] in self?.dictation.shortcutPressed() }, released: { [weak self] in self?.dictation.shortcutReleased() })
     }
 
     /// The chosen speech model, loaded in the background a moment after the start when its files
@@ -404,6 +405,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         if approvals != panelState.approvals { panelState.approvals = approvals }
         if model.uses != panelState.uses { panelState.uses = model.uses }
         panelState.revision += 1
+        // Accessibility given since the last look: fn is heard from now
+        if !dictation.hearsFn, !environment.hasOwnHome, AXIsProcessTrusted() { dictation.watchKeys() }
         let fnLines = dictation.fnLines
         if speechChoice.fnLines != fnLines { speechChoice.fnLines = fnLines }
     }

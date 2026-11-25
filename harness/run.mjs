@@ -280,8 +280,8 @@ const scenarios = {
   },
 
   /**
-   * The fn key's two ways, with the fixture in place of the microphone: held (push to talk), and
-   * tapped twice (hands-free until the next tap).
+   * The fn key's ways (`DictationKey`), with the fixture in place of the microphone: a tap that
+   * times out, a hold, a double tap that locks and fn to finish, and a lock that Esc cancels.
    */
   "dictation-fn": {
     local: "needs the speech model in ~/Library/Application Support/FluidAudio and `say`",
@@ -292,29 +292,45 @@ const scenarios = {
       const run = await start(app, home, { ITERATE_MAC_AUDIO_FIXTURE: fixture });
       const fn = (down) => run.control("dictation.fn", { down });
       const dictation = async () => (await run.state()).dictation;
+      const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       try {
-        // a tap alone does nothing
+        // a tap alone listens until the window ends, then throws the sound away with no line
         await fn(true);
         await fn(false);
-        await new Promise((resolve) => setTimeout(resolve, 500));
-        if ((await dictation()).running) throw new Error("a single tap of fn started a dictation");
-        // held: it listens while fn is down
+        const tapped = await dictation();
+        if (!tapped.running || tapped.key !== "tapped") throw new Error(`a tap: ${JSON.stringify(tapped)}`);
+        await until("the tap's end", 5, async () => !(await dictation()).running && (await dictation()).key === "idle");
+        if ((await dictation()).ends !== 0) throw new Error(`a tap left a line: ${(await dictation()).lastLine}`);
+        // held: it listens while fn is down, and writes at the release
         await fn(true);
-        await until("the hold", 5, async () => (await dictation()).mode === "holding");
+        await until("the hold", 5, async () => (await dictation()).key === "pressed");
         await until("the words in the pill", 240, async () => /doppler/i.test((await dictation()).text));
         await fn(false);
-        const held = await until("the held dictation's text", 60, async () => !(await dictation()).running && (await dictation()).lastText);
+        const ended = async (count) => {
+          const state = await dictation();
+          return !state.running && state.ends === count && state;
+        };
+        const held = (await until("the held dictation's text", 60, () => ended(1))).lastText;
         for (const term of ["Herdr", "Beelink", "Doppler"]) if (!held.includes(term)) throw new Error(`held: "${held}" has no ${term}`);
-        // tapped twice: it listens with fn up, until the next tap
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        // tapped twice: locked, it listens with fn up, until the next press of fn
+        await pause(600);
         for (const down of [true, false, true, false]) await fn(down);
-        await until("hands-free", 5, async () => (await dictation()).mode === "hands-free");
+        await until("the lock", 5, async () => (await dictation()).locked && (await dictation()).key === "locked");
         await until("the words in the pill", 60, async () => /doppler/i.test((await dictation()).text));
-        if (!(await dictation()).running) throw new Error("hands-free ended with fn up");
+        if (!(await dictation()).running) throw new Error("locked ended with fn up");
         await fn(true);
+        const free = (await until("the locked text", 60, () => ended(2))).lastText;
+        if (!/Doppler/.test(free)) throw new Error(`locked: "${free}" has no Doppler`);
+        // the release of the press that finished does nothing
         await fn(false);
-        const free = await until("the hands-free text", 60, async () => !(await dictation()).running && (await dictation()).lastText);
-        if (!/Doppler/.test(free)) throw new Error(`hands-free: "${free}" has no Doppler`);
+        await pause(600);
+        if ((await dictation()).running) throw new Error("the release after the finish started a dictation");
+        // locked, then Esc: nothing is written
+        for (const down of [true, false, true, false]) await fn(down);
+        await until("the second lock", 5, async () => (await dictation()).key === "locked");
+        await run.control("dictation.esc");
+        const cancelled = (await until("Esc's end", 10, () => ended(3))).lastLine;
+        if (!/^Cancelled at /.test(cancelled)) throw new Error(`Esc: the line is "${cancelled}"`);
       } finally {
         await run.quit();
       }
