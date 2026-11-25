@@ -144,6 +144,8 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             lock.withLock {
                 if let failure { return continuation.resume(throwing: failure) }
+                // the session may be ready before this line: a relay answers on another thread
+                if isOpen { return continuation.resume() }
                 opened = continuation
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + setup.connectTimeout) { [weak self] in
