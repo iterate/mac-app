@@ -76,13 +76,17 @@ public enum CapturePlan {
 }
 
 /// The record's own sink: each frame and buffer to its track, when the record has that track. A
-/// screen that captures faster for live is kept at the record's `fps` by time; a camera always at
-/// `cameraFps` (a camera's format belongs to the whole Mac: another program can set it to 30).
+/// screen that captures faster for live is kept at the record's `fps` by time; a camera at most at
+/// `cameraFps` (a camera's format belongs to the whole Mac: another program can set it to 30), and
+/// only when its picture changed, at least once a second (`CameraChange`): every frame of a camera
+/// differs a little from the last, so without this a still room cost as much as a moving one.
 final class RecordSink: CaptureSink {
     private unowned let r: Recorder
     private let lock = NSLock()
     /// The time of the last frame kept, per track.
     private var kept: [String: Double] = [:]
+    /// A camera's last frame kept: its time and its small copy (`CameraChange`).
+    private var cameraKept: [String: (time: Double, thumb: [Float]?)] = [:]
 
     init(recorder: Recorder) { r = recorder }
 
@@ -90,7 +94,8 @@ final class RecordSink: CaptureSink {
         guard let track = r.track(id) as? VideoTrack else { return }
         let fps: Int?
         if id.hasPrefix(RecordSource.cameras.prefix) {
-            fps = r.options.cameraFps
+            guard keepsCamera(id, frame, now: CMTimeGetSeconds(hostTime)) else { return }
+            fps = nil
         } else {
             let kind: RecordSource = id.hasPrefix(RecordSource.synthetic.prefix) ? .synthetic : .screens
             fps = r.captureFps(kind) > r.options.fps ? r.options.fps : nil
@@ -105,6 +110,16 @@ final class RecordSink: CaptureSink {
             guard keep else { return }
         }
         track.append(frame, hostTime: hostTime)
+    }
+
+    /// At most `cameraFps` frames a second; of those, the ones whose picture changed, and one a second.
+    private func keepsCamera(_ id: String, _ frame: CVPixelBuffer, now: Double) -> Bool {
+        let last = lock.withLock { cameraKept[id] }
+        guard CaptureRate.keeps(last: last?.time, now: now, fps: r.options.cameraFps) else { return false }
+        let thumb = CameraChange.thumbnail(frame)
+        guard CameraChange.keeps(last: last, now: now, thumb: thumb) else { return false }
+        lock.withLock { cameraKept[id] = (now, thumb) }
+        return true
     }
 
     func sound(_ id: String, _ sample: CMSampleBuffer, hostTime: CMTime) {

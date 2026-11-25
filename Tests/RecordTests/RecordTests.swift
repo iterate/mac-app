@@ -456,3 +456,236 @@ final class TranscriptTrackTests: XCTestCase {
         XCTAssertEqual(mono.floatChannelData![0][240], 0.5)
     }
 }
+
+/// The camera keeps a frame when its picture changed, and one a second (`CameraChange`).
+final class CameraChangeTests: XCTestCase {
+    /// A 1280×720 luma plane: a gradient, sensor noise of ±`noise` levels, and a bright square of
+    /// 160 px at `square` (a hand).
+    func plane(noise: Int, square: (x: Int, y: Int)? = nil, seed: UInt64) -> [UInt8] {
+        var rng = seed
+        var out = [UInt8](repeating: 0, count: 1280 * 720)
+        for y in 0..<720 {
+            for x in 0..<1280 {
+                rng = rng &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+                let n = noise > 0 ? Int(rng >> 33) % (2 * noise + 1) - noise : 0
+                var v = 40 + x / 10 + y / 20 + n
+                if let square, (square.x..<square.x + 160).contains(x), (square.y..<square.y + 160).contains(y) { v = 220 }
+                out[y * 1280 + x] = UInt8(max(16, min(235, v)))
+            }
+        }
+        return out
+    }
+
+    func thumb(_ plane: [UInt8]) -> [Float] {
+        plane.withUnsafeBufferPointer { CameraChange.thumbnail(luma: $0.baseAddress!, width: 1280, height: 720, bytesPerRow: 1280)! }
+    }
+
+    func testNoiseIsBelowAndAHandIsAbove() {
+        let still = thumb(plane(noise: 6, seed: 1))
+        XCTAssertEqual(still.count, 32 * 18)
+        let noisy = thumb(plane(noise: 6, seed: 2))
+        XCTAssertLessThan(CameraChange.difference(still, noisy), 0.5 * CameraChange.threshold, "sensor noise of ±6 levels")
+        let hand = thumb(plane(noise: 6, square: (600, 300), seed: 3))
+        XCTAssertGreaterThan(CameraChange.difference(still, hand), 2 * CameraChange.threshold, "a hand of 160 px")
+    }
+
+    func testTheRule() {
+        let a: [Float] = Array(repeating: 100, count: 576), b = a.map { $0 + 1 }, c = a.map { $0 + 2 }
+        XCTAssertTrue(CameraChange.keeps(last: nil, now: 5, thumb: a), "the first frame")
+        XCTAssertFalse(CameraChange.keeps(last: (5, a), now: 5.5, thumb: b), "changed by 1 level: dropped")
+        XCTAssertTrue(CameraChange.keeps(last: (5, a), now: 5.5, thumb: c), "changed by 2 levels: kept")
+        XCTAssertTrue(CameraChange.keeps(last: (5, a), now: 5.998, thumb: a), "a second after the last kept, also unchanged")
+        XCTAssertTrue(CameraChange.keeps(last: (5, a), now: 4, thumb: a), "a clock that went back")
+        XCTAssertTrue(CameraChange.keeps(last: (5, a), now: 5.5, thumb: nil), "no copy (another format): kept")
+    }
+
+    /// A camera frame as it comes (420v), through the sink's copy.
+    func testTheCopyOfAPixelBuffer() throws {
+        var buffer: CVPixelBuffer?
+        CVPixelBufferCreate(nil, 1280, 720, kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange, nil, &buffer)
+        let frame = try XCTUnwrap(buffer)
+        CVPixelBufferLockBaseAddress(frame, [])
+        let luma = CVPixelBufferGetBaseAddressOfPlane(frame, 0)!.assumingMemoryBound(to: UInt8.self)
+        let row = CVPixelBufferGetBytesPerRowOfPlane(frame, 0)
+        for y in 0..<720 { for x in 0..<1280 { luma[y * row + x] = x < 640 ? 50 : 200 } }
+        CVPixelBufferUnlockBaseAddress(frame, [])
+        let copy = try XCTUnwrap(CameraChange.thumbnail(frame))
+        XCTAssertEqual(copy[0], 50)
+        XCTAssertEqual(copy[31], 200)
+    }
+}
+
+/// The audio gate (`SoundGate`): open for a window at or above the threshold and 0.5 s after it.
+final class SoundGateTests: XCTestCase {
+    func testThresholdAndHold() {
+        var gate = SoundGate(dB: -50)
+        let below = Float(pow(10, -51.0 / 10)), above = Float(pow(10, -49.0 / 10))
+        XCTAssertFalse(gate.take(meanSquare: below, from: 0, count: 960), "room noise")
+        XCTAssertTrue(gate.take(meanSquare: above, from: 960, count: 960), "quiet speech")
+        XCTAssertEqual(gate.openUntil, 1920 + 24_000)
+        XCTAssertTrue(gate.take(meanSquare: 0, from: 1920 + 24_000 - 960, count: 960), "the hold: the end of a word")
+        XCTAssertFalse(gate.take(meanSquare: 0, from: 1920 + 24_000, count: 960), "0.5 s after the last sound")
+        XCTAssertFalse(gate.isOpen(at: 1920 + 24_000))
+        gate.reset()
+        XCTAssertFalse(gate.isOpen(at: 0))
+        XCTAssertEqual(SoundGate(dB: SoundGate.microphoneDB).threshold, 1e-5, accuracy: 1e-9)
+    }
+}
+
+/// An audio track writes silence without its encoder, and the file still plays the whole slot on
+/// time: a beep at each second, except seconds 10 to 19 of the slot, which are silent, with 3 s of
+/// them not even given (a capture that stopped).
+final class SilentAudioTests: XCTestCase {
+    func sample(_ samples: [Float], channels: Int, host: CMTime) -> CMSampleBuffer {
+        var asbd = AudioStreamBasicDescription(
+            mSampleRate: 48_000, mFormatID: kAudioFormatLinearPCM, mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: UInt32(4 * channels), mFramesPerPacket: 1, mBytesPerFrame: UInt32(4 * channels), mChannelsPerFrame: UInt32(channels),
+            mBitsPerChannel: 32, mReserved: 0)
+        var format: CMAudioFormatDescription?
+        CMAudioFormatDescriptionCreate(
+            allocator: nil, asbd: &asbd, layoutSize: 0, layout: nil, magicCookieSize: 0, magicCookie: nil, extensions: nil, formatDescriptionOut: &format)
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 48_000), presentationTimeStamp: host, decodeTimeStamp: .invalid)
+        var sample: CMSampleBuffer?
+        CMSampleBufferCreate(
+            allocator: nil, dataBuffer: nil, dataReady: false, makeDataReadyCallback: nil, refcon: nil, formatDescription: format,
+            sampleCount: samples.count / channels, sampleTimingEntryCount: 1, sampleTimingArray: &timing, sampleSizeEntryCount: 0, sampleSizeArray: nil,
+            sampleBufferOut: &sample)
+        var copy = samples
+        copy.withUnsafeMutableBytes { raw in
+            var list = AudioBufferList(mNumberBuffers: 1, mBuffers: AudioBuffer(mNumberChannels: UInt32(channels), mDataByteSize: UInt32(raw.count), mData: raw.baseAddress))
+            _ = CMSampleBufferSetDataBufferFromAudioBufferList(sample!, blockBufferAllocator: nil, blockBufferMemoryAllocator: nil, flags: 0, bufferList: &list)
+        }
+        return sample!
+    }
+
+    /// The host time of a wall time, through the recorder's anchor.
+    func host(_ wallMs: Double) -> CMTime {
+        let anchor = HostClock.shared.current
+        return CMTime(value: Int64(anchor.hostNanos) + Int64(((wallMs - anchor.wallMs) * 1_000_000).rounded()), timescale: 1_000_000_000)
+    }
+
+    /// Records `seconds` of `sound(second, sample in second)` from 2 s before a slot, in buffers of
+    /// 512 samples, leaving out the seconds in `missing`; answers the slot's decoded samples (mono),
+    /// its event entry and the track's counts.
+    func record(id: String, channels: Int, bitrate: Int, dB: Float, missing: Range<Int> = 0..<0, sound: (Int, Int) -> Float) throws
+        -> (decoded: [Float], start: Double, entry: [String: Any], counts: (encoded: Int, silent: Int, opens: Int))
+    {
+        let spool = FileManager.default.temporaryDirectory.appendingPathComponent("record-tests-\(UUID().uuidString)")
+        let r = Recorder(options: RecordOptions(spool: spool, device: "test.mac"))
+        r.records([.mics, .speakers])
+        let track = AudioTrack(id: id, recorder: r, channels: channels, bitrate: bitrate, thresholdDB: dB)
+        let slot = Slot.start(nowMs()) - 5 * Slot.ms
+        let first = Double(slot) - 2000
+        var n = 0
+        while n < 34 * 48_000 {
+            let second = Int((Double(n) / 48_000 - 2).rounded(.down))
+            if !missing.contains(second) {
+                var samples = [Float](repeating: 0, count: 512 * channels)
+                for i in 0..<512 {
+                    let at = n + i - 2 * 48_000
+                    let v = sound(Int((Double(at) / 48_000).rounded(.down)), (at % 48_000 + 48_000) % 48_000)
+                    for c in 0..<channels { samples[i * channels + c] = v }
+                }
+                track.append(sample(samples, channels: channels, host: host(first + Double(n) / 48)), hostTime: host(first + Double(n) / 48))
+            }
+            n += 512
+        }
+        let counts = track.written
+        track.stop()
+        let event = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: spool.appendingPathComponent("slots/\(slot).json"))) as? [String: Any])
+        let entry = try XCTUnwrap((event["tracks"] as? [String: [String: Any]])?[id])
+        let file = spool.appendingPathComponent(String(try XCTUnwrap(entry["file"] as? String).dropFirst()))
+        // Decoded by AVFoundation, as a player would.
+        let asset = AVURLAsset(url: file)
+        let audio = try XCTUnwrap(asset.tracks(withMediaType: .audio).first)
+        let reader = try AVAssetReader(asset: asset)
+        let out = AVAssetReaderTrackOutput(track: audio, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: false,
+            AVLinearPCMIsBigEndianKey: false, AVSampleRateKey: 48_000, AVNumberOfChannelsKey: channels,
+        ])
+        reader.add(out)
+        XCTAssertTrue(reader.startReading())
+        var decoded: [Float] = [], start: Double?
+        while let buffer = out.copyNextSampleBuffer() {
+            if start == nil { start = CMTimeGetSeconds(buffer.presentationTimeStamp) }
+            guard let block = buffer.dataBuffer else { continue }
+            var floats = [Float](repeating: 0, count: CMBlockBufferGetDataLength(block) / 4)
+            _ = floats.withUnsafeMutableBytes { CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: $0.count, destination: $0.baseAddress!) }
+            for i in stride(from: 0, to: floats.count, by: channels) { decoded.append(floats[i]) }
+        }
+        XCTAssertEqual(reader.status, .completed)
+        return (decoded, try XCTUnwrap(start), entry, counts)
+    }
+
+    func rms(_ samples: ArraySlice<Float>) -> Double {
+        10 * log10(samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, samples.count)) + 1e-12)
+    }
+
+    /// Where the beep of each second begins in the decoded samples, from the slot's start. (Not
+    /// second 0: the decoder leaves out the first samples of a file, its own delay.)
+    func onsets(_ decoded: [Float], start: Double) -> [Int: Int] {
+        var out: [Int: Int] = [:]
+        for second in 1..<30 {
+            let from = max(0, Int((Double(second) - 0.3 - start) * 48_000)), to = min(decoded.count, from + 48_000)
+            guard from < to, let i = decoded[from..<to].firstIndex(where: { abs($0) > 0.05 }) else { continue }
+            out[second] = i + Int((start * 48_000).rounded()) - second * 48_000
+        }
+        return out
+    }
+
+    func testBeepsAndSilenceDecodeToTheSlotsLengthOnTime() throws {
+        let beep = { (second: Int, i: Int) -> Float in
+            (10..<20).contains(second) || i >= 4800 ? 0 : Float(sin(2 * Double.pi * 880 * Double(i) / 48_000) * 0.3)
+        }
+        let (decoded, start, entry, counts) = try record(id: "mic-0", channels: 1, bitrate: 64_000, dB: SoundGate.microphoneDB, missing: 12..<15, sound: beep)
+        // The reference: a gate that never closes, so one encoder runs, as before silence was written.
+        let always = try record(id: "mic-0", channels: 1, bitrate: 64_000, dB: -.infinity, sound: beep)
+        XCTAssertEqual(always.counts.opens, 1)
+        XCTAssertEqual(always.counts.silent, 0)
+        // The same length, from the same first packet (within one packet of the slot's start).
+        XCTAssertEqual(start, always.start)
+        XCTAssertLessThan(start, 1024.0 / 48_000)
+        XCTAssertEqual(decoded.count, always.decoded.count)
+        XCTAssertEqual(Double(decoded.count) / 48_000 + start, 30, accuracy: 0.06, "the slot, less the decoder's own delay")
+        // Each beep at the same sample as in the reference: the timeline stays whole across the
+        // silences, the encoder's restarts and the 3 s with no input.
+        let reference = onsets(always.decoded, start: always.start)
+        XCTAssertEqual(reference.keys.sorted(), Array(1..<10) + Array(20..<30))
+        XCTAssertEqual(Set(reference.values).count, 1, "the reference's beeps are all at one offset: \(reference)")
+        XCTAssertEqual(onsets(decoded, start: start), reference)
+        let shift = Double(reference[1] ?? 0) / 48_000
+        let at = { (seconds: Double) in max(0, Int(((seconds + shift - start) * 48_000).rounded())) }
+        for second in 1..<30 {
+            let beepRange = at(Double(second) + 0.01)..<at(Double(second) + 0.09)
+            let between = rms(decoded[at(Double(second) + 0.3)..<at(Double(second) + 0.95)])
+            if (10..<20).contains(second) {
+                XCTAssertLessThan(rms(decoded[beepRange]), -90, "second \(second) is silent")
+            } else {
+                XCTAssertEqual(rms(decoded[beepRange]), rms(always.decoded[beepRange]), accuracy: 0.5, "the beep of second \(second)")
+                XCTAssertEqual(rms(decoded[beepRange]), -13.5, accuracy: 0.5)
+            }
+            XCTAssertLessThan(between, -70, "between the beeps of second \(second)")
+        }
+        // The levels are of the sound, not of what was encoded.
+        let levels = try XCTUnwrap(entry["levels"] as? [Int])
+        XCTAssertEqual(levels, always.entry["levels"] as? [Int])
+        XCTAssertEqual(levels[0], -10)
+        XCTAssertEqual(levels[1], -99)
+        XCTAssertEqual(levels[22], -99, "second 11: silent")
+        XCTAssertEqual(entry["peak"] as? Double, -10.5)
+        // 20 beeps in the slot and 4 more around it, each opening the encoder; ten silent seconds.
+        XCTAssertEqual(counts.opens, 24)
+        XCTAssertGreaterThan(counts.silent, 10 * 47)
+    }
+
+    func testASilentSlotNeverStartsTheEncoder() throws {
+        let (decoded, start, entry, counts) = try record(id: "speaker-0", channels: 2, bitrate: 128_000, dB: SoundGate.speakersDB) { _, _ in 0 }
+        XCTAssertEqual(Double(decoded.count) / 48_000 + start, 30, accuracy: 0.06, "the slot, less the decoder's own delay")
+        XCTAssertTrue(decoded.allSatisfy { $0 == 0 }, "zeros")
+        XCTAssertEqual(counts.opens, 0)
+        XCTAssertEqual(counts.encoded, 0)
+        XCTAssertEqual(entry["rms"] as? Double, -120)
+        XCTAssertEqual(entry["levels"] as? [Int], Array(repeating: -99, count: 60))
+        XCTAssertLessThan(try XCTUnwrap(entry["bytes"] as? Int), 30_000)
+    }
+}

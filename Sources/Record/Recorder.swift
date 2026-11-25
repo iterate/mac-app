@@ -97,6 +97,8 @@ public final class Recorder: @unchecked Sendable {
         lock.withLock { if recorded.contains(where: { track.id.hasPrefix($0.prefix) }) { tracks.append(track) } }
     }
     func track(_ id: String) -> Track? { lock.withLock { tracks.first { $0.id == id } } }
+    /// Tests: the tracks of these sources write, with no source started.
+    func records(_ kinds: Set<RecordSource>) { lock.withLock { recorded = kinds } }
 
     /// The ids of the tracks that record now.
     public var trackIDs: [String] { lock.withLock { tracks.map(\.id) } }
