@@ -193,7 +193,7 @@ async function start(app, home, env = {}, args = []) {
     await quit();
     throw error;
   }
-  return { control, endpoint, quit, state: () => control("ui.state") };
+  return { control, endpoint, quit, pid: child.pid, state: () => control("ui.state") };
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -214,8 +214,26 @@ function perfDelta(a, b) {
 }
 
 /** Throws when a figure is over its limit, with every figure in the message. */
+function overLimits(figures, limits) {
+  return Object.entries(limits).filter(([name, limit]) => (figures[name] ?? figures.counters?.[name] ?? 0) > limit);
+}
+
+/** Where the app's threads spend 3 s (`sample`), for a failed idle check: the call graph, cut. */
+function sampleOf(pid, home) {
+  const file = join(home, "idle.sample.txt");
+  try {
+    execFileSync("/usr/bin/sample", [String(pid), "3", "-mayDie", "-file", file], { stdio: "ignore", timeout: 30000 });
+    const text = readFileSync(file, "utf8");
+    const graph = text.slice(text.indexOf("Call graph:"), text.indexOf("Total number in stack"));
+    const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-60).join("\n");
+    return `--- sample of the idle app (pid ${pid}) ---\n${graph.split("\n").slice(0, 400).join("\n")}\n--- its log ---\n${log}\n--- end of sample ---\n`;
+  } catch (error) {
+    return `--- no sample: ${error.message} ---\n`;
+  }
+}
+
 function within(what, figures, limits) {
-  const over = Object.entries(limits).filter(([name, limit]) => (figures[name] ?? figures.counters?.[name] ?? 0) > limit);
+  const over = overLimits(figures, limits);
   if (over.length) throw new Error(`${what}: ${over.map(([name, limit]) => `${name} ${figures[name] ?? figures.counters?.[name]} > ${limit}`).join(", ")}; ${JSON.stringify(figures)}`);
 }
 
@@ -249,6 +267,21 @@ const scenarios = {
       const before = (await run.state()).perf;
       await sleep(20000);
       const live = perfDelta(before, (await run.state()).perf);
+      // over a limit: 10 s more in steps of 2 s (does the cost stay?) and where the threads are.
+      // Each `ui.state` costs some milliseconds itself, so the steps are not in the window above.
+      const series = [];
+      let liveSample = "";
+      if (overLimits(live, IDLE_LIMITS).length) {
+        let step = (await run.state()).perf;
+        for (let i = 0; i < 5; i++) {
+          await sleep(2000);
+          const now = (await run.state()).perf;
+          const d = perfDelta(step, now);
+          series.push(`${d.cpuMs}ms/${d.interruptWakeups}w${Object.keys(d.counters).length ? " " + JSON.stringify(d.counters) : ""}`);
+          step = now;
+        }
+        liveSample = sampleOf(run.pid, home);
+      }
 
       // a refused key: provide says so and ends; the next try is in 5 minutes
       writeFileSync(join(home, "fake-iterate/provide.json"), JSON.stringify({ state: "notAllowed", why: "No member has allowed this key yet.", waiting: false, exit: 1 }));
@@ -264,12 +297,13 @@ const scenarios = {
       await sleep(3000);
       const stall = (await run.state()).perf.mainStallMaxMs;
       await run.control("perf.reset", { watchMain: false });
-      const result = { live, refused, mainStallMaxMs: stall };
+      const result = { live, refused, mainStallMaxMs: stall, series };
       try {
         within("idle, live", live, IDLE_LIMITS);
         within("idle, refused", refused, REFUSED_LIMITS);
         if (stall > 100) throw new Error(`the main queue waited ${stall} ms while idle`);
       } catch (error) {
+        if (liveSample) process.stderr.write(liveSample);
         throw new Error(`${error.message.split(";")[0]}; ${JSON.stringify(result)}`);
       }
       return result;

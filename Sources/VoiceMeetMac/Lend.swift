@@ -259,12 +259,14 @@ final class Lend {
     /// One whole line of a stream. Both streams go to the log; the human lines stay there as the
     /// CLI wrote them.
     private func read(_ line: String, from stream: Stream, of generation: Int) {
+        Perf.count("provideLines")
         guard generation == self.generation else { return }
         if !line.isEmpty { log.info("provide\(stream == .states ? " state" : ""): \(line.prefix(400))") }
         send(stream == .states ? .stateLine(line) : .humanLine(line))
     }
 
     private func networkChanged(isUp: Bool) {
+        Perf.count("networkChanges")
         guard isUp != networkIsUp else { return }
         networkIsUp = isUp
         log.info("the network is \(isUp ? "back" : "gone")")

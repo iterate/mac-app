@@ -163,6 +163,7 @@ final class DeviceWindow: ObservableObject {
 
     /// The front app and its window's title; an event when either changed.
     private func check() {
+        Perf.count("frontChecks")
         guard isLent(), let app = NSWorkspace.shared.frontmostApplication else { return front = nil }
         guard !isChecking else { return checksAgain = true }
         isChecking = true

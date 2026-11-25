@@ -150,6 +150,7 @@ final class MindBridge {
     }
 
     private func heard(_ line: [String: Any], from made: JSONLineProcess) {
+        Perf.count("bridgeLines.\(line["job"] as? String ?? "process")")
         guard made === process else { return }
         if let up = line["connected"] as? Bool {
             if up != isConnected { log.info("\(mind): \(up ? "connected" : "not connected: \(line["failed"] as? String ?? "")")") }
