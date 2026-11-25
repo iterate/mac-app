@@ -802,8 +802,10 @@ with a lock while it stays on and the time since the start.
   when a socket opened through the mind. The code: `MindSockets.swift`,
   `SpeechText/OpenAIAccess.swift`, `SpeechText/OpenAISocket.swift`.
 - **Your own key is optional, and only behind the mind's.** It is used when this Mac is lent to no
-  mind, the mind said no, or a socket through the mind did not open (the log says "no socket
-  through <mind> (…): your own key"). It is in the login Keychain: a generic password of the service
+  mind, or the mind said no (it has no OpenAI key; the log says "no socket through <mind> (…): your
+  own key"). Any other failure of the mind's socket (a drop, a timeout) goes to the local model,
+  never to the key: a Mac lent to a mind with OpenAI does not read the Keychain, so macOS never asks
+  for it, also not after an update. It is in the login Keychain: a generic password of the service
   `com.iterate.mac-app.openai` and the account `api-key`. It is never in a file, a log, `ui.state`
   (which says only `speech.openAIKey`: true or false, and `speech.openAIMind`: the mind that sockets open through, or null) or a process's arguments. Settings ›
   Dictation says whether it is set, takes a new one in a secure field, and removes it. Or from a

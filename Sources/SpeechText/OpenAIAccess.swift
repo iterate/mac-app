@@ -55,8 +55,12 @@ public struct OpenAIAccess: Sendable {
 
     /// The mind first, then the key. `mind` is the lent mind and what it can do now; `socket`
     /// makes a socket of its bridge (the stream opens it, within its `connectTimeout`); `key`
-    /// reads this Mac's key. A socket of the mind that does not open falls back to the key when
-    /// there is one (`log` says why); with none it throws, and the local model hears.
+    /// reads this Mac's key. A socket of the mind that does not open falls back to the key only
+    /// when the mind said no (`MindSockets` sets `.no` on a refusal); any other failure (a drop, a
+    /// timeout) throws, and the local model hears. So a Mac lent to a mind that has OpenAI never
+    /// reads the Keychain: a read of an item another program wrote makes macOS ask the person, again
+    /// after each update of the app (Jonas, 25 Nov 2026: "why did you ask me for openai api key
+    /// again now on keychain? i thought we use it from iterate mind").
     public static func mindFirst(
         mind: @escaping @Sendable () async -> (name: String, state: MindOpenAI)?,
         socket: @escaping @Sendable () async throws -> OpenAISocket,
@@ -70,12 +74,14 @@ public struct OpenAIAccess: Sendable {
                 return key() != nil ? .ownKey : nil
             },
             open: { setup, text, failed in
+                let lent = mind
                 if let mind = await mind(), mind.state != .no {
                     do {
                         let stream = try await OpenAIStream.open(setup, socket: try await socket(), text: text, failed: failed)
                         return (stream, .mind(mind.name))
                     } catch {
-                        guard key() != nil else { throw error }
+                        // only the mind's no lets this Mac's key in; the key is read after that check
+                        guard await lent()?.state == .no, key() != nil else { throw error }
                         log("no socket through \(mind.name) (\(error.localizedDescription)): your own key")
                     }
                 }

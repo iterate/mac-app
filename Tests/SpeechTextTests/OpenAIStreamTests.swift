@@ -456,6 +456,10 @@ private final class FakeBridge: @unchecked Sendable {
     private var next = 0
     let answer: @Sendable ([String: Any]) -> [[String: Any]]
     var refuses = false
+    /// A socket fails to open for a reason that is not the mind's no (a drop, a timeout).
+    var fails = false
+    /// It refused a socket: the mind's no, as `MindSockets` records it.
+    private(set) var refused = false
     var answersPings = true
 
     init(answer: @escaping @Sendable ([String: Any]) -> [[String: Any]]) {
@@ -493,7 +497,8 @@ private final class FakeBridge: @unchecked Sendable {
         lock.withLock { got.append(line) }
         guard let id = line["socket"] as? String, let socket = lock.withLock({ sockets[id] }) else { return }
         if line["open"] as? Bool == true {
-            if refuses { socket.take(["socket": id, "failed": "itx.fetch: no stored mind secret for getSecret(\"/secrets/openai\")", "refused": true]); return }
+            if fails { socket.take(["socket": id, "failed": "the connection to the mind ended"]); return }
+            if refuses { refused = true; socket.take(["socket": id, "failed": "itx.fetch: no stored mind secret for getSecret(\"/secrets/openai\")", "refused": true]); return }
             lock.withLock { _ = open.insert(id) }
             socket.take(["socket": id, "opened": true])
             socket.take(["socket": id, "frame": #"{"type":"session.created"}"#])
@@ -525,7 +530,7 @@ final class OpenAIAccessTests: XCTestCase {
     }
 
     private func access(_ mind: Mind?, bridge: FakeBridge, key: String? = nil, log: Lines = Lines()) -> OpenAIAccess {
-        .mindFirst(mind: { mind.map { ($0.name, $0.state) } }, socket: { bridge.socket() }, key: { key }, log: { log.add($0) })
+        .mindFirst(mind: { mind.map { ($0.name, bridge.refused ? .no : $0.state) } }, socket: { bridge.socket() }, key: { key }, log: { log.add($0) })
     }
 
     private func dictate(
@@ -627,6 +632,19 @@ final class OpenAIAccessTests: XCTestCase {
         XCTAssertEqual(dictation.text, ["with my key"])
         XCTAssertTrue(dictation.notes.contains { $0.contains("(new, own key)") }, "\(dictation.notes)")
         XCTAssertEqual(log.all, [#"no socket through example.com (itx.fetch: no stored mind secret for getSecret("/secrets/openai")): your own key"#])
+    }
+
+    func testAMindSocketThatDoesNotOpenForAnotherReasonNeverReadsTheOwnKey() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "never"))
+        let bridge = FakeBridge(answer: openAI(deltas: [], final: "never"))
+        bridge.fails = true
+        let reads = Lines()
+        let made = OpenAIAccess.mindFirst(
+            mind: { ("example.com", .yes) }, socket: { bridge.socket() }, key: { reads.add("read"); return "sk-own" })
+        let dictation = await dictate(server, made)
+        XCTAssertEqual(reads.all, [], "a Mac lent to a mind with OpenAI reads no Keychain item")
+        XCTAssertEqual(server.connectionCount, 0)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("the local model hears it") }, "\(dictation.notes)")
     }
 
     func testADropOfTheBridgesLinkWhileTalkingFallsBackToTheLocalModel() async throws {
