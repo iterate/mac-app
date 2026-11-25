@@ -239,6 +239,7 @@ async function launchSeries(app, minds, args) {
   const t0 = Date.now();
   const run = await start(app, home, {}, args);
   const lines = [];
+  let runLoop = "";
   try {
     let last = (await run.state()).perf;
     let threads = new Map();
@@ -248,7 +249,17 @@ async function launchSeries(app, minds, args) {
       const d = perfDelta(last, state.perf);
       last = state.perf;
       // each thread that worked in the second, by its name (or its id), and its milliseconds
-      const now = new Map(((await run.control("perf.threads")).threads ?? []).map((t) => [t.id, t]));
+      const answer = await run.control("perf.threads");
+      const now = new Map((answer.threads ?? []).map((t) => [t.id, t]));
+      // the main run loop's timers in the third second: what wakes the main thread then
+      if (lines.length === 2) {
+        const timers = new Map();
+        for (const line of (answer.mainRunLoop ?? "").split("\n")) {
+          const timer = line.match(/<CFRunLoopTimer (0x[0-9a-f]+)/);
+          if (timer) timers.set(timer[1], line.replace(/^.*?\{/, "").replace(/, context = .*$/, "").slice(0, 300));
+        }
+        runLoop = [...timers.values()].join("\n");
+      }
       const worked = [...now.values()]
         .map((t) => [t.name || `#${t.id}`, t.cpuMs - (threads.get(t.id)?.cpuMs ?? 0), !threads.has(t.id)])
         .filter(([, ms, isNew]) => ms >= 0.5 || isNew)
@@ -261,7 +272,7 @@ async function launchSeries(app, minds, args) {
     await run.quit();
   }
   const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-80).join("\n");
-  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its log ---\n${log}\n${systemLog(run.pid, t0)}--- end ---\n`;
+  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its main run loop in the third second ---\n${runLoop}\n--- its log ---\n${log}\n${systemLog(run.pid, t0)}--- end ---\n`;
 }
 
 /** What macOS's own log has of process `pid` from `t0`: its lines each second, by subsystem in
