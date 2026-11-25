@@ -28,10 +28,10 @@ final class CapturePill: ObservableObject {
 /// and each ink mark with the accessibility element under it, and sharp pictures of the display at
 /// those moments. The ink is on the screen, so the movie and the pictures show it.
 ///
-/// The voice is put into words on this Mac while the person talks: the microphone's sound goes
-/// into a recognizer (`SpeechRecognizer`, the app's speech model, with the word list of the
-/// capture's mind), and each final segment, with its times from the capture's start, goes to the
-/// uploader. No sound leaves the Mac for it.
+/// The voice is put into words while the person talks: the microphone's sound goes to the one
+/// transcriber (`Transcriber`, use `capture`: OpenAI when it can be reached, else the local model,
+/// with the word list of the capture's mind), and each final segment, with its times from the
+/// capture's start, goes to the uploader at each pause.
 ///
 /// The job `capture` of the capture's mind's `MindBridge` (`bridge/capture.mjs`) runs beside the
 /// capture from its start: it puts each picture into the mind as soon as it exists, and the rest at
@@ -44,7 +44,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// from the capture's start. Used on the voice's queue alone.
     private final class Voice: @unchecked Sendable {
         let queue = DispatchQueue(label: "com.iterate.capture.voice")
-        var recognizer: SpeechRecognizer?
+        var recognizer: SpeechListening?
         /// The capture's start on the host clock, which the stream's buffers are stamped with.
         var zero = CMTime.zero
         private let audio = SpeechAudio()
@@ -85,8 +85,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     var session: MindSession?
     /// The guide to a permission of macOS (the app's delegate has it).
     var allow: (Permission) -> Void = { _ in }
-    /// The speech model now, and the word list of a mind.
-    var speech: () -> SpeechModel = { .default }
+    /// The one transcriber, and the word list of a mind.
+    var transcriber: Transcriber?
     var words: (String?) -> WordList = { _ in .empty }
 
     private let log = AppLog("capture")
@@ -110,7 +110,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var holding: [String: MindBridge] = [:]
     private let voice = Voice()
     /// The recognizer of this capture's voice, and how many of its segments the uploader has.
-    private var recognizer: SpeechRecognizer?
+    private var recognizer: SpeechListening?
+    /// The model that the transcriber's rule picked at the start: the transcript's `by`.
+    private var heardBy = SpeechModel.default.id
     private var segmentsSent = 0
     private var isVoiceDone = false
     /// The session at this capture's start: its manifest, its pill and its upload go with it until
@@ -736,7 +738,7 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             self.uploaderSaid(line, from: bridge)
         }
         bridge.hold("capture \(capture)")
-        upload(["folder": folder.path, "heardBy": speech().id])
+        upload(["folder": folder.path, "heardBy": heardBy])
     }
 
     /// One step of this capture's job.
@@ -751,26 +753,26 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         holding.removeValue(forKey: capture)?.release("capture \(capture)")
     }
 
-    /// The recognizer of the capture's voice, from its start: the chosen model, with the word list
+    /// The listening of the capture's voice, from its start: the transcriber's, with the word list
     /// of the capture's mind. Each final segment goes to the uploader at once.
     private func startVoice(isOn: Bool) {
         segmentsSent = 0
         isVoiceDone = false
         recognizer = nil
         let host = CMClockGetTime(CMClockGetHostTimeClock())
-        guard isOn else { return voice.queue.async { [voice] in voice.recognizer = nil } }
+        guard isOn, let transcriber else { return voice.queue.async { [voice] in voice.recognizer = nil } }
         let capture = id
-        let model = speech()
-        let recognizer = SpeechRecognizer(model: model, words: words(pinned?.mind)) { [weak self] event in
+        let (recognizer, model) = transcriber.listening(.capture, words: words(pinned?.mind)) { [weak self] event in
             DispatchQueue.main.async { MainActor.assumeIsolated { if self?.id == capture { self?.heard(event) } } }
         }
+        heardBy = model.id
         self.recognizer = recognizer
         recognizer.start()
         voice.queue.async { [voice] in
             voice.zero = host
             voice.recognizer = recognizer
         }
-        log.info("capture \(id): the voice is heard on this Mac by \(model.id)")
+        log.info("capture \(id): the voice is heard by \(model.id) (\(transcriber.current.route.why.words))")
     }
 
     private func heard(_ event: SpeechRecognizer.Event) {

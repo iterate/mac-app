@@ -1,4 +1,5 @@
 import Foundation
+import VoiceMeetCore
 
 /// WHAT OPENS A SOCKET AT OPENAI (README, "Dictation"): the lent mind, whose bridge opens the socket
 /// through the mind with the mind's own key (`RelaySocket`, `bridge/openai.mjs`: the key stays in
@@ -18,17 +19,6 @@ public enum OpenAISource: Sendable, Equatable {
         case .ownKey: "own key"
         }
     }
-}
-
-/// Whether the lent mind opens OpenAI's sockets, as far as this session knows: found out with a
-/// socket opened and closed at each new connection of its bridge, and by each dictation's socket.
-public enum MindOpenAI: Sendable, Equatable {
-    /// Not asked yet, or the last ask had no answer (no connection, no time).
-    case unknown
-    /// A socket opened: the mind has `/secrets/openai`, and OpenAI takes it.
-    case yes
-    /// It said no: no `/secrets/openai`, or OpenAI refused its key.
-    case no
 }
 
 public struct OpenAIAccess: Sendable {

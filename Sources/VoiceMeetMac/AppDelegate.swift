@@ -41,10 +41,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var seenLines: [String: String] = [:]
     /// The person's own capture (⌥⇧S). It needs macOS 15: nil before.
     private var capture: AnyObject?
-    /// The speech model of dictation, the input and capture: the person's choice in the panel.
+    /// The speech model as Settings shows it, and the inputs of the rule that picks who hears.
     private let speechChoice = SpeechChoice()
+    /// The socket that waits for the next key's listening at OpenAI.
+    private let standby = OpenAIStandby(log: { AppLog("speech").info($0) })
+    /// THE ONE TRANSCRIBER of dictation, the input, capture and Always listen (README, "Listening"):
+    /// its rule picks OpenAI or the local model for every use (`routeSpeech`).
+    private lazy var transcriber = makeTranscriber()
     /// The one foreground listening, of dictation and the input.
-    private let speech = SpeechSession()
+    private lazy var speech = SpeechSession(transcriber: transcriber)
     /// The listening layers: the transcription stream's segments, Always listen, ⌥⇧W (`Listening`).
     private let listening = Listening()
     private var alwaysListenWatch: AnyCancellable?
@@ -76,8 +81,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var seenExpressions: [String: String] = [:]
     /// Drops the OpenAI standby socket when the Mac sleeps (`startDictation`).
     private var standbySleep: NSObjectProtocol?
-    /// Whether Oruk Fourier's process is kept loaded now (`warmSpeech`); nil before the first look.
-    private var speechWarm: Bool?
+    /// The local model may load before a use: from 3 s after the start (`preloadSpeech`).
+    private var speechStarted = false
+    /// The rule's answers on their way to `LocalSpeech`, in their order: a quick flap of the
+    /// network ends with the last answer.
+    private var routing: Task<Void, Never>?
     /// config.json's `login` as the login item was last set to it.
     private var appliedLogin: Bool?
 
@@ -293,8 +301,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let capture = Capture()
         capture.onChange = { [weak self] in self?.stateDidChange() }
         capture.allow = { [weak self] permission in self?.guide(permission) }
-        // a capture hears with a local model, also when dictation runs at OpenAI
-        capture.speech = { [weak self] in self?.speechChoice.local ?? .default }
+        // a capture hears through the one transcriber, as every feature does
+        capture.transcriber = transcriber
         capture.words = { [weak self] mind in self?.words.list(of: mind) ?? .empty }
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
@@ -318,33 +326,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fn and ⌥⇧D dictate into the app in front, with the word list of the mind this Mac is lent to
     /// (`Dictation`). The lists are fetched now, so that the first dictation has them.
     private func startDictation() {
-        speech.model = { [weak self] in
-            // the key may have come (cli.mjs) or gone: the next listening knows
-            self?.speechChoice.refreshKey()
-            return self?.speechChoice.chosen ?? .default
-        }
-        // GPT Live Transcribe at OpenAI, with the local model behind it, and a socket that waits for
-        // the next dictation (README, "Dictation"). Each socket opens through the lent mind, with
-        // the mind's own key (its bridge relays the frames); else with this Mac's own key.
-        let openAIKey = speechChoice.openAIKey
+        // the key may have come (cli.mjs) or gone: the next listening knows
+        speech.willStart = { [weak self] in self?.speechChoice.refreshKey() }
+        let standby = standby
         let mindSockets = model.mindSockets
         let speechLog = AppLog("speech")
-        let standby = OpenAIStandby(log: { speechLog.info($0) })
-        let access = OpenAIAccess.mindFirst(
-            mind: { await MainActor.run { mindSockets.mind.map { ($0, mindSockets.state) } } },
-            socket: { try await MainActor.run { try mindSockets.socket() } },
-            key: { openAIKey?.read() },
-            log: { speechLog.info($0) })
-        speech.online = { [weak self] model, words, heard in
-            OnlineSpeech.recognizer(model, words: words, access: access, local: self?.speechChoice.local ?? .default, standby: standby, heard: heard)
-        }
         speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
         speech.log = { speechLog.info($0) }
         speechChoice.onChange = { [weak self] in
             guard let self else { return }
-            warmSpeech()
-            if speechChoice.chosen.isLocal { standby.drop("the speech model is \(speechChoice.chosen.id)") }
-            else if !speechChoice.isOnline { standby.drop("no mind with OpenAI and no OpenAI key") }
+            routeSpeech()
             stateDidChange()
         }
         // a standby of another mind is a socket through that mind: it goes at a switch
@@ -358,6 +349,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             speechChoice.mindIs(mindSockets.mind, state: mindSockets.state)
         }
         speechChoice.mindIs(mindSockets.mind, state: mindSockets.state)
+        speechChoice.watchNetwork()
+        routeSpeech()
         // a socket that slept is likely dead: the next dictation opens a new one
         standbySleep = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
             standby.drop("the Mac sleeps")
@@ -389,46 +382,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         register(.dictation, "dictation", "held, dictates; tapped, stays on", pressed: { [weak self] in self?.dictation.shortcutPressed() }, released: { [weak self] in self?.dictation.shortcutReleased() })
     }
 
-    /// The chosen local speech model, loaded in the background a moment after the start when its
-    /// files are on this Mac and it is kept loaded (`warmSpeech`): the first dictation is then at
-    /// once, not after Core ML prepared the model for the Neural Engine (24.8 s, seen on 24 Nov 2026)
-    /// or MLX's process read Fourier. With dictation at OpenAI, Oruk Fourier (the model of captures
-    /// and the one that hears when OpenAI fails) loads at its first use instead; Parakeet, which
-    /// lives in the app's own process, loads here as before. A home of its own loads it only for an
-    /// audio fixture; a drawing never gets here. The installed app then gets the default model when
-    /// it is not on this Mac (`SpeechChoice.getDefault`).
-    private func preloadSpeech() {
-        guard !environment.hasOwnHome || environmentFixture != nil else { return }
+    /// The transcriber: OpenAI's sockets through the lent mind (its bridge relays the frames, with
+    /// the mind's own key), else with this Mac's own key; the standby socket for the next key's
+    /// listening; and the local model through `LocalSpeech`, which loads it only when it must hear.
+    private func makeTranscriber() -> Transcriber {
+        let openAIKey = speechChoice.openAIKey
+        let mindSockets = model.mindSockets
         let speechLog = AppLog("speech")
-        Task { await FourierModel.shared.logs { speechLog.info($0) } }
-        warmSpeech()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self, log, speechChoice] in
-            speechChoice.getDefault()
-            self?.preload(speechChoice.local, log: log)
+        let access = OpenAIAccess.mindFirst(
+            mind: { await MainActor.run { mindSockets.mind.map { ($0, mindSockets.state) } } },
+            socket: { try await MainActor.run { try mindSockets.socket() } },
+            key: { openAIKey?.read() },
+            log: { speechLog.info($0) })
+        return Transcriber(access: access, standby: standby, engines: LocalSpeech.shared.engines)
+    }
+
+    /// THE RULE'S ANSWER NOW (`SpeechRoute`; README, "Listening"), for every use: the transcriber
+    /// takes it at each start, and `LocalSpeech` loads the local model when the rule picks it and
+    /// unloads it after its idle time once OpenAI hears again. It runs at each change of the
+    /// rule's inputs: the network, the lent mind, the key, the person's choice.
+    private func routeSpeech() {
+        let route = speechChoice.route
+        let local = speechChoice.local
+        let before = transcriber.current
+        transcriber.set(route, local: local)
+        if route != before.route || local != before.local {
+            log.info("speech: \(route.provider == .openAI ? "OpenAI hears every use (\(local.id) behind it)" : "\(local.id) on this Mac hears every use"): \(route.why.words)")
+        }
+        if route.provider == .local { standby.drop("\(local.id) hears: \(route.why.words)") }
+        // a home of its own loads nothing before a use, unless an audio fixture would be heard
+        let mayLoad = speechStarted && (!environment.hasOwnHome || environmentFixture != nil)
+        let previous = routing
+        routing = Task {
+            await previous?.value
+            await LocalSpeech.shared.set(route, model: local, mayLoad: mayLoad)
         }
     }
 
-    private func preload(_ model: SpeechModel, log: AppLog) {
-        if model.runs == .mlx, speechWarm != true { return log.info("speech: \(model.id) loads at its first use") }
-        guard let task = SpeechModels.shared.preload(model) else { return log.info("speech: \(model.id) is not on this Mac; the first use downloads it") }
-        Task { @MainActor in
-            let seconds = await task.value
-            log.info(seconds.map { "speech: \(model.id) loaded in the background in \(String(format: "%.1f", $0)) s" } ?? "speech: \(model.id) did not load in the background")
+    /// A moment after the start the local model may load, when the rule picks it (README,
+    /// "Listening"): on a normal day online it never does. The installed app then gets the default
+    /// model's files when they are not on this Mac (`SpeechChoice.getDefault`).
+    private func preloadSpeech() {
+        let speechLog = AppLog("speech")
+        Task { await LocalSpeech.shared.logs { speechLog.info($0) } }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [weak self] in
+            guard let self else { return }
+            speechStarted = true
+            routeSpeech()
+            if !environment.hasOwnHome || environmentFixture != nil { speechChoice.getDefault() }
         }
-    }
-
-    /// Oruk Fourier's process holds 2.6 GB. It stays loaded while it hears all the time or is
-    /// dictation's own model: Always listen, or a local model chosen. Else it loads at its first
-    /// use and ends 5 minutes after its last pass (`FourierModel.keepWarm`; README, "Dictation").
-    private func warmSpeech() {
-        let warm = listening.isAlwaysListening || speechChoice.chosen.isLocal
-        guard warm != speechWarm else { return }
-        let isFirst = speechWarm == nil
-        speechWarm = warm
-        Task { await FourierModel.shared.keepWarm(warm) }
-        log.info("speech: the local model \(warm ? "stays loaded" : "loads at its first use and ends 5 minutes after its last")")
-        // a model that is kept loaded from now on loads now, as at the start
-        if warm, !isFirst, !environment.hasOwnHome || environmentFixture != nil { preload(speechChoice.local, log: log) }
     }
 
     /// A key that works in any app. A copy with a home of its own registers none: the keys are the
@@ -506,11 +508,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// runs while its switch is on; ⌥⇧W pastes the newest transcript of the history.
     private func startListening() {
         listening.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
-        listening.localModel = { [weak self] in self?.speechChoice.local ?? .default }
+        listening.transcriber = transcriber
         listening.words = { [weak self] in self?.words.list(of: self?.lend.session?.mind) ?? .empty }
         listening.record = { [weak self] line in self?.model.record.transcribed(line) }
         listening.onChange = { [weak self] in
-            self?.warmSpeech()
             self?.model.record.tick()
             self?.stateDidChange()
         }

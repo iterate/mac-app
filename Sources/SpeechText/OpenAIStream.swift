@@ -72,8 +72,14 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
 
     private let lock = NSLock()
     private var said = ""
-    private var item: String?
+    /// The items of the commits, in their order: OpenAI's `committed` events name them.
+    private var items: [String] = []
     private var finals: [String: String] = [:]
+    /// Who waits for the final of each commit, by its index.
+    private var waiters: [Int: CheckedContinuation<String, Error>] = [:]
+    private var commits = 0
+    /// The 24 kHz samples sent at the last commit: a commit of less than 0.1 s is none.
+    private var sentAtCommit = 0
     /// What OpenAI billed for each item: `usage.seconds` of its `completed` event (the sound,
     /// rounded up to the second; 25 Nov 2026).
     private var billed: [String: Double] = [:]
@@ -88,7 +94,6 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     private var isCommitted = false
     private var opened: CheckedContinuation<Void, Error>?
     private var isOpen = false
-    private var final: CheckedContinuation<String, Error>?
     private var upsampler = Upsampler()
     /// Samples at 24 kHz sent so far.
     private var sent = 0
@@ -171,30 +176,46 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         }
     }
 
-    /// Commits the sound and waits for its text. Less than 0.1 s of sound (OpenAI refuses a
-    /// smaller commit) is no text.
+    /// Commits the sound since the last commit and waits for its text: one segment, while the
+    /// sound goes on (a capture commits at each pause). Less than 0.1 s of sound (OpenAI refuses a
+    /// smaller commit) is no text, and no commit.
+    public func commit() -> @Sendable () async throws -> String {
+        let index: Int?
+        do {
+            index = try lock.withLock {
+                if let failure { throw failure }
+                guard sent - sentAtCommit >= 2_400 else { return nil }
+                sentAtCommit = sent
+                commits += 1
+                return commits - 1
+            }
+        } catch {
+            return { throw error }
+        }
+        guard let index else { return { "" } }
+        send(["type": "input_audio_buffer.commit"])
+        return { [self] in
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+                lock.withLock {
+                    if let failure { return continuation.resume(throwing: failure) }
+                    waiters[index] = continuation
+                }
+                answerFinals()
+                DispatchQueue.global().asyncAfter(deadline: .now() + setup.finalTimeout) { [weak self] in
+                    self?.fail(.timedOut("final after \(Int(self?.setup.finalTimeout ?? 0)) s"), only: .final(index))
+                }
+            }
+        }
+    }
+
+    /// Commits the rest of the sound and waits for its text, then closes the socket.
     public func finish() async throws -> String {
-        let tooShort: Bool = try lock.withLock {
+        try lock.withLock {
             if let failure { throw failure }
             isCommitted = true
-            return sent < 2_400
         }
-        if tooShort {
-            close()
-            return ""
-        }
-        send(["type": "input_audio_buffer.commit"])
         defer { close() }
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
-            lock.withLock {
-                if let failure { return continuation.resume(throwing: failure) }
-                final = continuation
-            }
-            answerFinal()
-            DispatchQueue.global().asyncAfter(deadline: .now() + setup.finalTimeout) { [weak self] in
-                self?.fail(.timedOut("final after \(Int(self?.setup.finalTimeout ?? 0)) s"), only: .final)
-            }
-        }
+        return try await commit()()
     }
 
     public func cancel() {
@@ -230,8 +251,9 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
             }
             continuation?.resume()
         case "input_audio_buffer.committed":
-            lock.withLock { item = event["item_id"] as? String }
-            answerFinal()
+            guard let id = event["item_id"] as? String else { return }
+            lock.withLock { items.append(id) }
+            answerFinals()
         case "conversation.item.input_audio_transcription.delta":
             guard let delta = event["delta"] as? String else { return }
             let (words, text): (String, @Sendable (String) -> Void) = lock.withLock {
@@ -246,7 +268,7 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
                 finals[id] = event["transcript"] as? String ?? ""
                 if usage?["type"] as? String == "duration", let seconds = usage?["seconds"] as? Double { billed[id] = seconds }
             }
-            answerFinal()
+            answerFinals()
         case "conversation.item.input_audio_transcription.failed", "error":
             fail(.failed("OpenAI: \(message)"))
         default:
@@ -254,44 +276,53 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         }
     }
 
-    /// The seconds OpenAI billed for the committed sound, once its final came; nil when it said none.
-    public var billedSeconds: Double? { lock.withLock { item.flatMap { billed[$0] } } }
-
-    /// The final, when it is here and asked for.
-    private func answerFinal() {
-        let answer: (CheckedContinuation<String, Error>, String)? = lock.withLock {
-            guard let final, let item, let text = finals[item] else { return nil }
-            self.final = nil
-            return (final, text)
+    /// The seconds OpenAI billed for the committed sound, once the finals came; nil when it said none.
+    public var billedSeconds: Double? {
+        lock.withLock {
+            let seconds = items.compactMap { billed[$0] }
+            return seconds.isEmpty ? nil : seconds.reduce(0, +)
         }
-        if let (continuation, text) = answer { continuation.resume(returning: text) }
     }
 
-    private enum Wait { case open, final }
+    /// Each final that is here and asked for.
+    private func answerFinals() {
+        let answers: [(CheckedContinuation<String, Error>, String)] = lock.withLock {
+            var answers: [(CheckedContinuation<String, Error>, String)] = []
+            for (index, continuation) in waiters where index < items.count {
+                guard let text = finals[items[index]] else { continue }
+                waiters[index] = nil
+                answers.append((continuation, text))
+            }
+            return answers
+        }
+        for (continuation, text) in answers { continuation.resume(returning: text) }
+    }
+
+    private enum Wait { case open, final(Int) }
 
     /// The first failure: it answers whoever waits (`open`, `finish`); with no one waiting, while
     /// the sound streams, `failed` hears it. A failure after the close is none. `only` is a time
     /// out's: it fails that wait, if it still goes, and nothing else.
     private func fail(_ reason: Failure, only: Wait? = nil) {
-        typealias Waiting = (opened: CheckedContinuation<Void, Error>?, final: CheckedContinuation<String, Error>?, streaming: Bool, failed: @Sendable (String) -> Void)
+        typealias Waiting = (opened: CheckedContinuation<Void, Error>?, finals: [CheckedContinuation<String, Error>], streaming: Bool, failed: @Sendable (String) -> Void)
         let waiting: Waiting? = lock.withLock {
             guard failure == nil else { return nil }
             switch only {
             case .open?: guard opened != nil else { return nil }
-            case .final?: guard final != nil else { return nil }
-            case nil: guard !isClosed || final != nil || opened != nil else { return nil }
+            case .final(let index)?: guard waiters[index] != nil else { return nil }
+            case nil: guard !isClosed || !waiters.isEmpty || opened != nil else { return nil }
             }
             failure = reason
             defer {
                 opened = nil
-                final = nil
+                waiters = [:]
             }
-            return (opened, final, isOpen && !isCommitted, failed)
+            return (opened, Array(waiters.values), isOpen && !isCommitted, failed)
         }
         guard let waiting else { return }
         waiting.opened?.resume(throwing: reason)
-        waiting.final?.resume(throwing: reason)
-        if waiting.opened == nil, waiting.final == nil, waiting.streaming, reason != .cancelled { waiting.failed(reason.localizedDescription) }
+        for final in waiting.finals { final.resume(throwing: reason) }
+        if waiting.opened == nil, waiting.finals.isEmpty, waiting.streaming, reason != .cancelled { waiting.failed(reason.localizedDescription) }
         socket.close(normal: false)
     }
 }

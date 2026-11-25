@@ -593,7 +593,7 @@ private struct DictationPage: View {
                 }
                 SettingsRow(
                     title: "Always listen",
-                    detail: "The microphone stays open, and this Mac puts each stretch of your speech into words, for the history, \(choices.writeSaidKey?.words ?? "Paste the last transcript") and the record."
+                    detail: "The microphone stays open, and each stretch of your speech is put into words, for the history, \(choices.writeSaidKey?.words ?? "Paste the last transcript") and the record. Online, OpenAI hears it: about $0.017 a minute of speech; silence costs nothing."
                 ) {
                     SettingsSwitch(id: "settings.alwaysListen", label: "Always listen", isOn: choices.alwaysListen) { choices.alwaysListen = $0 }
                 }
@@ -706,9 +706,9 @@ private struct DictationPage: View {
     private var whereDetail: String {
         let model = speech.chosen
         guard model.isLocal else {
-            return "\(model.name) at OpenAI: the sound leaves this Mac. When OpenAI fails, \(speech.local.name) hears it here. Captures stay on this Mac."
+            return "\(model.name) at OpenAI for every use: the sound leaves this Mac. Offline, or when OpenAI fails, \(speech.local.name) hears it here; it loads only then."
         }
-        return "\(model.name), \(model.megabytes) MB, \(speech.isOnDisk(model) ? "on this Mac" : "not downloaded"). No sound and no text leaves this Mac."
+        return "\(model.name), \(model.megabytes) MB, \(speech.isOnDisk(model) ? "on this Mac" : "not downloaded"). It hears every use: no sound and no text leaves this Mac."
     }
 
     /// "fn ×" while fn dictates; "Use fn" when the person removed it.

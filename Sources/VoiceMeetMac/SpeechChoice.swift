@@ -1,13 +1,14 @@
+import Network
 import SpeechText
 import SwiftUI
+import VoiceMeetCore
 
-/// THE SPEECH MODEL of dictation, the input bar and capture: the person's stored choice among
-/// `SpeechModel.all` (README, "Dictation"). A model that is not on this Mac is downloaded first,
-/// with its progress in the panel; it is the model once it loaded. With no stored choice the model
-/// is GPT Live Transcribe when OpenAI can be reached (the lent mind opens its sockets with its own
-/// key, `MindSockets`, or this Mac has a key of its own), else Oruk Fourier 2B. A capture always uses a
-/// local model (`local`). While only Parakeet v3 is on this Mac, it stands in for Fourier, and the
-/// installed app gets Fourier in the background (`getDefault`).
+/// THE SPEECH MODEL as Settings › Dictation shows it, and the inputs of the one rule that picks who
+/// hears every use (`route`, `SpeechRoute`; README, "Listening"): the person's stored choice among
+/// `SpeechModel.all`, the network (`NWPathMonitor`), the lent mind's OpenAI and this Mac's key. A
+/// model that is not on this Mac is downloaded first, with its progress in the panel. The local
+/// model (`local`) is the chosen one, else Oruk Fourier 2B; while only Parakeet v3 is on this Mac,
+/// it stands in for Fourier, and the installed app gets Fourier in the background (`getDefault`).
 ///
 /// It also holds whether the person's own OpenAI key is set (`OpenAIKey`, in the login Keychain),
 /// and sets and removes it for Settings › Dictation. The key itself is read only by the online
@@ -32,6 +33,11 @@ final class SpeechChoice: ObservableObject {
     @Published private(set) var hasKey = false
     /// The lent mind, when it opens OpenAI's sockets with its own key (`MindSockets`).
     @Published private(set) var openAIMind: String?
+    /// The lent mind and what it can do with OpenAI, for the rule: a mind not asked yet is tried.
+    private var lentMind: (mind: String, state: MindOpenAI)?
+    /// Whether this Mac has a network now (`NWPathMonitor`). A drawing says yes.
+    @Published private(set) var isNetworkUp = true
+    private var network: NWPathMonitor?
 
     /// Whether GPT Live Transcribe can run: through the lent mind, or with this Mac's own key.
     var isOnline: Bool { openAIMind != nil || hasKey }
@@ -52,13 +58,44 @@ final class SpeechChoice: ObservableObject {
         self.hasKey = hasKey
     }
 
+    /// Watches the network: when it drops, the rule picks the local model at once, so that an
+    /// offline dictation finds it loaded.
+    func watchNetwork() {
+        guard network == nil, !AppEnvironment.current.isRendering else { return }
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let isUp = path.status == .satisfied
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.networkIs(isUp) } }
+        }
+        monitor.start(queue: DispatchQueue(label: "com.iterate.speech.network"))
+        network = monitor
+    }
+
+    private func networkIs(_ isUp: Bool) {
+        guard isUp != isNetworkUp else { return }
+        isNetworkUp = isUp
+        log.info("the network is \(isUp ? "up" : "down")")
+        follow(why: "the network is \(isUp ? "up" : "down")")
+    }
+
+    /// The person's stored choice, as the rule takes it: none, "On this Mac" (a local model) or
+    /// "OpenAI".
+    var choice: SpeechRoute.Choice {
+        guard let model = SpeechModel.all.first(where: { $0.id == AppEnvironment.current.defaults.string(forKey: Self.key) }) else { return .automatic }
+        return model.isLocal ? .onThisMac : .openAI
+    }
+
+    /// WHO HEARS EVERY USE NOW: the one rule (`SpeechRoute.pick`).
+    var route: SpeechRoute {
+        SpeechRoute.pick(choice: choice, isNetworkUp: isNetworkUp, mind: lentMind?.state, hasKey: hasKey)
+    }
+
     /// The local model: the chosen one, or the default (`SpeechModel.localDefault`) when the chosen
-    /// one runs online. Captures use it, it hears when OpenAI fails, and the app loads it at its
-    /// start.
+    /// one runs online. It hears when the rule picks it and when OpenAI fails.
     var local: SpeechModel { chosen.isLocal ? chosen : SpeechModel.localDefault(isOnDisk: Self.isOnDisk) }
 
     /// Gets the default model in the background when it is not on this Mac and no local model is
-    /// chosen: a Mac that had Parakeet v3 gets Oruk Fourier 2B, which is the model once it loaded.
+    /// chosen: a Mac that had Parakeet v3 gets Oruk Fourier 2B, which is the local model once its files are here.
     /// Its progress is in its row in Settings › Dictation. The installed app alone does it.
     func getDefault() {
         let stored = AppEnvironment.current.defaults.string(forKey: Self.key).flatMap { id in SpeechModel.all.first { $0.id == id } }
@@ -117,10 +154,12 @@ final class SpeechChoice: ObservableObject {
 
     /// The lent mind, and what it can do with OpenAI (`MindSockets.onChange`).
     func mindIs(_ mind: String?, state: MindOpenAI) {
+        let lent = mind.map { ($0, state) }
         let through = state == .yes ? mind : nil
-        guard through != openAIMind else { return }
+        guard lent?.0 != lentMind?.mind || lent?.1 != lentMind?.state else { return }
+        lentMind = lent
         openAIMind = through
-        follow(why: through.map { "OpenAI opens through \($0)" } ?? "no lent mind opens OpenAI")
+        follow(why: through.map { "OpenAI opens through \($0)" } ?? mind.map { "\($0) opens OpenAI: \(state)" } ?? "lent to no mind")
     }
 
     /// The default model follows what can reach OpenAI; a stored choice stays.
@@ -129,7 +168,6 @@ final class SpeechChoice: ObservableObject {
         if model != chosen {
             chosen = model
             log.info("the speech model is \(model.id): \(why)")
-            if model.isLocal { _ = SpeechModels.shared.preload(model) }
         }
         onChange()
     }
@@ -156,22 +194,19 @@ final class SpeechChoice: ObservableObject {
             failure = "\(model.name) needs a lent mind with an OpenAI key, or a key of your own: set it below."
             return
         }
-        if isOnDisk(model) {
-            use(model)
-            _ = SpeechModels.shared.preload(model)
-            return
-        }
+        if isOnDisk(model) { return use(model) }
         log.info("\(model.id): downloading \(model.megabytes) MB")
         get(model) { [weak self] in self?.use(model) }
     }
 
-    /// Downloads and loads `model`, with its progress in `getting`; `done` runs when it loaded.
+    /// Downloads `model`, with its progress in `getting`; `done` runs when its files are here. It
+    /// loads only when the rule needs it (`LocalSpeech`).
     private func get(_ model: SpeechModel, done: @escaping @MainActor () -> Void) {
         getting = (model.id, .downloading(0))
         gettingTask?.cancel()
         gettingTask = Task { @MainActor in
             do {
-                try await SpeechModels.shared.load(model) { load in
+                try await SpeechModels.shared.download(model) { load in
                     DispatchQueue.main.async { MainActor.assumeIsolated { if self.getting?.id == model.id { self.getting = (model.id, load) } } }
                 }
                 guard getting?.id == model.id else { return }
@@ -202,6 +237,7 @@ final class SpeechChoice: ObservableObject {
                 return ["id": getting.id, "loading": true]
             } ?? NSNull(),
             "failure": failure ?? NSNull(), "fnLines": fnLines, "openAIKey": hasKey, "openAIMind": openAIMind ?? NSNull(),
+            "network": isNetworkUp, "route": ["provider": route.provider.rawValue, "why": route.why.words, "local": local.id],
         ]
     }
 }

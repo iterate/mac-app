@@ -4,7 +4,7 @@ import VoiceMeetCore
 import XCTest
 
 /// A device that gives `pieces` buffers of 0.1 s at 48 kHz when it starts, and counts its runs.
-private final class Device: SpeechSource, @unchecked Sendable {
+final class FakeMicrophone: SpeechSource, @unchecked Sendable {
     let lock = NSLock()
     var starts = 0
     var stops = 0
@@ -57,7 +57,7 @@ private final class Got: @unchecked Sendable {
 
 final class MicStreamTests: XCTestCase {
     func testOneDeviceRunsWhileAnyoneReadsAndStopsWithTheLastReader() throws {
-        let device = Device()
+        let device = FakeMicrophone()
         let stream = MicStream(device: { device })
         let a = Got(), b = Got()
         let first = try stream.listen { a.add($0) }
@@ -114,7 +114,7 @@ final class MicStreamTests: XCTestCase {
     }
 
     func testAFailureTellsEveryReaderAndLeavesNone() throws {
-        let device = Device()
+        let device = FakeMicrophone()
         let stream = MicStream(device: { device })
         let got = Got()
         let raw = Got()
@@ -157,8 +157,8 @@ final class SpeechSessionTranscriptTests: XCTestCase {
     /// A listening is a stretch of the transcription stream: its final segment has the wall time,
     /// the heard words, the word list's correction and the model.
     func testAListeningsSegmentsGoToTheTranscriptionStreamWithTheirWallTimes() async throws {
-        let device = Device()
-        let session = SpeechSession(source: { device }, engine: { _, _ in Engine() })
+        let device = FakeMicrophone()
+        let session = SpeechSession(source: { device }, transcriber: localTranscriber { _, _ in Engine() })
         session.authorization = { .authorized }
         var events: [TranscriptEvent] = []
         session.transcribed = { events.append($0) }
@@ -202,11 +202,11 @@ final class StretchListenerTests: XCTestCase {
     /// 1 s of voice, then silence: one stretch, one segment `listen-1` with the word list's
     /// correction, on the wall clock of the sound.
     func testAStretchOfSpeechIsDetectedAndPutIntoWordsOnce() async throws {
-        let device = Device()
+        let device = FakeMicrophone()
         let stream = MicStream(device: { device })
         let heard = Heard()
-        let listener = StretchListener(stream: stream, useModel: false, engine: { _, _ in Engine() }) { heard.add($0) }
-        listener.use(.default, words: WordList(markdown: "- Beelink: b link\n"))
+        let listener = StretchListener(stream: stream, transcriber: localTranscriber { _, _ in Engine() }, useModel: false) { heard.add($0) }
+        listener.use(WordList(markdown: "- Beelink: b link\n"))
         let before = Date().timeIntervalSince1970
         try listener.start()
         for _ in 0..<5 { device.give(loud: false) }
@@ -226,10 +226,10 @@ final class StretchListenerTests: XCTestCase {
 
     /// While a key listens, Always listen hears nothing: the stretch that went on ends at the key.
     func testAHoldCutsTheStretchAndDetectsNothingUntilItsEnd() async throws {
-        let device = Device()
+        let device = FakeMicrophone()
         let stream = MicStream(device: { device })
         let heard = Heard()
-        let listener = StretchListener(stream: stream, useModel: false, engine: { _, _ in Engine() }) { heard.add($0) }
+        let listener = StretchListener(stream: stream, transcriber: localTranscriber { _, _ in Engine() }, useModel: false) { heard.add($0) }
         try listener.start()
         for _ in 0..<10 { device.give() }
         await waitFor { heard.lock.withLock { !heard.events.isEmpty } }
