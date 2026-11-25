@@ -1231,7 +1231,14 @@ async function main() {
     const log = join(home, "logs/app.log");
     if (!result.ok && existsSync(log)) result.log = readFileSync(log, "utf8").trim().split("\n").slice(-15);
     if (values.keep || !result.ok) result.home = home;
-    else rmSync(home, { recursive: true, force: true });
+    else {
+      // a stopped copy's last writes may still land in its home: retry, and never fail the run on it
+      try {
+        rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+      } catch (error) {
+        result.cleanup = error.code ?? error.message;
+      }
+    }
     console.log(JSON.stringify(result));
   }
   process.exit(failed ? 1 : 0);
