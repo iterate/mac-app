@@ -252,7 +252,30 @@ async function launchSeries(app, minds, args) {
     await run.quit();
   }
   const log = readFileSync(join(home, "logs/app.log"), "utf8").trim().split("\n").slice(-80).join("\n");
-  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its log ---\n${log}\n--- end ---\n`;
+  return `--- the start of a copy (${args.join(" ") || "no lend"}), from ${new Date(t0).toISOString()} ---\n${lines.join("\n")}\n--- its log ---\n${log}\n${systemLog(run.pid, t0)}--- end ---\n`;
+}
+
+/** What macOS's own log has of process `pid` from `t0`: its lines each second, by subsystem in
+ * the first 12 s, and the lines of its fifth second. */
+function systemLog(pid, t0) {
+  let text;
+  try {
+    text = execFileSync("/usr/bin/log", ["show", "--predicate", `processID == ${pid}`, "--last", "2m", "--style", "compact", "--info", "--debug"], { encoding: "utf8", maxBuffer: 64 << 20, timeout: 60000 });
+  } catch (error) {
+    return `--- no system log: ${error.message} ---\n`;
+  }
+  const perSecond = {}, kinds = {}, fifth = [];
+  for (const line of text.split("\n")) {
+    const at = line.match(/^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{3})/);
+    if (!at) continue;
+    const second = Math.floor((new Date(at[1].replace(" ", "T")).getTime() - t0) / 1000);
+    perSecond[second] = (perSecond[second] ?? 0) + 1;
+    const kind = line.match(/\] (\[[^\]]+\]|\([^)]+\))/)?.[1] ?? "?";
+    if (second >= 2 && second < 12) kinds[kind] = (kinds[kind] ?? 0) + 1;
+    if (second === 4 && fifth.length < 150) fifth.push(line.slice(0, 260));
+  }
+  const top = Object.entries(kinds).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([k, n]) => `${n} ${k}`);
+  return `--- the system log: lines each second ---\n${JSON.stringify(perSecond)}\n--- by subsystem, seconds 2 to 12 ---\n${top.join("\n")}\n--- second 4 ---\n${fifth.join("\n")}\n`;
 }
 
 function within(what, figures, limits) {
