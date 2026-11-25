@@ -3,7 +3,8 @@ import LocalAuthentication
 import VoiceMeetCore
 
 /// The person's approval of one use, for a thing whose choice is "Ask". The app says
-/// what a mind wants to do; the person approves it once or for half an hour, with Touch ID (or the
+/// what a mind wants to do; the person approves it once or for a while (Settings › General, "An
+/// approval can last": `approval.minutes`, 30 unless set), with Touch ID (or the
 /// Mac's password where there is no Touch ID), or denies it. A caller that gets no answer in a
 /// minute is refused. An approval holds in its round only (`ApprovalGrants`): another mind, none,
 /// or a refusal of this Mac's key ends every approval, and the answer to a question of an older
@@ -14,7 +15,8 @@ import VoiceMeetCore
 /// patience. The installed app, in the default home, always asks with the alert and Touch ID.
 @MainActor
 final class Approval {
-    private static let window: TimeInterval = 30 * 60
+    /// How long "Approve for N Minutes" lasts: the person's choice, read when the question is asked.
+    private static var minutes: Int { Choices.shared.approvalMinutes }
     private static let patience: TimeInterval = 60
 
     /// True when the control socket answers the questions; never in the default home.
@@ -57,7 +59,7 @@ final class Approval {
     }
 
     /// One question for several things (a live watch: the screens, the camera, the microphone).
-    /// "Approve for 30 Minutes" holds for each of them.
+    /// "Approve for N Minutes" holds for each of them.
     func ask(for things: [Shareable], does: String, what: String) async throws {
         // One question at a time: a second caller waits for the first answer, which may cover it.
         while isAsking { try await Task.sleep(nanoseconds: 200_000_000) }
@@ -83,7 +85,7 @@ final class Approval {
         alert.informativeText = what
         alert.icon = NSApp.applicationIconImage
         alert.addButton(withTitle: "Approve Once")
-        alert.addButton(withTitle: "Approve for 30 Minutes")
+        alert.addButton(withTitle: "Approve for \(Choices.approvalWords(Self.minutes))")
         alert.addButton(withTitle: "Deny")
         alert.window.level = .floating
         NSApp.activate(ignoringOtherApps: true)
@@ -127,11 +129,12 @@ final class Approval {
     }
 
     private func approve(_ things: [Shareable], round: ApprovalGrants.Round, does: String) {
-        grants.approve(things.map(\.id), round: round, until: Date().addingTimeInterval(Self.window))
-        log.info("to \(does): the person approved for 30 minutes")
+        let minutes = Self.minutes
+        grants.approve(things.map(\.id), round: round, until: Date().addingTimeInterval(TimeInterval(minutes) * 60))
+        log.info("to \(does): the person approved for \(minutes) minutes")
     }
 
-    /// The answer of the control socket: true approves, for 30 minutes with `keep`, else this one
+    /// The answer of the control socket: true approves, for `approval.minutes` with `keep`, else this one
     /// use; false denies it. False when no question waits.
     func answer(allow: Bool?, keep: Bool = false) -> Bool {
         guard let waiting else { return false }
@@ -140,7 +143,7 @@ final class Approval {
         return true
     }
 
-    /// True when the answer approves for 30 minutes.
+    /// True when the answer approves for `approval.minutes`.
     private func askControl(does: String, what: String) async throws -> Bool {
         questions += 1
         let question = questions

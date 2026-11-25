@@ -12,10 +12,11 @@ final class SpeechChoice: ObservableObject {
     /// The model that is being got now, and how far.
     @Published private(set) var getting: (id: String, load: SpeechLoad)?
     @Published private(set) var failure: String?
-    @Published var isOpen = false
     /// What keeps fn dictation from working (`Dictation.fnLines`).
     @Published var fnLines: [String] = []
     var allowAccessibility: () -> Void = {}
+    /// Settings › Dictation, where the models are listed and chosen.
+    var openSettings: () -> Void = {}
     var onChange: () -> Void = {}
 
     private let log = AppLog("speech")
@@ -30,9 +31,8 @@ final class SpeechChoice: ObservableObject {
         AppEnvironment.current.isRendering ? model == .default : model.isOnDisk
     }
 
-    /// The person chose `model` in the panel (or `ui.press` did).
+    /// The person chose `model` in Settings › Dictation (or `ui.press` did).
     func choose(_ model: SpeechModel) {
-        isOpen = false
         guard model != chosen, getting?.id != model.id else { return }
         failure = nil
         if isOnDisk(model) {
@@ -80,17 +80,15 @@ final class SpeechChoice: ObservableObject {
     }
 }
 
-/// The panel's speech row, under the action buttons: the model, under a click the list of models (each with its size,
-/// and whether it is on this Mac), and what keeps fn dictation from working.
+/// The panel's speech row, under the action buttons: the model, and what keeps fn dictation from
+/// working. A click opens Settings › Dictation, which lists the models (each with its size, and
+/// whether it is on this Mac).
 struct SpeechSection: View {
     @ObservedObject var choice: SpeechChoice
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             trigger
-            if choice.isOpen {
-                list.transition(.opacity.combined(with: .move(edge: .top)))
-            }
             if let failure = choice.failure {
                 Label(failure, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
             }
@@ -104,12 +102,11 @@ struct SpeechSection: View {
                 }
             }
         }
-        .animation(.easeOut(duration: 0.15), value: choice.isOpen)
     }
 
     private var trigger: some View {
         Button {
-            choice.isOpen.toggle()
+            choice.openSettings()
         } label: {
             HStack(spacing: 10) {
                 Image(systemName: "waveform").font(.system(size: 13)).frame(width: 18).foregroundStyle(.secondary)
@@ -117,41 +114,13 @@ struct SpeechSection: View {
                 Text(status(of: choice.chosen) ?? "on this Mac")
                     .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
                 Spacer(minLength: 8)
-                Image(systemName: "chevron.up.chevron.down").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
             }
         }
-        .buttonStyle(SwitcherRowStyle(isSelected: choice.isOpen))
+        .buttonStyle(SwitcherRowStyle())
         .padding(.horizontal, -8)
-        .help("The speech model: it runs on this Mac, and no sound leaves it")
+        .help("The speech model: it runs on this Mac, and no sound leaves it. Settings › Dictation chooses it.")
         .accessibilityIdentifier("speech.model")
-    }
-
-    private var list: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            ForEach(SpeechModel.all) { model in
-                Button {
-                    choice.choose(model)
-                } label: {
-                    HStack(spacing: 8) {
-                        VStack(alignment: .leading, spacing: 1) {
-                            Text(model.name).font(.system(size: 13))
-                            Text("\(model.megabytes) MB · \(model.license)").font(.system(size: 11)).foregroundStyle(.secondary)
-                        }
-                        Spacer(minLength: 8)
-                        Text(status(of: model) ?? (choice.isOnDisk(model) ? "On this Mac" : "Download"))
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 12, weight: .semibold))
-                            .opacity(model == choice.chosen ? 1 : 0)
-                    }
-                }
-                .buttonStyle(SwitcherRowStyle(isSelected: false))
-                .accessibilityIdentifier("speech.model.\(model.id)")
-            }
-        }
-        .padding(4)
-        .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     /// The download or the load that goes on for `model`, in words.

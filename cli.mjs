@@ -9,6 +9,10 @@
 //   npx @iterate-com/mac-app add --mind example.com --name jane.mac   a new key for one more mind
 //   npx @iterate-com/mac-app use example.com     lend to that mind (one at a time); the app switches
 //   npx @iterate-com/mac-app remove example.com  forget that mind and delete its key
+//   npx @iterate-com/mac-app set --login         change one saved value (Settings in the app runs it):
+//       --login, --no-login                      start at login, or not
+//       [--mind example.com] --words-expression <text>   the word list's itx expression, for every
+//                                                mind or for one; an empty text removes it
 //   npx @iterate-com/mac-app uninstall           quit the app and remove it, its keys and its state
 //
 // Or own the source: copy it, change it, build it from there (an app built from a copy does not
@@ -369,7 +373,8 @@ async function addMind(state, entry) {
   await allowKey(state, entry);
   return {
     ...state,
-    minds: [...state.minds.filter((m) => m.mind !== entry.mind), entry],
+    // the keys it does not know (a word list's expression, a later version's) stay in the entry
+    minds: [...state.minds.filter((m) => m.mind !== entry.mind), { ...known, ...entry }],
     active: entry.mind,
   };
 }
@@ -435,6 +440,46 @@ function remove({ positionals }) {
     `Removed ${mind} and deleted its key. The key stays listed on the mind's /keys page until you remove it there; it can do nothing now.` +
       (active ? "" : `\nNo mind is lent to now: npx ${PACKAGE} use <mind>`),
   );
+}
+
+/** `set`: one saved value, for the app's Settings: `--login` / `--no-login`, and
+ *  `--words-expression <text>` for every mind (the top level) or with `--mind` for one. An empty
+ *  text removes the value: the built-in default, or the default of this Mac. Every other key of the
+ *  file, known or not, stays as it is. */
+function set({ values }) {
+  const state = readState();
+  const changed = [];
+  let next = state;
+  if (values.login !== undefined) {
+    next = { ...next, login: values.login };
+    changed.push(values.login ? "It starts at login." : "It does not start at login.");
+  }
+  if (values["words-expression"] !== undefined) {
+    const expression = values["words-expression"].trim();
+    if (expression.length > 4000) throw new Error("The expression is longer than 4,000 characters.");
+    const withExpression = (object) => {
+      const { wordsExpression, ...rest } = object;
+      return expression ? { ...rest, wordsExpression: expression } : rest;
+    };
+    if (values.mind) {
+      const mind = values.mind.trim().toLowerCase();
+      if (!state.minds.some((m) => m.mind === mind))
+        throw new Error(
+          `No mind "${mind}" on this Mac. Its minds: ${state.minds.map((m) => m.mind).join(", ") || "none"}.`,
+        );
+      next = { ...next, minds: next.minds.map((m) => (m.mind === mind ? withExpression(m) : m)) };
+      changed.push(
+        expression ? `The word list of ${mind} comes from its own expression.` : `The word list of ${mind} comes from the default expression.`,
+      );
+    } else {
+      next = withExpression(next);
+      changed.push(expression ? "The default word-list expression is set." : "The default word-list expression is the built-in one.");
+    }
+  } else if (values.mind) throw new Error("--mind goes with --words-expression <text>.");
+  if (!changed.length)
+    throw new Error("Nothing to set. Pass --login, --no-login, or [--mind <address>] --words-expression <text>.");
+  writeState(next);
+  say(changed.join(" "));
 }
 
 async function setup({ values }, { interactive }) {
@@ -758,6 +803,7 @@ const parsed = parseArgs({
     to: { type: "string" },
     files: { type: "boolean" },
     "no-install": { type: "boolean" },
+    "words-expression": { type: "string" },
   },
 });
 if (parsed.values["no-login"]) parsed.values.login = false;
@@ -772,10 +818,11 @@ try {
   else if (command === "add") await add(parsed, { interactive: process.stdin.isTTY });
   else if (command === "use") use(parsed);
   else if (command === "remove") remove(parsed);
+  else if (command === "set") set(parsed);
   else if (command === "uninstall") await uninstall();
   else
     throw new Error(
-      `No command "${command}". The commands are: setup (the default), update, list, add, use, remove, uninstall; for a copy of your own: init, diff, update.`,
+      `No command "${command}". The commands are: setup (the default), update, list, add, use, remove, set, uninstall; for a copy of your own: init, diff, update.`,
     );
 } catch (error) {
   say(error instanceof Error ? error.message : String(error));

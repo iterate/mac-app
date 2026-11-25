@@ -107,6 +107,8 @@ struct Panel: View {
     var cameraLayer: ((String) -> CALayer)?
     /// A large picture of a display or a camera, made at a click on its small one.
     var bigPicture: (Shareable) async -> CGImage? = { _ in nil }
+    /// The footer's Settings button and ⌘,.
+    var openSettings: () -> Void = {}
     /// The height the scrolling middle needs; it is at most `middleMaxHeight`.
     @State private var middleHeight: CGFloat = 400
 
@@ -362,6 +364,15 @@ struct Panel: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
+            Button(action: openSettings) {
+                Image(systemName: "gearshape").font(.system(size: 13))
+            }
+                .buttonStyle(.borderless)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Settings")
+                .keyboardShortcut(",")
+                .help("This Mac's settings, and each mind's (⌘,)")
+                .accessibilityIdentifier("panel.settings")
             Button("Quit") { NSApp.terminate(nil) }
                 .buttonStyle(.borderless)
                 .font(.system(size: 12))
