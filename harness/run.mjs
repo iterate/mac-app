@@ -93,13 +93,16 @@ function writeConfig(home, iterate, minds, active = minds[0].mind) {
 /**
  * A home with config.json, whose iterate CLI is the fake mind: what it is sent is in `mind.jsonl`,
  * each event with the mind (`mind`) and the path it reached, and each file it stored as
- * `{ file, bytes, via }`. Every mind is the same fake mind; `words` is its word list (words.md).
+ * `{ file, bytes, via }`. Every mind is the same fake mind; `words` is its word list (words.md),
+ * and `seed` the events its context `/devices/<NAME>` holds before the app connects (as an earlier
+ * run of the app left them).
  */
-function withMind(home, minds = [{ mind: MIND, name: NAME }], { words } = {}) {
+function withMind(home, minds = [{ mind: MIND, name: NAME }], { words, seed } = {}) {
   const iterate = join(home, "fake-iterate");
   mkdirSync(join(iterate, "bin"), { recursive: true });
   mkdirSync(join(iterate, "dist"), { recursive: true });
   writeFileSync(join(iterate, "bin/iterate.js"), "// the bridges import ../dist/node.mjs beside this file\n");
+  writeFileSync(join(iterate, "seed.json"), JSON.stringify(seed ?? []));
   if (words) {
     // the mind's list, and the copy the app keeps of it: dictation has it from the start
     writeFileSync(join(iterate, "words.md"), words);
@@ -116,6 +119,8 @@ const mind = fakeMind({
 });
 const words = ${JSON.stringify(join(iterate, "words.md"))};
 if (existsSync(words)) mind.repo.files["words.md"] = readFileSync(words, "utf8");
+const seed = JSON.parse(readFileSync(${JSON.stringify(join(iterate, "seed.json"))}, "utf8"));
+if (seed.length) await (await mind.connect()).itx.cd(${JSON.stringify(`/devices/${NAME}`)}).append(...seed);
 export const addressOf = (mind) => mind;
 export async function connectMind({ address }) {
   const connection = await mind.connect();
@@ -292,6 +297,84 @@ const scenarios = {
       await until("the main page again", 5, async () => {
         const shown = await ids();
         return (await run.state()).panel.page === "main" && shown.has("activity.all") && shown.has("record.screens") && !shown.has("activity.back");
+      });
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
+   * The Activity window on a context that holds mixed events: "Open in a Window" reads the newest
+   * page of every kept type (no ephemeral key), a scroll to the end reads the page below, a new act
+   * comes in as it happens, and the window's close lets go of every event.
+   */
+  async "log-window"({ app, home }) {
+    const kinds = [
+      (n) => ({ type: "device/app-focused", payload: { app: "Ghostty", title: `window ${n}` } }),
+      (n) => ({ type: "device/presence-changed", payload: { state: n % 4 ? "active" : "idle", idleSeconds: 120 } }),
+      (n) => ({ type: "device/window-read", payload: { app: "Ghostty", title: `window ${n}`, trigger: "click", text: "x".repeat(30_000) } }),
+      (n) => ({ type: "record/slot-stored", payload: { t: 1764000000 + n * 30, tracks: { "mic-0": { kind: "audio" } } } }),
+      (n) => ({ type: "device/key-pressed", payload: { key: "a", keyCode: 0, n } }),
+      (n) => ({ type: "device/key-pressed", ephemeral: true, payload: { key: "b", keyCode: 11, n } }),
+      (n) => ({ type: "device/live-watch-ended", payload: { watcher: "w1", who: "Misha", seconds: n, why: "the watcher left" } }),
+      (n) => ({ type: "device/input-submitted", payload: { id: `i${n}`, text: `input ${n}`, at: "2026-11-24T14:00:00Z", files: [] } }),
+    ];
+    // 315 kept events and 45 ephemeral keys, which no log keeps
+    const seed = Array.from({ length: 360 }, (_, n) => kinds[n % kinds.length](n));
+    withMind(home, undefined, { seed });
+    execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "shared"]);
+    const run = await start(app, home);
+    const log = async () => (await run.state()).log;
+    try {
+      await until("the session", 10, async () => (await run.state()).session);
+      if ((await log()).held !== 0) throw new Error("the log is read before its window opens");
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "activity.all" });
+      await until("the Activity page's button", 5, async () => [...nodes(await run.control("ui.tree"))].some((node) => node.id === "activity.window"));
+      await run.control("ui.press", { id: "activity.window" });
+      const first = await until("the newest page", 30, async () => {
+        const state = await log();
+        // a page of 100, and the app's own events that came beside it
+        return state.visible && state.read && state.held >= 100 && state.held < 110 && state.hasOlder && state;
+      });
+      const types = new Set(first.types);
+      for (const type of ["device/app-focused", "device/presence-changed", "device/window-read", "record/slot-stored", "device/key-pressed", "device/input-submitted"])
+        if (!types.has(type)) throw new Error(`the newest page has no ${type}: ${[...types].join(", ")}`);
+      // keys and mouse are many: shown only when the person turns them on
+      if (first.shown >= first.held) throw new Error(`the list shows ${first.shown} of ${first.held}, keys among them`);
+      await run.control("ui.press", { id: "log.filter.keys" });
+      await until("the keys shown", 5, async () => (await log()).shown === (await log()).held);
+
+      // a scroll to the end of the list reads the page below
+      await run.control("ui.scroll", { id: "log.list" });
+      const near = (count) => async () => {
+        const held = (await log()).held;
+        return held >= count && held < count + 10;
+      };
+      await until("the second page", 15, near(200));
+      await run.control("ui.scroll", { id: "log.list" });
+      await until("the third page", 15, near(300));
+      // the 315 seeded and the app's own events since it connected (its presence)
+      let last;
+      const all = await until("the start of the context", 15, async () => {
+        await run.control("ui.scroll", { id: "log.list" });
+        last = await log();
+        return last.held >= 315 && last.held < 325 && !last.hasOlder && last;
+      }).catch((error) => {
+        throw new Error(`${error.message}; the log: ${JSON.stringify({ ...last, types: undefined })}`);
+      });
+      if (all.failure) throw new Error(`the log failed: ${all.failure}`);
+
+      // an act of now comes in as it happens, through the subscription
+      await run.endpoint("run", { argv: ["/bin/echo", "an act"] });
+      await until("the act in the window", 30, async () => (await log()).types.slice(0, 4).includes("device/act-ended"));
+
+      // the close lets go of the events and ends the read
+      await run.control("ui.press", { id: "log.close" });
+      await until("the window closed and its events gone", 10, async () => {
+        const state = await log();
+        return !state.visible && state.held === 0;
       });
     } finally {
       await run.quit();
@@ -511,31 +594,63 @@ const scenarios = {
     }
   },
 
-  /** A use whose choice is Ask waits for the answer: approved, it runs; denied, it is refused. */
+  /**
+   * A use whose choice is Ask waits for the answer, and its panel shows with the three answers:
+   * approved and denied through the socket, then through the panel's buttons (`ui.press`), and
+   * "Approve for N Minutes" lets the next use run with no question.
+   */
   async approval({ app, home }) {
+    // a mind session: an approval for N minutes holds in a session only
+    withMind(home);
     execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "ask"]);
     const run = await start(app, home);
+    const ids = async () => new Set([...nodes(await run.control("ui.tree"))].map((node) => node.id).filter(Boolean));
+    const echo = () =>
+      run.endpoint("run", { argv: ["/bin/echo", "approved"] }).then(
+        (answer) => ({ answer }),
+        (error) => ({ error }),
+      );
+    const ran = ({ answer, error }) => {
+      if (error) throw error;
+      const out = Buffer.from(answer.stdoutBase64, "base64").toString();
+      if (out.trim() !== "approved") throw new Error(`the command wrote ${JSON.stringify(out)}`);
+    };
+    const denied = ({ answer, error }) => {
+      if (!/denied/.test(error?.message ?? "")) throw new Error(`a denied use answered ${JSON.stringify(answer ?? error?.message)}`);
+    };
     try {
       if ((await run.state()).sharing.commands !== "ask") throw new Error("commands are not on Ask");
-      for (const allow of [true, false]) {
-        const asked = run.endpoint("run", { argv: ["/bin/echo", "approved"] }).then(
-          (answer) => ({ answer }),
-          (error) => ({ error }),
-        );
+      await until("the session", 10, async () => (await run.state()).session);
+      const answers = [
+        [(r) => r.control("approval.answer", { allow: true }), ran],
+        [(r) => r.control("approval.answer", { allow: false }), denied],
+        [(r) => r.control("ui.press", { id: "approval.once" }), ran],
+        [(r) => r.control("ui.press", { id: "approval.deny" }), denied],
+      ];
+      for (const [answer, check] of answers) {
+        const asked = echo();
         const state = await until("the question", 10, async () => (await run.state()).approval);
         if (!/run commands/.test(state.question)) throw new Error(`the question is ${state.question}`);
-        await run.control("approval.answer", { allow });
-        const { answer, error } = await asked;
-        if (allow) {
-          if (error) throw error;
-          const out = Buffer.from(answer.stdoutBase64, "base64").toString();
-          if (out.trim() !== "approved") throw new Error(`the command wrote ${JSON.stringify(out)}`);
-        } else if (!/denied/.test(error?.message ?? "")) {
-          throw new Error(`a denied use answered ${JSON.stringify(answer ?? error?.message)}`);
-        }
+        if (!/\/bin\/echo approved/.test(state.question)) throw new Error(`the question shows no command: ${state.question}`);
+        await until("the question's panel", 5, async () => {
+          const shown = await ids();
+          return ["approval.once", "approval.minutes", "approval.deny"].every((id) => shown.has(id));
+        });
+        await answer(run);
+        check(await asked);
+        await until("the panel gone", 5, async () => !(await ids()).has("approval.once"));
       }
+      // approved for approval.minutes: the next use runs with no question
+      const kept = echo();
+      await until("the question", 10, async () => (await run.state()).approval);
+      await until("the panel's second button", 5, async () => (await ids()).has("approval.minutes"));
+      await run.control("ui.press", { id: "approval.minutes" });
+      ran(await kept);
+      const again = await Promise.race([echo(), new Promise((resolve) => setTimeout(() => resolve({ timedOut: true }), 5000))]);
+      if (again.timedOut) throw new Error("the use after Approve for 30 Minutes waits for a question");
+      ran(again);
       const acts = (await run.state()).activity.entries;
-      if (acts.length !== 1 || acts[0].did !== "Ran a command") throw new Error(`the activity is ${JSON.stringify(acts)}`);
+      if (acts.length !== 4 || acts.some((act) => act.did !== "Ran a command")) throw new Error(`the activity is ${JSON.stringify(acts)}`);
     } finally {
       await run.quit();
     }

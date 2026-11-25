@@ -54,6 +54,14 @@ enum VoiceMeetMacApp {
         if let flag = CommandLine.arguments.firstIndex(of: "--render-settings"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(SettingsView.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
         }
+        // The Ask question, light and dark: `--render-approval <folder>`.
+        if let flag = CommandLine.arguments.firstIndex(of: "--render-approval"), CommandLine.arguments.indices.contains(flag + 1) {
+            exit(ApprovalWindow.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
+        }
+        // The Activity window with every event, light and dark: `--render-log <folder>`.
+        if let flag = CommandLine.arguments.firstIndex(of: "--render-log"), CommandLine.arguments.indices.contains(flag + 1) {
+            exit(ActivityWindowView.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)
+        }
         // The menu-bar mark in each state of the lend: `--render-icons <folder>`.
         if let flag = CommandLine.arguments.firstIndex(of: "--render-icons"), CommandLine.arguments.indices.contains(flag + 1) {
             exit(IterateIcon.render(to: URL(fileURLWithPath: CommandLine.arguments[flag + 1])) ? 0 : 1)

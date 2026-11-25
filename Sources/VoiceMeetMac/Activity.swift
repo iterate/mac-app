@@ -79,6 +79,12 @@ final class ActivityLog: ObservableObject {
     }
 
     var isPillVisible: Bool { pill.isVisible }
+
+    /// The log's header: the context it shows, on which mind, and the presence it last heard.
+    var contextLine: String {
+        guard let path, let mind else { return "Lent to no mind: these acts are on this Mac only" }
+        return "\(path) on \(mind)" + (fold.presence.map { " · \($0.state)" } ?? "")
+    }
 }
 
 /// The pill at the top right of the screen with the pointer: the acts that run, or the last one
@@ -272,6 +278,8 @@ struct ActivityPage: View {
     @Binding var isOpen: Bool
     /// How many acts the page shows.
     var shown = 9
+    /// "Open in a Window": the Activity window (`ActivityWindow`), with every event of the context.
+    var openWindow: () -> Void = {}
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -292,7 +300,22 @@ struct ActivityPage: View {
             .help("Back to the panel")
             .accessibilityLabel("Back")
             .accessibilityIdentifier("activity.back")
-            Text(context).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+            .overlay(alignment: .trailing) {
+                Button(action: openWindow) {
+                    HStack(spacing: 3) {
+                        Text("Open in a Window")
+                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                    }
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Every event of this context, in a window of its own")
+                .accessibilityLabel("Open in a Window")
+                .accessibilityIdentifier("activity.window")
+            }
+            Text(log.contextLine).font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 .textSelection(.enabled)
                 .accessibilityIdentifier("activity.context")
             Toggle("Show each act on the screen", isOn: $log.showsPill).toggleStyle(.checkbox).font(.system(size: 12))
@@ -310,11 +333,6 @@ struct ActivityPage: View {
         }
     }
 
-    /// The log's header: the context it shows, on which mind, and the presence it last heard.
-    private var context: String {
-        guard let path = log.path, let mind = log.mind else { return "Lent to no mind: these acts are on this Mac only" }
-        return "\(path) on \(mind)" + (log.fold.presence.map { " · \($0.state)" } ?? "")
-    }
 }
 
 /// One act: its time, the thing's icon (red while it runs or when it failed), what it did, its

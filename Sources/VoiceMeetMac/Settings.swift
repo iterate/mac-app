@@ -1016,8 +1016,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 }
 
 /// A menu-bar app has no menu bar of its own: the window takes the keys of the Edit and the
-/// Window menu itself, so a field pastes and ⌘W closes.
-private final class SettingsNSWindow: NSWindow {
+/// Window menu itself, so a field pastes and ⌘W closes. The Activity window is one too.
+final class SettingsNSWindow: NSWindow {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)

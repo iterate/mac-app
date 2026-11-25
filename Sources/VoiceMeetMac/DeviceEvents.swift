@@ -17,7 +17,8 @@ import VoiceMeetCore
 ///   (`ActivityLog`). Kept in the log.
 ///
 /// The bridge also reads the context back: `heard` gets each act and presence event that the
-/// context holds, from the last 50 acts on, and each new one. The events go through the job
+/// context holds, from the last 50 acts on, and each new one; and, only while the Activity window
+/// is open, every kept event for it (`readLog`, `heardLog`). The events go through the job
 /// `events` of the session's `MindBridge` (`bridge/events.mjs`), on its connection as the person:
 /// the Mac's own key lends and does nothing else.
 @MainActor
@@ -56,6 +57,10 @@ final class DeviceEvents: ObservableObject {
     var readPresence: () -> Presence = { Presence(idleSeconds: 0, screenLocked: false, displayAsleep: false) }
     /// An event of the context, read back by the bridge for the current session.
     var heard: (ContextEvent) -> Void = { _ in }
+    /// A line of the Activity window's log of every event (`ContextLog`): a reset, a page, an event.
+    var heardLog: ([String: Any]) -> Void = { _ in }
+    /// The Activity window is open: the bridge reads every event for it, and only then.
+    private(set) var readsLog = false
 
     private let log = AppLog("device")
     /// The session's bridge, whose job `events` publishes.
@@ -112,6 +117,7 @@ final class DeviceEvents: ObservableObject {
             self.said(line)
         }
         bridge.send("events", ["start": true])
+        if readsLog { bridge.send("events", ["log": "start"]) }
         log.info("session \(session?.generation ?? 0): publishes to \(bridge.mind) at \(session?.path ?? "")")
     }
 
@@ -199,7 +205,24 @@ final class DeviceEvents: ObservableObject {
         bridge.send("events", ["event": event])
     }
 
+    // MARK: - The Activity window's log
+
+    /// The window opens (true) or closes (false): the bridge's read of every event starts or ends,
+    /// with its subscription.
+    func readLog(_ on: Bool) {
+        guard on != readsLog else { return }
+        readsLog = on
+        bridge?.send("events", ["log": on ? "start" : "stop"])
+        if !on || bridge == nil { heardLog(["reset": true]) }
+    }
+
+    /// The person scrolled to the end of the list: the page below `before`.
+    func readOlder(before: Int) {
+        bridge?.send("events", ["log": "older", "before": before])
+    }
+
     private func said(_ said: [String: Any]) {
+        if let line = said["log"] as? [String: Any] { return heardLog(line) }
         if let event = (said["event"] as? [String: Any]).flatMap(ContextEvent.init(json:)) { heard(event) }
         if let count = said["sent"] as? Int {
             sent = count
@@ -223,12 +246,15 @@ final class DeviceEvents: ObservableObject {
         if said["exited"] != nil { presence = nil }
         if said["started"] != nil {
             bridge?.send("events", ["start": true])
+            if readsLog { bridge?.send("events", ["log": "start"]) }
             presence = nil
             tick()
         }
     }
 
     private func endJob() {
+        // the job's end ends the log's read too; the window holds no event of the old context
+        if readsLog { heardLog(["reset": true]) }
         bridge?.send("events", ["stop": true])
         bridge = nil
         presence = nil

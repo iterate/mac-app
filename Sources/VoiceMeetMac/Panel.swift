@@ -109,6 +109,8 @@ struct Panel: View {
     var bigPicture: (Shareable) async -> CGImage? = { _ in nil }
     /// The footer's Settings button and ⌘,.
     var openSettings: () -> Void = {}
+    /// The Activity page's "Open in a Window".
+    var openActivityWindow: () -> Void = {}
     /// The height the scrolling middle needs; it is at most `middleMaxHeight`.
     @State private var middleHeight: CGFloat = 400
 
@@ -144,7 +146,7 @@ struct Panel: View {
                 ScrollView(.vertical) {
                     Group {
                         if state.isActivityOpen {
-                            ActivityPage(log: model.acts, isOpen: $state.isActivityOpen)
+                            ActivityPage(log: model.acts, isOpen: $state.isActivityOpen, openWindow: openActivityWindow)
                         } else {
                             middle
                         }
