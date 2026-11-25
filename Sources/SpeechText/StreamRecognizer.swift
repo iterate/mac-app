@@ -40,7 +40,8 @@ public protocol SpeechStream: AnyObject, Sendable {
 /// model hears what was kept and what comes after (`fallback`), and the log says why. Its events
 /// are then this recognizer's.
 public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
-    public typealias Open = @Sendable (_ text: @escaping @Sendable (String) -> Void, _ failed: @escaping @Sendable (String) -> Void) async throws -> SpeechStream
+    /// The stream, and where it came from for the log (`standby` or `new`).
+    public typealias Open = @Sendable (_ text: @escaping @Sendable (String) -> Void, _ failed: @escaping @Sendable (String) -> Void) async throws -> (stream: SpeechStream, from: String)
     public typealias Fallback = @Sendable (_ heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void) -> SpeechRecognizer
 
     /// The most seconds kept for the local model.
@@ -52,6 +53,7 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
     private let open: Open
     private let fallback: Fallback
     private let heard: @Sendable (SpeechRecognizer.Event) -> Void
+    private let ended: @Sendable () -> Void
 
     private let lock = NSLock()
     private var samples: [Float] = []
@@ -61,22 +63,28 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
     private var local: SpeechRecognizer?
     private var isEnded = false
     private var isCancelled = false
+    private var hasEnded = false
     private var opening: Task<Void, Never>?
     private let started = Date()
 
-    /// `name` is the model's id, for the log.
-    public init(name: String, words: WordList, open: @escaping Open, fallback: @escaping Fallback, heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void) {
+    /// `name` is the model's id, for the log. `ended` runs once, when the sound ends (`finish`) or
+    /// at a cancel: the online model opens its next standby then.
+    public init(
+        name: String, words: WordList, open: @escaping Open, fallback: @escaping Fallback, ended: @escaping @Sendable () -> Void = {},
+        heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void
+    ) {
         self.name = name
         self.words = words
         self.open = open
         self.fallback = fallback
         self.heard = heard
+        self.ended = ended
     }
 
     public func start() {
         opening = Task { [self] in
             do {
-                let stream = try await open({ [weak self] said in self?.said(said) }, { [weak self] reason in _ = self?.fallBack(reason) })
+                let (stream, from) = try await open({ [weak self] said in self?.said(said) }, { [weak self] reason in _ = self?.fallBack(reason) })
                 let isLate: Bool = lock.withLock {
                     guard !isCancelled, local == nil else { return true }
                     // what was kept goes first, under the lock: a push waits for it
@@ -85,7 +93,8 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
                     return false
                 }
                 if isLate { return stream.cancel() }
-                heard(.note("\(name) is ready after \(seconds(since: started)) s, with \(words.entries.count) terms"))
+                let milliseconds = Int((Date().timeIntervalSince(started) * 1000).rounded())
+                heard(.note("\(name) is ready \(milliseconds) ms after the start (\(from)), with \(words.entries.count) terms"))
                 heard(.ready)
             } catch {
                 _ = fallBack(error.localizedDescription)
@@ -109,6 +118,7 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
             isEnded = true
             return Double(given) / Double(SpeechStretch.rate)
         }
+        endOnce()
         // bounded: the stream's open has a time out of its own
         await opening?.value
         let (stream, local) = lock.withLock { (self.stream, self.local) }
@@ -137,6 +147,15 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
         stream?.cancel()
         local?.cancel()
         opening?.cancel()
+        endOnce()
+    }
+
+    private func endOnce() {
+        let isFirst: Bool = lock.withLock {
+            defer { hasEnded = true }
+            return !hasEnded
+        }
+        if isFirst { ended() }
     }
 
     private func said(_ text: String) {
@@ -168,10 +187,12 @@ public final class StreamRecognizer: SpeechListening, @unchecked Sendable {
 public enum OnlineSpeech {
     /// `key` reads the OpenAI key (off the main thread, at each start); `local` is the model that
     /// hears when OpenAI fails. `setup` and `fallback` stand in for OpenAI's address and time outs
-    /// and for the local recognizer, for a test.
+    /// and for the local recognizer, for a test. `standby` is the socket that waits for the next
+    /// listening (`OpenAIStandby`): taken at the start when it fits, opened again at the end.
     public static func recognizer(
         _ model: SpeechModel, words: WordList, key: @escaping @Sendable () -> String?, local: SpeechModel = .default,
-        setup: OpenAIStream.Setup? = nil, fallback: StreamRecognizer.Fallback? = nil, heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void
+        setup: OpenAIStream.Setup? = nil, fallback: StreamRecognizer.Fallback? = nil, standby: OpenAIStandby? = nil,
+        heard: @escaping @Sendable (SpeechRecognizer.Event) -> Void
     ) -> SpeechListening? {
         guard model.runs == .openAI else { return nil }
         var setup = setup ?? OpenAIStream.Setup()
@@ -180,9 +201,15 @@ public enum OnlineSpeech {
             name: model.id, words: words,
             open: { [setup] text, failed in
                 guard let key = key() else { throw OpenAIStream.Failure.noKey }
-                return try await OpenAIStream.open(setup, key: key, text: text, failed: failed)
+                if let stream = await standby?.take(setup, key: key) {
+                    // it may have closed since the ping: then a new one, as with no standby
+                    if stream.attach(text: text, failed: failed) { return (stream, "standby") }
+                    stream.cancel()
+                }
+                return (try await OpenAIStream.open(setup, key: key, text: text, failed: failed), "new")
             },
             fallback: fallback ?? { heard in SpeechRecognizer(model: local, words: words, heard: heard) },
+            ended: { [setup] in standby?.prepare(setup, key: key) },
             heard: heard)
     }
 }

@@ -13,7 +13,7 @@ import os
 /// (`StreamRecognizer`) lets the local model hear the sound. Everything runs on URLSession's
 /// queue: `receive` is a chain of callbacks, with no polling.
 public final class OpenAIStream: SpeechStream, @unchecked Sendable {
-    public struct Setup: Sendable {
+    public struct Setup: Sendable, Equatable {
         public var url = URL(string: "wss://api.openai.com/v1/realtime?intent=transcription")!
         public var model = "gpt-live-transcribe"
         /// `low` had the lower WER and the faster final of the two delays (speech-bench).
@@ -65,8 +65,9 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
 
     private let setup: Setup
     private let task: URLSessionWebSocketTask
-    private let text: @Sendable (String) -> Void
-    private let failed: @Sendable (String) -> Void
+    /// Under the lock: a standby (`OpenAIStandby`) hands them over when a dictation takes it.
+    private var text: @Sendable (String) -> Void
+    private var failed: @Sendable (String) -> Void
 
     private let lock = NSLock()
     private var said = ""
@@ -100,6 +101,29 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
         let stream = OpenAIStream(setup: setup, key: key, text: text, failed: failed)
         try await stream.connect()
         return stream
+    }
+
+    /// A standby taken by a dictation: from now on `text` and `failed` are the dictation's. False
+    /// when the socket failed or closed before: the caller opens a new one.
+    func attach(text: @escaping @Sendable (String) -> Void, failed: @escaping @Sendable (String) -> Void) -> Bool {
+        lock.withLock {
+            guard failure == nil, !isClosed, isOpen else { return false }
+            self.text = text
+            self.failed = failed
+            return true
+        }
+    }
+
+    /// Whether the socket answers a ping within `within` seconds. A standby that waited may be
+    /// dead with no sign (a sleep, another network), so a dictation asks before it takes it.
+    func ping(within: Double) async -> Bool {
+        guard lock.withLock({ failure == nil && !isClosed && isOpen }) else { return false }
+        let once = Once()
+        return await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            once.set(continuation)
+            task.sendPing { error in once.resume(error == nil) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + within) { once.resume(false) }
+        }
     }
 
     private func connect() async throws {
@@ -209,9 +233,9 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
             answerFinal()
         case "conversation.item.input_audio_transcription.delta":
             guard let delta = event["delta"] as? String else { return }
-            let words: String = lock.withLock {
+            let (words, text): (String, @Sendable (String) -> Void) = lock.withLock {
                 said += delta
-                return said
+                return (said, self.text)
             }
             if !words.trimmingCharacters(in: .whitespaces).isEmpty { text(words) }
         case "conversation.item.input_audio_transcription.completed":
@@ -241,7 +265,7 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
     /// the sound streams, `failed` hears it. A failure after the close is none. `only` is a time
     /// out's: it fails that wait, if it still goes, and nothing else.
     private func fail(_ reason: Failure, only: Wait? = nil) {
-        typealias Waiting = (opened: CheckedContinuation<Void, Error>?, final: CheckedContinuation<String, Error>?, streaming: Bool)
+        typealias Waiting = (opened: CheckedContinuation<Void, Error>?, final: CheckedContinuation<String, Error>?, streaming: Bool, failed: @Sendable (String) -> Void)
         let waiting: Waiting? = lock.withLock {
             guard failure == nil else { return nil }
             switch only {
@@ -254,13 +278,38 @@ public final class OpenAIStream: SpeechStream, @unchecked Sendable {
                 opened = nil
                 final = nil
             }
-            return (opened, final, isOpen && !isCommitted)
+            return (opened, final, isOpen && !isCommitted, failed)
         }
         guard let waiting else { return }
         waiting.opened?.resume(throwing: reason)
         waiting.final?.resume(throwing: reason)
-        if waiting.opened == nil, waiting.final == nil, waiting.streaming, reason != .cancelled { failed(reason.localizedDescription) }
+        if waiting.opened == nil, waiting.final == nil, waiting.streaming, reason != .cancelled { waiting.failed(reason.localizedDescription) }
         task.cancel(with: .goingAway, reason: nil)
+    }
+}
+
+/// A continuation answered once: by the first of a ping's pong and its time out.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<Bool, Never>?
+    private var answer: Bool?
+
+    func set(_ continuation: CheckedContinuation<Bool, Never>) {
+        let given: Bool? = lock.withLock {
+            if answer == nil { self.continuation = continuation }
+            return answer
+        }
+        if let given { continuation.resume(returning: given) }
+    }
+
+    func resume(_ value: Bool) {
+        let continuation: CheckedContinuation<Bool, Never>? = lock.withLock {
+            guard answer == nil else { return nil }
+            answer = value
+            defer { self.continuation = nil }
+            return self.continuation
+        }
+        continuation?.resume(returning: value)
     }
 }
 

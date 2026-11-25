@@ -670,11 +670,24 @@ with a lock while it stays on and the time since the start.
   turn detection, the mind's word list terms as `keywords`, and the bench's prompt. The sound is
   kept from fn down, so a socket that opens late loses no word (its setup costs about 0.8 s). Each
   delta is the pill's text; at the end a commit asks for the final, which the word list repairs.
-  The socket closes after each dictation. When OpenAI fails (no session within 5 s, an error
+  Each socket serves one dictation. When OpenAI fails (no session within 5 s, an error
   while you talk, no final within 5 s of the end, or no key), Parakeet v3 hears what was kept and
   what comes after, and `app.log` says why ("gpt-live-transcribe failed after 0.31 s (…): the local
   model hears it"). The code: `Sources/SpeechText/OpenAIStream.swift` (the socket),
   `StreamRecognizer.swift` (the stream, with the local model behind it).
+
+  A new socket is ready 0.74 to 1.02 s after it opens (p50 0.82 s, measured on 25 November 2026),
+  so the live words came late. Thus one **standby socket** waits for the next dictation, opened
+  and configured with the same session in the background when a dictation ends. fn down takes it
+  when it is open, has the word list's current keywords and answers a ping (0.5 s at most); else
+  it closes it and opens a new socket, as before. There is at most one standby, and only while
+  GPT Live Transcribe is the model and a key is set; it closes when the model or the key changes,
+  when the Mac sleeps, and after 10 minutes unused (then the next one opens only after the next
+  dictation, so an idle Mac holds no socket for long). One that the server or the network closes
+  is dropped, with a line in the log and nothing else. An open socket with no sound costs nothing:
+  OpenAI bills transcription by its audio. The speech log says, for each dictation,
+  `gpt-live-transcribe is ready 12 ms after the start (standby)` or `(new)`. The code:
+  `OpenAIStandby.swift`.
 - **The OpenAI key is in the login Keychain**: a generic password of the service
   `com.iterate.mac-app.openai` and the account `api-key`. It is never in a file, a log, `ui.state`
   (which says only `speech.openAIKey`: true or false) or a process's arguments. Settings ›

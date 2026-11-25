@@ -12,6 +12,7 @@ private final class FakeOpenAI: @unchecked Sendable {
     private let lock = NSLock()
     private var got: [[String: Any]] = []
     private var authorization: String?
+    private var connections: [NWConnection] = []
     /// The answer to one message: the events to send back.
     let answer: @Sendable ([String: Any]) -> [[String: Any]]
     var url: URL { URL(string: "ws://127.0.0.1:\(listener.port!.rawValue)/v1/realtime?intent=transcription")! }
@@ -33,9 +34,14 @@ private final class FakeOpenAI: @unchecked Sendable {
     deinit { listener.cancel() }
 
     var messages: [[String: Any]] { lock.withLock { got } }
+    /// The sockets opened so far.
+    var connectionCount: Int { lock.withLock { connections.count } }
+    /// The server closes every socket, as OpenAI or the network may.
+    func closeAll() { lock.withLock { connections }.forEach { $0.cancel() } }
     func types() -> [String] { messages.compactMap { $0["type"] as? String } }
 
     private func serve(_ connection: NWConnection) {
+        lock.withLock { connections.append(connection) }
         connection.start(queue: queue)
         receive(connection)
     }
@@ -108,15 +114,51 @@ private func loud(_ seconds: Double) -> [Float] { (0..<Int(seconds * 16_000)).ma
 private let words = WordList(markdown: "- Beelink: bee link\n- iterate\n")
 
 /// The recognizer of the app, against the fake, with a fake local model behind it.
-private func recognizer(_ server: FakeOpenAI, heard: Events, key: String? = "sk-test", connect: Double = 2, final: Double = 2) -> SpeechListening {
-    var setup = OpenAIStream.Setup()
+private func recognizer(
+    _ server: FakeOpenAI, heard: Events, key: String? = "sk-test", connect: Double = 2, final: Double = 2, standby: OpenAIStandby? = nil
+) -> SpeechListening {
+    OnlineSpeech.recognizer(
+        .gptLiveTranscribe, words: words, key: { key }, setup: setup(server, connect: connect, final: final),
+        fallback: { heard in SpeechRecognizer(model: .default, words: words, engine: { LocalEngine() }, heard: heard) }, standby: standby
+    ) { heard.add($0) }!
+}
+
+/// The setup of `recognizer`, with the word list's keywords as `OnlineSpeech` sets them.
+private func setup(_ server: FakeOpenAI, connect: Double = 2, final: Double = 2, keywords: [String] = words.entries.map(\.term)) -> OpenAIStream.Setup {
+    var setup = OpenAIStream.Setup(keywords: keywords)
     setup.url = server.url
     setup.connectTimeout = connect
     setup.finalTimeout = final
-    return OnlineSpeech.recognizer(
-        .gptLiveTranscribe, words: words, key: { key }, setup: setup,
-        fallback: { heard in SpeechRecognizer(model: .default, words: words, engine: { LocalEngine() }, heard: heard) }
-    ) { heard.add($0) }!
+    return setup
+}
+
+/// Waits for `condition`, at most 5 s.
+private func until(_ what: String, _ condition: () -> Bool) async throws {
+    let started = Date()
+    while !condition() {
+        if Date().timeIntervalSince(started) > 5 { throw NSError(domain: "until", code: 1, userInfo: [NSLocalizedDescriptionKey: "no \(what) in 5 s"]) }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+}
+
+/// The clock of a standby test: the time moves when the test says, and the timers run when it says.
+private final class TestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var time = Date(timeIntervalSince1970: 1_800_000_000)
+    private var timers: [(Double, @Sendable () -> Void)] = []
+    var clock: OpenAIStandby.Clock {
+        OpenAIStandby.Clock(now: { [self] in lock.withLock { time } }, after: { [self] seconds, run in lock.withLock { timers.append((seconds, run)) } })
+    }
+    var delays: [Double] { lock.withLock { timers.map(\.0) } }
+    func advance(_ seconds: Double) { lock.withLock { time += seconds } }
+    func fireTimers() { lock.withLock { defer { timers = [] }; return timers }.forEach { $0.1() } }
+}
+
+private final class Lines: @unchecked Sendable {
+    private let lock = NSLock()
+    private var lines: [String] = []
+    func add(_ line: String) { lock.withLock { lines.append(line) } }
+    var all: [String] { lock.withLock { lines } }
 }
 
 /// Pushes `seconds` of sound in 0.1 s pieces at the pace of the clock, as a microphone does.
@@ -243,6 +285,113 @@ final class OpenAIStreamTests: XCTestCase {
     func testOnlyTheOnlineModelGetsAStreamRecognizer() {
         XCTAssertNil(OnlineSpeech.recognizer(.parakeetV3, words: .empty, key: { "sk" }) { _ in })
         XCTAssertNotNil(OnlineSpeech.recognizer(.gptLiveTranscribe, words: .empty, key: { "sk" }) { _ in })
+    }
+}
+
+/// The standby socket (`OpenAIStandby`): ready before fn goes down.
+final class OpenAIStandbyTests: XCTestCase {
+    /// One dictation on `standby`, against `server`: its notes and its text.
+    private func dictate(_ server: FakeOpenAI, _ standby: OpenAIStandby) async -> (notes: [String], text: [String]) {
+        let heard = Events()
+        let listening = recognizer(server, heard: heard, standby: standby)
+        listening.start()
+        await talk(listening, seconds: 0.5)
+        let segments = await listening.finish()
+        return (heard.notes, segments.map(\.text))
+    }
+
+    func testTheNextDictationTakesTheStandbyThatTheLastOneOpened() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "on the standby"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        let first = await dictate(server, standby)
+        XCTAssertTrue(first.notes.contains { $0.contains("ready") && $0.contains("ms after the start (new)") }, "\(first.notes)")
+        // the end of the first opened the standby, configured with the same session
+        try await until("the standby") { standby.isHeld }
+        XCTAssertEqual(server.connectionCount, 2)
+        XCTAssertEqual(server.types().filter { $0 == "session.update" }.count, 2)
+        XCTAssertTrue(lines.all.contains { $0.hasPrefix("a standby socket is ready after") && $0.hasSuffix("with 2 keywords") }, "\(lines.all)")
+
+        let second = await dictate(server, standby)
+        XCTAssertTrue(second.notes.contains { $0.contains("ms after the start (standby)") }, "\(second.notes)")
+        XCTAssertEqual(second.text, ["on the standby"])
+        XCTAssertFalse(second.notes.contains { $0.contains("failed") }, "\(second.notes)")
+        // the second opened no socket: the one after it is the next standby, and the only one
+        try await until("the next standby") { standby.isHeld }
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(server.connectionCount, 3)
+        XCTAssertEqual(server.types().filter { $0 == "session.update" }.count, 3, "each socket is configured once")
+    }
+
+    func testAStandbyOfOtherKeywordsIsClosedAndANewSocketOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        standby.prepare(setup(server, keywords: ["Herdr"]), key: { "sk-test" })
+        try await until("the standby") { standby.isHeld }
+
+        let dictation = await dictate(server, standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
+        XCTAssertEqual(dictation.text, ["new"])
+        XCTAssertTrue(lines.all.contains("the standby socket has other keywords: closed, and a new one"), "\(lines.all)")
+    }
+
+    func testAStandbyThatTheServerClosedIsDroppedQuietlyAndANewSocketOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+        let lines = Lines()
+        let standby = OpenAIStandby(log: { lines.add($0) })
+        standby.prepare(setup(server), key: { "sk-test" })
+        try await until("the standby") { standby.isHeld }
+        server.closeAll()
+        try await until("the drop") { !standby.isHeld }
+        XCTAssertTrue(lines.all.contains { $0.hasPrefix("the standby socket went") }, "\(lines.all)")
+
+        let dictation = await dictate(server, standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
+        XCTAssertEqual(dictation.text, ["new"])
+        XCTAssertFalse(dictation.notes.contains { $0.contains("failed") }, "\(dictation.notes)")
+    }
+
+    func testAStandbyIsClosedAfterTenMinutesUnusedAndTheNextOpensOnlyAfterTheNextDictation() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+        let lines = Lines()
+        let time = TestClock()
+        let standby = OpenAIStandby(clock: time.clock, log: { lines.add($0) })
+
+        // the timer closes it after 10 minutes, and nothing opens after it
+        standby.prepare(setup(server), key: { "sk-test" })
+        try await until("the standby") { standby.isHeld }
+        XCTAssertEqual(time.delays, [600])
+        time.advance(600)
+        time.fireTimers()
+        XCTAssertFalse(standby.isHeld)
+        XCTAssertTrue(lines.all.contains { $0.hasPrefix("the standby socket waited 10 min unused: closed") }, "\(lines.all)")
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertEqual(server.connectionCount, 1)
+
+        // a timer that came late (a Mac asleep): fn down sees its age and opens a new one
+        standby.prepare(setup(server), key: { "sk-test" })
+        try await until("the standby") { standby.isHeld }
+        time.advance(601)
+        let dictation = await dictate(server, standby)
+        XCTAssertTrue(dictation.notes.contains { $0.contains("(new)") }, "\(dictation.notes)")
+        XCTAssertTrue(lines.all.contains("the standby socket waited 10 min unused: closed, and a new one"), "\(lines.all)")
+        // then the end of that dictation opens the next
+        try await until("the next standby") { standby.isHeld }
+    }
+
+    func testADropClosesTheStandbyAndKeepsNoneThatOpens() async throws {
+        let server = try FakeOpenAI(answer: openAI(deltas: [], final: "new"))
+        let standby = OpenAIStandby()
+        standby.prepare(setup(server), key: { "sk-test" })
+        standby.drop("the speech model is parakeet-v3")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertFalse(standby.isHeld)
+        // no key: none opens
+        standby.prepare(setup(server), key: { nil })
+        try await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(standby.isHeld)
+        XCTAssertEqual(server.connectionCount, 1)
     }
 }
 

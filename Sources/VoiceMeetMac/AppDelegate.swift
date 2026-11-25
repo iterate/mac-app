@@ -62,6 +62,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     /// The word-list expressions of the config last seen: a change fetches the lists again.
     private var seenExpressions: [String: String] = [:]
+    /// Drops the OpenAI standby socket when the Mac sleeps (`startDictation`).
+    private var standbySleep: NSObjectProtocol?
     /// config.json's `login` as the login item was last set to it.
     private var appliedLogin: Bool?
 
@@ -294,15 +296,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self?.speechChoice.refreshKey()
             return self?.speechChoice.chosen ?? .default
         }
-        // GPT Live Transcribe at OpenAI, with Parakeet v3 behind it (README, "Dictation")
+        // GPT Live Transcribe at OpenAI, with Parakeet v3 behind it, and a socket that waits for
+        // the next dictation (README, "Dictation")
         let openAIKey = speechChoice.openAIKey
+        let speechLog = AppLog("speech")
+        let standby = OpenAIStandby(log: { speechLog.info($0) })
         speech.online = { model, words, heard in
-            OnlineSpeech.recognizer(model, words: words, key: { openAIKey?.read() }, heard: heard)
+            OnlineSpeech.recognizer(model, words: words, key: { openAIKey?.read() }, standby: standby, heard: heard)
         }
         speech.mayOpenMicrophone = !environment.hasOwnHome || environmentFixture != nil
-        let speechLog = AppLog("speech")
         speech.log = { speechLog.info($0) }
-        speechChoice.onChange = { [weak self] in self?.stateDidChange() }
+        speechChoice.onChange = { [weak self] in
+            guard let self else { return }
+            if speechChoice.chosen.isLocal { standby.drop("the speech model is \(speechChoice.chosen.id)") }
+            else if !speechChoice.hasKey { standby.drop("the OpenAI key is gone") }
+            stateDidChange()
+        }
+        // a socket that slept is likely dead: the next dictation opens a new one
+        standbySleep = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: nil) { _ in
+            standby.drop("the Mac sleeps")
+        }
         speechChoice.allowAccessibility = { [weak self] in self?.guide(.accessibility) }
         speechChoice.openSettings = { [weak self] in self?.openSettings(.dictation) }
         words.bridge = { [weak self] mind in
