@@ -32,6 +32,9 @@ public enum RecordDot: String, Equatable, Sendable, CaseIterable {
 /// says that the record runs, so a camera turned on during an all-day record still shows.
 public struct MenuBarMark: Equatable, Sendable {
     public enum Ink: String, Equatable, Sendable, CaseIterable {
+        /// Somebody drives the Mac (a control session runs): first of all, and in no other
+        /// colour, so that the owner sees it at once.
+        case purple
         /// A banner shows, a call's among them.
         case green
         /// A mind used the Mac in the last 3 seconds.
@@ -51,10 +54,13 @@ public struct MenuBarMark: Equatable, Sendable {
     }
 
     public static func of(
-        bannerShows: Bool, inUse: Bool, microphoneOrCameraOn: Bool, glance: LendGlance, isRecording: Bool, isPaused: Bool
+        drivenBy: String? = nil, bannerShows: Bool, inUse: Bool, microphoneOrCameraOn: Bool, glance: LendGlance, isRecording: Bool,
+        isPaused: Bool
     ) -> MenuBarMark {
         let ink: Ink
-        if bannerShows {
+        if drivenBy != nil {
+            ink = .purple
+        } else if bannerShows {
             ink = .green
         } else if inUse {
             ink = .red
@@ -77,8 +83,8 @@ public struct MenuBarMark: Equatable, Sendable {
     /// `banner` is the banner's title and whether it is a call's; `isCapturing` the person's own
     /// capture (⌥⇧S), which `microphoneOrCameraOn` includes.
     public static func label(
-        banner: (title: String, isCall: Bool)?, inUse: Bool, isCapturing: Bool, microphoneOrCameraOn: Bool, glance: LendGlance,
-        dot: RecordDot, tracks: Int, pausedBecause: String?
+        drivenBy: String? = nil, banner: (title: String, isCall: Bool)?, inUse: Bool, isCapturing: Bool, microphoneOrCameraOn: Bool,
+        glance: LendGlance, dot: RecordDot, tracks: Int, pausedBecause: String?
     ) -> String {
         let lendWords: String
         switch glance {
@@ -87,7 +93,8 @@ public struct MenuBarMark: Equatable, Sendable {
         case .down: lendWords = "iterate: not lent"
         }
         let words =
-            banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
+            drivenBy.map { "iterate: \($0) drives this Mac (⌃⌥⌘Esc ends it)" }
+            ?? banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
             ?? (inUse ? "iterate: a mind uses this Mac now"
                 : isCapturing ? "iterate: your capture runs" : microphoneOrCameraOn ? "iterate: microphone or camera on" : lendWords)
         return [words, dot.words(tracks: tracks, pausedBecause: pausedBecause)].compactMap { $0 }.joined(separator: ", ")

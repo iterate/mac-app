@@ -926,11 +926,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let isOn = model.microphone.isRunning || model.isAnyCameraRunning || self.isCapturing
         let banner = model.banners.state.showing
         let glance = lend.state.phase.glance
+        // who drives this Mac now (a control session runs): the mark is purple, first of all
+        let drivers = model.control.drivers
+        let drivenBy = drivers.isEmpty ? nil : drivers.joined(separator: " and ")
         let mark = MenuBarMark.of(
-            bannerShows: banner != nil, inUse: use.isInUse, microphoneOrCameraOn: isOn, glance: glance,
+            drivenBy: drivenBy, bannerShows: banner != nil, inUse: use.isInUse, microphoneOrCameraOn: isOn, glance: glance,
             isRecording: record.isRecording, isPaused: record.isPaused)
         let label = MenuBarMark.label(
-            banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
+            drivenBy: drivenBy, banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
             glance: glance, dot: mark.dot, tracks: record.tracks.count, pausedBecause: record.pausedBecause)
             + (listening.isAlwaysListening ? ". Always listen: the microphone is open" : "")
         let listens = listening.isAlwaysListening

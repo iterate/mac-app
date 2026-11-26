@@ -31,6 +31,7 @@ enum IterateIcon {
             for gap in [false, true] {
                 let image: NSImage
                 switch ink {
+                case .purple: image = mark(height: menuBarHeight, color: .systemPurple, dotGap: gap)
                 case .green: image = mark(height: menuBarHeight, color: .systemGreen, dotGap: gap)
                 case .red: image = mark(height: menuBarHeight, color: .systemRed, dotGap: gap)
                 case .orange: image = mark(height: menuBarHeight, color: .systemOrange, dotGap: gap)
@@ -166,7 +167,7 @@ enum IterateIcon {
         let zoom: CGFloat = 8
         let cell = NSSize(width: 40 * zoom, height: 24 * zoom)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let inks: [MenuBarMark.Ink] = [.live, .connecting, .down, .red, .orange, .green]
+        let inks: [MenuBarMark.Ink] = [.live, .connecting, .down, .purple, .red, .orange, .green]
         for (look, background, ink) in [("light", NSColor(white: 0.93, alpha: 1), NSColor.black), ("dark", NSColor(white: 0.16, alpha: 1), NSColor.white)] {
             for glance in LendGlance.allCases {
                 let mark = MenuBarMark.of(bannerShows: false, inUse: false, microphoneOrCameraOn: false, glance: glance, isRecording: false, isPaused: false)

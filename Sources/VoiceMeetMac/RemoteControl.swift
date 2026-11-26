@@ -41,6 +41,8 @@ final class RemoteControl: ObservableObject {
 
     let poster: ControlPoster
     private var table = ControlSessions()
+    /// Who drives this Mac now, each name once: the menu bar's purple mark says it.
+    var drivers: [String] { Array(Set(table.sessions.map(\.who))).sorted() }
     private var acts: [String: String] = [:]
     private var names: [String: String] = [:]
     private var borders: [UInt32: ControlBorder] = [:]
@@ -538,7 +540,7 @@ final class ControlBorder {
         let view = NSView()
         view.wantsLayer = true
         view.layer?.borderWidth = 4
-        view.layer?.borderColor = NSColor.systemRed.cgColor
+        view.layer?.borderColor = NSColor.systemPurple.cgColor
         window.contentView = view
     }
 

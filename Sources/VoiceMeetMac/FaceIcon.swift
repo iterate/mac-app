@@ -108,6 +108,7 @@ enum FaceIcon {
     private static func colour(_ ring: MenuBarFace.Ring) -> NSColor {
         switch ring {
         case .none: return .clear
+        case .purple: return .systemPurple
         case .green: return .systemGreen
         case .red: return .systemRed
         case .orange: return .systemOrange
@@ -150,7 +151,7 @@ enum FaceIcon {
         let zoom: CGFloat = 8
         let cell = NSSize(width: 32 * zoom, height: 24 * zoom)
         let rows: [(MenuBarFace.Tone, MenuBarFace.Ring)] = [
-            (.plain, .none), (.dimmed, .none), (.slashed, .none), (.plain, .red), (.plain, .orange), (.plain, .green),
+            (.plain, .none), (.dimmed, .none), (.slashed, .none), (.plain, .purple), (.plain, .red), (.plain, .orange), (.plain, .green),
         ]
         let columns: [(RecordDot, Bool)] = [(.none, false), (.recording, false), (.paused, false), (.none, true), (.recording, true)]
         for bar in bars {
