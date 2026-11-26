@@ -633,9 +633,11 @@ await mac.control.end({ session });
   the whole session: "Misha wants to control this Mac", with Touch ID. Shared begins it. `by` is
   the name as the caller says it. Posting needs macOS's Accessibility, which the app already asks
   for the window text; without it, `control.start` says so.
-- **You see it.** A thin red border around the controlled display (clicks go through it; it is in
-  no picture of the screen, as the pill is not), a red row in the panel with **End**, and
-  "Controlled by Misha" as a running act in Activity.
+- **You see it.** Purple means somebody drives: the 𝑖 in the menu bar is purple for the whole
+  session, before every other colour (its tooltip says "Misha drives this Mac"), and a thin purple
+  border goes around the controlled display (clicks go through it; it is in no picture of the
+  screen, as the pill is not). The panel has a row with **End**, and Activity shows "Controlled
+  by Misha" as a running act.
 - **You win.** Each move, click, scroll or key of yours pauses every session for 1 s, and lets go
   of what a session held down, so that your moves are no drags. `control.input` then answers
   `paused: true` and drops the batch. **⌃⌥⌘Esc** ends every session at once; so do End, Control at

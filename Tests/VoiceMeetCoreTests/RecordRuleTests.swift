@@ -27,6 +27,18 @@ final class RecordRuleTests: XCTestCase {
         XCTAssertEqual(mark(on: true, glance: .down).ink, .orange)
     }
 
+    func testSomebodyDrivingMakesTheMarkPurpleOverEverythingAndTheWordsSayWho() {
+        let driven = MenuBarMark.of(
+            drivenBy: "Misha", bannerShows: true, inUse: true, microphoneOrCameraOn: true, glance: .connecting, isRecording: true,
+            isPaused: false)
+        XCTAssertEqual(driven, MenuBarMark(ink: .purple, dot: .recording))
+        XCTAssertEqual(MenuBarFace(mark: driven, glance: .live, listens: false).ring, .purple)
+        let words = MenuBarMark.label(
+            drivenBy: "Misha", banner: ("Jonas", true), inUse: true, isCapturing: false, microphoneOrCameraOn: false, glance: .live,
+            dot: .none, tracks: 0, pausedBecause: nil)
+        XCTAssertEqual(words, "iterate: Misha drives this Mac (⌃⌥⌘Esc ends it)")
+    }
+
     func testPausedIsADotOnlyWhileARecorderRuns() {
         XCTAssertEqual(RecordDot.of(isRecording: false, isPaused: true), .none)
         XCTAssertEqual(RecordDot.of(isRecording: true, isPaused: false), .recording)

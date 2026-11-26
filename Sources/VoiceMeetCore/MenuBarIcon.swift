@@ -47,7 +47,7 @@ public struct MenuBarFace: Equatable, Sendable {
 
     /// The colour at the face's edge: the mark's green, red and orange.
     public enum Ring: String, Equatable, Sendable, CaseIterable {
-        case none, green, red, orange
+        case none, purple, green, red, orange
     }
 
     public let tone: Tone
@@ -72,6 +72,7 @@ public struct MenuBarFace: Equatable, Sendable {
         case .down: tone = .slashed
         }
         switch mark.ink {
+        case .purple: ring = .purple
         case .green: ring = .green
         case .red: ring = .red
         case .orange: ring = .orange
