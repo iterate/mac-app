@@ -149,7 +149,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 showDictations: { [weak self] in
                     self?.activityWindow.shown.mode = .dictations
                     self?.openActivityWindow()
-                }
+                },
+                pauseSharing: { [weak self] on in self?.pauseSharing(on) }
             ),
             lendActions: LendActions(
                 reconnect: { [weak self] in self?.lend.reconnectNow() },
@@ -320,6 +321,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         input.allow = { [weak self] permission in self?.guide(permission) }
         input.onChange = { [weak self] in self?.stateDidChange() }
         control?.toggleInput = { [weak self] in self?.input.toggle() }
+        control?.pauseSharing = { [weak self] on in self?.pauseSharing(on) }
         if let combo = choices.inputKey { register(combo, "input", "opens it", pressed: { [weak self] in self?.input.toggle() }) }
     }
 
@@ -595,6 +597,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             "banner": model.banners.state.showing.map { ["title": $0.title, "isCall": $0.isCall, "buttons": $0.buttons.map(\.label)] } ?? NSNull(),
             "record": model.record.state(),
             "sharing": Dictionary(uniqueKeysWithValues: Shareable.all.map { ($0.id, $0.sharing.rawValue) }),
+            "sharingPaused": SharingPause.isOn,
         ]
         if #available(macOS 15.0, *), let capture = capture as? Capture { state["capture"] = capture.controlState() }
         return state
@@ -675,8 +678,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private static func line(_ thing: Shareable) -> String {
-        let waits = thing.sharing != .off && !thing.isPermitted ? ", waits for \(thing.power.permission?.title ?? "macOS")" : ""
-        return "\(thing.id) (\(thing.title)) \(thing.sharing.rawValue)\(waits)"
+        let waits = thing.chosen != .off && !thing.isPermitted ? ", waits for \(thing.power.permission?.title ?? "macOS")" : ""
+        return "\(thing.id) (\(thing.title)) \(thing.chosen.rawValue)\(waits)"
     }
 
     // MARK: - The mark and the panel
@@ -731,7 +734,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         ActivityWindowActions(
             choose: { [weak self] thing, choice in
                 guard let self else { return }
-                thing.sharing = choice
+                thing.chosen = choice
                 self.panelState.sharing[thing.id] = choice
                 self.choiceChanged()
             },
@@ -850,8 +853,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func refreshPanel() {
         let things = Shareable.all
         if things != panelState.things { panelState.things = things }
-        let sharing = Dictionary(uniqueKeysWithValues: things.map { ($0.id, $0.sharing) })
+        let sharing = Dictionary(uniqueKeysWithValues: things.map { ($0.id, $0.chosen) })
         if sharing != panelState.sharing { panelState.sharing = sharing }
+        if SharingPause.isOn != panelState.sharingPaused { panelState.sharingPaused = SharingPause.isOn }
         let missing = Set(Permission.allCases.filter { !$0.isGranted })
         if missing != panelState.missing { panelState.missing = missing }
         let approvals = Dictionary(uniqueKeysWithValues: things.compactMap { thing in model.approval.isApproved(thing).map { (thing.id, $0) } })
@@ -929,11 +933,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // who drives this Mac now (a control session runs): the mark is purple, first of all
         let drivers = model.control.drivers
         let drivenBy = drivers.isEmpty ? nil : drivers.joined(separator: " and ")
+        let sharingPaused = SharingPause.isOn
         let mark = MenuBarMark.of(
             drivenBy: drivenBy, bannerShows: banner != nil, inUse: use.isInUse, microphoneOrCameraOn: isOn, glance: glance,
-            isRecording: record.isRecording, isPaused: record.isPaused)
+            isRecording: record.isRecording, isPaused: record.isPaused, sharingPaused: sharingPaused)
         let label = MenuBarMark.label(
-            drivenBy: drivenBy, banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
+            drivenBy: drivenBy, sharingPaused: sharingPaused, banner: banner.map { ($0.title, $0.isCall) }, inUse: use.isInUse, isCapturing: self.isCapturing, microphoneOrCameraOn: isOn,
             glance: glance, dot: mark.dot, tracks: record.tracks.count, pausedBecause: record.pausedBecause)
             + (listening.isAlwaysListening ? ". Always listen: the microphone is open" : "")
         let listens = listening.isAlwaysListening
@@ -1037,8 +1042,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// Pause Sharing, or Resume: every thing reads as Off and every running use ends, or each
+    /// thing's own choice holds again (`SharingPause`).
+    private func pauseSharing(_ on: Bool) {
+        guard on != SharingPause.isOn else { return }
+        SharingPause.isOn = on
+        panelState.sharingPaused = on
+        log.info(on ? "the owner paused all sharing" : "the owner resumed sharing")
+        if on { model.approval.endAll(why: "the owner paused all sharing") }
+        model.deviceEvents.sharingPauseChanged()
+        model.deviceWindow.sharingPauseChanged()
+        model.record.tick()
+        choiceChanged()
+    }
+
     private func choiceChanged() {
-        log.info("sharing: " + Shareable.all.map(Self.line).joined(separator: "; "))
+        log.info("sharing: " + (SharingPause.isOn ? "paused; " : "") + Shareable.all.map(Self.line).joined(separator: "; "))
         stateDidChange()
         model.liveChoicesChanged()
         model.controlChoicesChanged()

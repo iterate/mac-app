@@ -871,7 +871,7 @@ extension ActivityWindowView {
         log.fixForDrawing(sampleEvents())
         let state = PanelState()
         state.things = Rendering.things(["commands": .ask, "screen.1": .ask, "accessibility": .shared])
-        state.sharing = Dictionary(uniqueKeysWithValues: state.things.map { ($0.id, $0.sharing) })
+        state.sharing = Dictionary(uniqueKeysWithValues: state.things.map { ($0.id, $0.chosen) })
         state.approvals = ["commands": Rendering.now.addingTimeInterval(30 * 60)]
         let selected = acts.rows.first.map { LogWords.line($0) }
         let history = History(fixed: DictationsView.sample(now: Rendering.now))

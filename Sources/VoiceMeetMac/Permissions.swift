@@ -159,6 +159,17 @@ enum Sharing: String, CaseIterable, Identifiable {
     }
 }
 
+/// "Pause Sharing" in the panel: while it is on, a mind can use nothing of this Mac, and the
+/// record, the live watches, a call's picture, Drive, the keyboard and mouse events and the window
+/// text stop. Each thing keeps its choice (`Shareable.chosen`), so Resume gives back what was
+/// shared. It is kept across runs: a pause ends only when the person ends it. A mind cannot end it.
+enum SharingPause {
+    static var isOn: Bool {
+        get { AppEnvironment.current.defaults.bool(forKey: "sharing.paused") }
+        set { AppEnvironment.current.defaults.set(newValue, forKey: "sharing.paused") }
+    }
+}
+
 /// One thing the person shares or not: a display, a camera, the microphone, the speakers, the
 /// text of the window in front, commands, or banners. Each display and each camera is a thing of its own.
 struct Shareable: Identifiable, Hashable {
@@ -171,10 +182,14 @@ struct Shareable: Identifiable, Hashable {
     /// An SF Symbol.
     let symbol: String
 
-    var sharing: Sharing {
+    /// The person's choice in the panel, kept while sharing is paused.
+    var chosen: Sharing {
         get { Sharing(rawValue: AppEnvironment.current.defaults.string(forKey: "sharing.\(id)") ?? "") ?? .off }
         nonmutating set { AppEnvironment.current.defaults.set(newValue.rawValue, forKey: "sharing.\(id)") }
     }
+
+    /// What a mind may use now: the choice, or Off for everything while sharing is paused (`SharingPause`).
+    var sharing: Sharing { SharingPause.isOn ? .off : chosen }
 
     var isPermitted: Bool { power.permission?.isGranted ?? true }
 

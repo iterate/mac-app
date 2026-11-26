@@ -25,10 +25,18 @@ final class DeviceWindow: ObservableObject {
     @Published var readsWindowText = AppEnvironment.current.defaults.bool(forKey: "device.windowText") {
         didSet {
             AppEnvironment.current.defaults.set(readsWindowText, forKey: "device.windowText")
-            if !readsWindowText { endReads() }
-            watchInput()
-            if readsWindowText { trigger("window") }
+            sharingPauseChanged()
         }
+    }
+
+    /// The window is read: "Window text" is on, and sharing is not paused (`SharingPause`).
+    private var reads: Bool { readsWindowText && !SharingPause.isOn }
+
+    /// "Window text" changed, or sharing was paused or resumed: the reads stop, or start with the window of now.
+    func sharingPauseChanged() {
+        if !reads { endReads() }
+        watchInput()
+        if reads { trigger("window") }
     }
 
     /// One event on the device's context (`DeviceEvents.publish`).
@@ -186,7 +194,7 @@ final class DeviceWindow: ObservableObject {
             checksAgain = false
             defer { check() }
         }
-        guard isLent(), session != nil, session == work.stamp.generation, now != front else { return }
+        guard isLent(), !SharingPause.isOn, session != nil, session == work.stamp.generation, now != front else { return }
         let trigger = now.bundle == front?.bundle ? "window" : "app"
         front = now
         var payload: [String: Any] = ["app": now.app, "bundle": now.bundle]
@@ -207,7 +215,7 @@ final class DeviceWindow: ObservableObject {
     private func watchInput() {
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
-        guard readsWindowText else { return }
+        guard reads else { return }
         let kinds: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .keyDown, .scrollWheel]
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: kinds, handler: { [weak self] event in
             MainActor.assumeIsolated {
@@ -263,7 +271,7 @@ final class DeviceWindow: ObservableObject {
     /// At most one read every 2 s: a trigger inside that time waits for its end, and the newest
     /// trigger's name goes with the read.
     private func trigger(_ name: String) {
-        guard readsWindowText, isLent(), Permission.accessibility.isGranted else { return }
+        guard reads, isLent(), Permission.accessibility.isGranted else { return }
         if waitingTrigger != nil { return waitingTrigger = name }
         let wait = lastRead.addingTimeInterval(2).timeIntervalSinceNow
         guard wait > 0 else { return read(name) }
@@ -297,7 +305,7 @@ final class DeviceWindow: ObservableObject {
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     // of the session and the setting it began in, or of none
-                    guard let self, self.work.lands(stamp), self.readsWindowText, text != self.lastText else { return }
+                    guard let self, self.work.lands(stamp), self.reads, text != self.lastText else { return }
                     self.lastText = text
                     self.publish("device/window-read", ["app": name, "title": title, "text": text, "trigger": trigger])
                 }

@@ -46,6 +46,8 @@ final class ControlSocket {
     var dictationFn: (Bool) -> Void = { _ in }
     var dictationEscape: () -> Void = {}
     var writeSaid: () -> Void = {}
+    /// The panel's Pause Sharing and Resume: the owner's alone, never a mind's.
+    var pauseSharing: (Bool) -> Void = { _ in }
     /// An event of another app, as the global monitor gives it (`perf.input`).
     var feedInput: (NSEvent) -> Void = { _ in }
 
@@ -108,6 +110,9 @@ final class ControlSocket {
             dictationEscape()
         case "listen.write":
             writeSaid()
+        case "sharing.pause":
+            guard let on = parameters["on"] as? Bool else { throw EndpointRefusal("sharing.pause needs on: true or false.") }
+            pauseSharing(on)
         case "approval.answer":
             guard let allow = parameters["allow"] as? Bool else { throw EndpointRefusal("approval.answer needs allow: true or false.") }
             guard approval.answer(allow: allow, keep: parameters["keep"] as? Bool ?? false) else { throw EndpointRefusal("No question waits for an answer.") }

@@ -331,6 +331,21 @@ Touch ID's own window comes from macOS. One question at a time: a second use wai
 answer, which may cover it. An approval for N minutes holds for the mind it was given to, until
 the mind changes or refuses this Mac's key.
 
+## Pause: all sharing off in one click
+
+**Pause** beside Capture, Input and Dictate turns everything a mind can use to Off, and keeps
+each choice. While paused:
+
+- A mind's use is refused: "The Mac's owner paused all sharing".
+- The record, the live watches, a call's picture and Drive stop.
+- The keyboard and mouse events, the app in front and the window text stop.
+- Every approval ends.
+- The menu bar mark has the paused ring.
+
+Presence and the acts (the refusals among them) still go to the mind. The pause holds across a
+restart. Only you end it, with **Resume** in the panel. A mind sees `paused: true` in `state`
+and cannot change it.
+
 ## What a mind does with the Mac, as you see it
 
 Each act of a mind with this Mac shows twice:
