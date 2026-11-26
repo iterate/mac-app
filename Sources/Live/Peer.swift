@@ -77,7 +77,7 @@ public final class LivePeer: NSObject, CaptureSink, @unchecked Sendable {
     /// Once per process, before the first factory: every video packet asks the watcher to show it
     /// at once (the RTP playout-delay extension, min 0, max 0). Measured: 15 to 40 ms from drawn
     /// to shown, against about 180 ms with the browser's own playout.
-    private static let initializeOnce: Void = {
+    static let initializeOnce: Void = {
         // deprecated, and the one the measurements were made with
         LKRTCInitFieldTrialDictionary(["WebRTC-ForceSendPlayoutDelay": "min_ms:0,max_ms:0"])
         LKRTCInitializeSSL()

@@ -42,6 +42,9 @@ final class AppModel {
     /// Control: somebody of the mind drives this Mac (`RemoteControl`).
     let control = RemoteControl()
     private var presenceWatch: AnyCancellable?
+    /// When the offer to be driven is said (`tellControlOffer`).
+    private var offerTeller = ControlOfferTeller()
+    private var screensWatch: NSObjectProtocol?
     private var activity: NSObjectProtocol?
     private var microphoneHolders = 0
     private var isListening = false
@@ -108,6 +111,11 @@ final class AppModel {
             self?.acts.began(.control, doing: "Controlled by \(who)", did: "Controlled by \(who)", detail: "the display “\(display)”") ?? ""
         }
         control.finished = { [weak self] act, failure in self?.acts.ended(act, failure: failure) }
+        deviceEvents.jobStarted = { [weak self] in self?.tellControlOffer(again: true) }
+        // a display that comes or goes changes what a driver may choose
+        screensWatch = NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.tellControlOffer() }
+        }
         record.start()
     }
 
@@ -125,6 +133,9 @@ final class AppModel {
         guard session != self.session else { return }
         // its acts end in the old mind's context, before the device's events turn to the new one
         control.endAll(why: "the Mac is lent to another mind, or none")
+        // the old mind hears that this Mac is no longer offered to be driven; the new one hears
+        // the offer when its events job starts
+        withdrawControlOffer(why: "the Mac is lent to another mind, or none")
         self.session = session
         let old = bridge
         bridge = session.map(MindBridge.of)
@@ -149,6 +160,8 @@ final class AppModel {
         endpoint.stop()
         endPageStreams(why: "the app quits")
         control.endAll(why: "the app quits")
+        control.channels.closeAll()
+        withdrawControlOffer(why: "the app quits")
         live.stop()
         call.stop()
         acts.stop()
@@ -312,6 +325,9 @@ final class AppModel {
         case "control.input":
             guard let events = parameters["events"] as? [Any] else { throw EndpointRefusal("control.input needs events, a list.") }
             return try control.input(try Self.session(parameters), events: events, arrived: arrived)
+        case "control.connect":
+            guard let offer = parameters["offer"] as? String, !offer.isEmpty else { throw EndpointRefusal("control.connect needs offer, the page's SDP.") }
+            return try await control.connect(try Self.session(parameters), offer: offer, iceServers: parameters["iceServers"] as? [[String: Any]] ?? [])
         case "control.paste":
             guard let text = parameters["text"] as? String else { throw EndpointRefusal("control.paste needs text, a string.") }
             return try control.paste(try Self.session(parameters), text: text, press: parameters["press"] as? Bool ?? false)
@@ -329,7 +345,7 @@ final class AppModel {
             return control.state()
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, call.prepare, control.start, control.input, control.paste, control.clipboard, control.state, control.end."
+                "No method \"\(method)\". The methods are: state, screen.snapshot, camera.snapshot, microphone.listen, speaker.play, speaker.say, accessibility.frontWindow, run, banner.show, call.ring, record.state, record.set, live.state, live.end, pages.state, pages.live.start, pages.live.frame, pages.live.stop, call.publish, call.unpublish, call.state, call.prepare, control.start, control.input, control.connect, control.paste, control.clipboard, control.state, control.end."
             )
         }
     }
@@ -490,7 +506,7 @@ final class AppModel {
             let main = CGMainDisplayID()
             display = Screen.displays.first { $0.id == main } ?? (main, "the main display")
         }
-        let permitted = thing.isPermitted && CGPreflightPostEventAccess()
+        let permitted = control.postsNothing || (thing.isPermitted && CGPreflightPostEventAccess())
         let round = approval.round
         switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted, approved: approval.isApproved(thing) != nil) {
         case .off:
@@ -502,7 +518,7 @@ final class AppModel {
             try await approval.ask(
                 for: [thing], does: "let \(who) control this Mac",
                 what: "\(who) wants to control this Mac: the mouse, the keyboard and the clipboard, on the display “\(display.name)”. It lasts until they stop, 30 s pass with no input from them, or you end it: the panel's End, or ⌃⌥⌘Esc. Your own mouse and keys always win.")
-            try stillAllowed(thing, in: round, permitted: thing.isPermitted && CGPreflightPostEventAccess())
+            try stillAllowed(thing, in: round, permitted: control.postsNothing || (thing.isPermitted && CGPreflightPostEventAccess()))
         case .go:
             break
         }
@@ -510,10 +526,38 @@ final class AppModel {
         return try control.start(who: who, display: display.id, name: display.name)
     }
 
-    /// The owner changed a choice: Control this Mac at Off (or without Accessibility) ends every session.
+    /// The owner changed a choice: Control this Mac at Off (or without Accessibility) ends every
+    /// session, and the mind hears the offer of now.
     func controlChoicesChanged() {
+        tellControlOffer()
         guard control.isRunning, Shareable.control.sharing == .off || !Shareable.control.isPermitted else { return }
         control.endAll(why: "the owner turned \(Shareable.control.title) off")
+    }
+
+    // MARK: - The offer to be driven
+
+    /// `device/control-configured` on this Mac's context: whether a person of the mind may drive
+    /// it now (`ControlOffer`). Said at each start of the events job (`again`), and on a change.
+    func tellControlOffer(again: Bool = false) {
+        guard let lend = deviceEvents.session?.name else { return }
+        let displays = Screen.displays.enumerated().map { index, display in
+            ControlOffer.Display(display: index, name: display.name, screen: Shareable.display(display).sharing.rawValue)
+        }
+        let now = ControlOffer.of(
+            control: Shareable.control.sharing.rawValue,
+            permitted: control.postsNothing || (Shareable.control.isPermitted && CGPreflightPostEventAccess()),
+            displays: displays)
+        guard let said = offerTeller.tell(now, again: again) else { return }
+        deviceEvents.publish(ControlOffer.type, said.payload(lend: lend), ephemeral: false)
+    }
+
+    /// The Mac is no longer offered in this session's mind: the app quits, or it is lent to
+    /// another mind. Said only when the last word was an offer.
+    private func withdrawControlOffer(why: String) {
+        if let lend = deviceEvents.session?.name, offerTeller.said?.isOffered == true {
+            deviceEvents.publish(ControlOffer.type, ControlOffer.withdrawn(why: why).payload(lend: lend), ephemeral: false)
+        }
+        offerTeller.forget()
     }
 
     // MARK: - The record's switches

@@ -64,6 +64,9 @@ final class DeviceEvents: ObservableObject {
     var heardLog: ([String: Any]) -> Void = { _ in }
     /// The Activity window is open: the bridge reads every event for it, and only then.
     private(set) var readsLog = false
+    /// The events job started, or its connection came again: the facts of now are said again
+    /// (the offer to be driven, `ControlOffer`). The presence is said by `tick`.
+    var jobStarted: () -> Void = {}
 
     private let log = AppLog("device")
     /// The session's bridge, whose job `events` publishes.
@@ -127,6 +130,7 @@ final class DeviceEvents: ObservableObject {
         }
         bridge.send("events", ["start": true])
         if readsLog { bridge.send("events", ["log": "start"]) }
+        jobStarted()
         log.info("session \(session?.generation ?? 0): publishes to \(bridge.mind) at \(session?.path ?? "")")
     }
 
@@ -289,6 +293,7 @@ final class DeviceEvents: ObservableObject {
                 if failure != nil { failure = nil }
                 presence = nil
                 tick()
+                jobStarted()
             }
             wasDown = !up
         }
@@ -299,6 +304,7 @@ final class DeviceEvents: ObservableObject {
             if readsLog { bridge?.send("events", ["log": "start"]) }
             presence = nil
             tick()
+            jobStarted()
         }
     }
 
