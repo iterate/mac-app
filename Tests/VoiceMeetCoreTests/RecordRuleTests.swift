@@ -39,6 +39,16 @@ final class RecordRuleTests: XCTestCase {
         XCTAssertEqual(words, "iterate: Misha drives this Mac (⌃⌥⌘Esc ends it)")
     }
 
+    func testPausedSharingShowsThePausedRingAndSaysSo() {
+        let paused = MenuBarMark.of(
+            bannerShows: false, inUse: false, microphoneOrCameraOn: false, glance: .live, isRecording: false, isPaused: false, sharingPaused: true)
+        XCTAssertEqual(paused, MenuBarMark(ink: .live, dot: .paused))
+        let words = MenuBarMark.label(
+            sharingPaused: true, banner: nil, inUse: false, isCapturing: false, microphoneOrCameraOn: false, glance: .live, dot: .paused,
+            tracks: 0, pausedBecause: nil)
+        XCTAssertEqual(words, "iterate: sharing paused, a mind can use nothing of this Mac")
+    }
+
     func testPausedIsADotOnlyWhileARecorderRuns() {
         XCTAssertEqual(RecordDot.of(isRecording: false, isPaused: true), .none)
         XCTAssertEqual(RecordDot.of(isRecording: true, isPaused: false), .recording)

@@ -40,7 +40,7 @@ enum Rendering {
             Shareable(id: "camera.fixture", power: .camera, title: "FaceTime HD Camera", does: "see the camera \"FaceTime HD Camera\"", symbol: "video"),
             .microphone, .speaker, .banners, .accessibility, .commands, .pages,
         ]
-        for thing in things { thing.sharing = sharing[thing.id] ?? .off }
+        for thing in things { thing.chosen = sharing[thing.id] ?? .off }
         return things
     }
 
@@ -93,6 +93,9 @@ enum Rendering {
             case "blocked":
                 model.deviceEvents.fixForDrawing(sharesInput: true, keepsInput: false)
                 model.record.fixForDrawing(on: [.screens], line: "Off", isRecording: false)
+            case "paused":
+                model.deviceEvents.fixForDrawing(sharesInput: true, keepsInput: false)
+                model.record.fixForDrawing(on: [.screens, .mics], line: "Paused: all sharing is paused", isRecording: false)
             default:
                 break
             }

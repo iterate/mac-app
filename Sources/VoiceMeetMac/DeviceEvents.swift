@@ -183,12 +183,15 @@ final class DeviceEvents: ObservableObject {
 
     // MARK: - Keyboard and mouse
 
+    /// Sharing was paused or resumed: the keys and the mouse go to the mind again, or stop.
+    func sharingPauseChanged() { watchInput() }
+
     /// Global monitors see the keys and the mouse in every other app. Keys need the Accessibility
     /// permission of macOS; the mouse needs none.
     private func watchInput() {
         monitors.forEach(NSEvent.removeMonitor)
         monitors = []
-        guard sharesInput else { return focus.stop() }
+        guard sharesInput, !SharingPause.isOn else { return focus.stop() }
         focus.start()
         let kinds: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .mouseMoved, .leftMouseDragged]
         if let monitor = NSEvent.addGlobalMonitorForEvents(matching: kinds, handler: { [weak self] event in

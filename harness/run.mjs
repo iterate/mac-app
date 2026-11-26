@@ -701,6 +701,44 @@ const scenarios = {
   },
 
   /**
+   * Pause Sharing in the panel: a mind's use is refused with the reason, every choice is kept,
+   * the pause holds across a restart, and Resume gives the choices back.
+   */
+  async pause({ app, home }) {
+    withMind(home);
+    execFileSync("defaults", ["write", join(home, "defaults"), "sharing.commands", "shared"]);
+    const echo = () => run.endpoint("run", { argv: ["/bin/echo", "paused?"] });
+    let run = await start(app, home);
+    try {
+      await until("the session", 10, async () => (await run.state()).session);
+      await echo();
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "panel.pauseSharing" });
+      await until("sharing paused", 5, async () => (await run.state()).sharingPaused === true);
+      const refusal = await echo().then(() => "", (error) => error.message);
+      if (!refusal.includes("paused all sharing")) throw new Error(`a command ran, or was refused for another reason, while paused: ${refusal || "it ran"}`);
+      if ((await run.state()).sharing.commands !== "off") throw new Error("commands read as on while paused");
+      if (execFileSync("defaults", ["read", join(home, "defaults"), "sharing.commands"], { encoding: "utf8" }).trim() !== "shared")
+        throw new Error("the pause changed the stored choice");
+      await run.quit();
+
+      // a pause ends only when the person ends it
+      run = await start(app, home);
+      await until("the session again", 10, async () => (await run.state()).session);
+      if ((await run.state()).sharingPaused !== true) throw new Error("the pause did not hold across a restart");
+      await run.control("ui.press", { id: "statusItem" });
+      await until("the panel again", 10, async () => (await run.state()).panel.visible);
+      await run.control("ui.press", { id: "panel.resumeSharing" });
+      await until("sharing resumed", 5, async () => (await run.state()).sharingPaused === false);
+      if ((await run.state()).sharing.commands !== "shared") throw new Error("Resume did not give back the choice");
+      await echo();
+    } finally {
+      await run.quit();
+    }
+  },
+
+  /**
    * A banner shown at once after the last one's button: the last one's fade does not take the new
    * one from the screen (Fable 10). Its buttons have ids (`banner.button.<n>`). No sound.
    */

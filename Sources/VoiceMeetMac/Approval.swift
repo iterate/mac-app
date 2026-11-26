@@ -80,6 +80,13 @@ final class Approval {
         log.info("the mind refused this Mac's key: every approval ends")
     }
 
+    /// The owner paused all sharing: every approval ends, and so does a question that waits.
+    func endAll(why: String) {
+        grants.refuse()
+        endRound()
+        log.info("\(why): every approval ends")
+    }
+
     /// The round now: a use that waited for a question goes on only while it holds (`holds`).
     var round: ApprovalGrants.Round { grants.round }
 

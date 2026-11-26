@@ -55,7 +55,7 @@ public struct MenuBarMark: Equatable, Sendable {
 
     public static func of(
         drivenBy: String? = nil, bannerShows: Bool, inUse: Bool, microphoneOrCameraOn: Bool, glance: LendGlance, isRecording: Bool,
-        isPaused: Bool
+        isPaused: Bool, sharingPaused: Bool = false
     ) -> MenuBarMark {
         let ink: Ink
         if drivenBy != nil {
@@ -73,7 +73,8 @@ public struct MenuBarMark: Equatable, Sendable {
             case .down: ink = .down
             }
         }
-        return MenuBarMark(ink: ink, dot: .of(isRecording: isRecording, isPaused: isPaused))
+        // all sharing paused: the record's paused sign, also with no record
+        return MenuBarMark(ink: ink, dot: sharingPaused ? .paused : .of(isRecording: isRecording, isPaused: isPaused))
     }
 
     /// One word for the log: "orange", "live+recording".
@@ -83,7 +84,7 @@ public struct MenuBarMark: Equatable, Sendable {
     /// `banner` is the banner's title and whether it is a call's; `isCapturing` the person's own
     /// capture (⌥⇧S), which `microphoneOrCameraOn` includes.
     public static func label(
-        drivenBy: String? = nil, banner: (title: String, isCall: Bool)?, inUse: Bool, isCapturing: Bool, microphoneOrCameraOn: Bool,
+        drivenBy: String? = nil, sharingPaused: Bool = false, banner: (title: String, isCall: Bool)?, inUse: Bool, isCapturing: Bool, microphoneOrCameraOn: Bool,
         glance: LendGlance, dot: RecordDot, tracks: Int, pausedBecause: String?
     ) -> String {
         let lendWords: String
@@ -94,10 +95,11 @@ public struct MenuBarMark: Equatable, Sendable {
         }
         let words =
             drivenBy.map { "iterate: \($0) drives this Mac (⌃⌥⌘Esc ends it)" }
+            ?? (sharingPaused ? "iterate: sharing paused, a mind can use nothing of this Mac" : nil)
             ?? banner.map { $0.isCall ? "iterate: \($0.title) calls" : "iterate: \($0.title)" }
             ?? (inUse ? "iterate: a mind uses this Mac now"
                 : isCapturing ? "iterate: your capture runs" : microphoneOrCameraOn ? "iterate: microphone or camera on" : lendWords)
-        return [words, dot.words(tracks: tracks, pausedBecause: pausedBecause)].compactMap { $0 }.joined(separator: ", ")
+        return [words, sharingPaused ? nil : dot.words(tracks: tracks, pausedBecause: pausedBecause)].compactMap { $0 }.joined(separator: ", ")
     }
 
     /// How long the mark stays red after a use by a mind.

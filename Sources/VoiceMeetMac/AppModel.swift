@@ -212,6 +212,7 @@ final class AppModel {
                     if thing.power == .screen { row["display"] = Screen.displays.firstIndex { Shareable.display($0) == thing } }
                     return row
                 },
+                "paused": SharingPause.isOn,
                 "microphone": microphone.statusLine,
                 "presence": Self.presence().dictionary,
                 "record": ["recording": record.isRecording, "paused": record.isPaused, "line": record.line],
@@ -357,7 +358,10 @@ final class AppModel {
         let round = approval.round
         switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted ?? thing.isPermitted, approved: approval.isApproved(thing) != nil) {
         case .off:
-            throw EndpointRefusal("The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
+            throw EndpointRefusal(
+                SharingPause.isOn
+                    ? "The Mac's owner paused all sharing in the iterate panel. A mind cannot \(thing.does) until they resume it."
+                    : "The Mac's owner has this off in the iterate panel: \(thing.title). A mind cannot \(thing.does).")
         case .notPermitted:
             throw EndpointRefusal(
                 "macOS has not given this app \(thing.power.permission?.title ?? "a permission"). The Mac's owner gives it from the iterate panel, at \(thing.title)."
@@ -378,7 +382,11 @@ final class AppModel {
             throw EndpointRefusal("The Mac is no longer lent to this mind, or the mind refused its key, while the owner was asked to \(thing.does).")
         }
         switch UseGate.decide(sharing: thing.sharing.rawValue, permitted: permitted ?? thing.isPermitted, approved: true) {
-        case .off: throw EndpointRefusal("The Mac's owner turned \(thing.title) off while they were asked. A mind cannot \(thing.does).")
+        case .off:
+            throw EndpointRefusal(
+                SharingPause.isOn
+                    ? "The Mac's owner paused all sharing while they were asked. A mind cannot \(thing.does)."
+                    : "The Mac's owner turned \(thing.title) off while they were asked. A mind cannot \(thing.does).")
         case .notPermitted: throw EndpointRefusal("macOS took back \(thing.power.permission?.title ?? "a permission") while the owner was asked.")
         case .ask, .go: break
         }

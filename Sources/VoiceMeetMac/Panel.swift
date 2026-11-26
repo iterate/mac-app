@@ -9,8 +9,10 @@ import VoiceMeetCore
 @MainActor
 final class PanelState: ObservableObject {
     @Published var things: [Shareable] = []
-    /// Each thing's choice, by its id.
+    /// Each thing's choice, by its id: the person's, also while sharing is paused.
     @Published var sharing: [String: Sharing] = [:]
+    /// Pause Sharing is on: a mind can use nothing (`SharingPause`).
+    @Published var sharingPaused = false
     /// The permissions of macOS that are not given.
     @Published var missing: Set<Permission> = []
     /// The things approved for a while (`Approval`), and until when.
@@ -99,6 +101,8 @@ struct PanelActions {
     var pasteLast: () -> Void = {}
     /// The Activity window in its Dictations mode.
     var showDictations: () -> Void = {}
+    /// Pause Sharing (true) or Resume (false): `SharingPause`.
+    var pauseSharing: (Bool) -> Void = { _ in }
 }
 
 /// The app's one piece of interface: a panel under the mark in the menu bar, 400 points wide. From
@@ -299,15 +303,20 @@ struct Panel: View {
 
     private var middle: some View {
         VStack(alignment: .leading, spacing: 0) {
+            if state.sharingPaused { pausedBlock.padding(.top, 12) }
             LiveWatching(live: model.live)
             ControlSection(control: model.control)
             actionsSection(hasMind: true).padding(.top, 12)
             Group {
-                CanUseSection(
-                    state: state, acts: model.acts, live: model.live, changed: changed, allow: allow, cameraLayer: cameraLayer,
-                    bigPicture: bigPicture)
-                DeviceEventsSection(events: model.deviceEvents, accessibilityMissing: state.missing.contains(.accessibility), allow: allow)
-                RecordSection(record: model.record, window: model.deviceWindow, missing: state.missing, allow: allow)
+                // while sharing is paused the choices and switches are kept, dimmed, and hold again at Resume
+                Group {
+                    CanUseSection(
+                        state: state, acts: model.acts, live: model.live, changed: changed, allow: allow, cameraLayer: cameraLayer,
+                        bigPicture: bigPicture)
+                    DeviceEventsSection(events: model.deviceEvents, accessibilityMissing: state.missing.contains(.accessibility), allow: allow)
+                    RecordSection(record: model.record, window: model.deviceWindow, missing: state.missing, allow: allow)
+                }
+                .opacity(state.sharingPaused ? 0.45 : 1)
                 ActivitySummary(log: model.acts, isOpen: $state.isActivityOpen)
             }
             .padding(.top, 14)
@@ -331,6 +340,7 @@ struct Panel: View {
                         Button("Paste Last Transcript", action: actions.pasteLast)
                         Button("Show Dictations", action: actions.showDictations)
                     }
+                if hasMind { pauseButton }
             }
             if let last = state.lastResult {
                 Text("\(last.what): \(last.line)")
@@ -342,6 +352,42 @@ struct Panel: View {
                     .padding(.horizontal, 2)
             }
         }
+    }
+
+    /// Pause Sharing in one click, with every choice kept; Resume while paused.
+    private var pauseButton: some View {
+        let paused = state.sharingPaused
+        return actionButton(paused ? "Resume" : "Pause", symbol: paused ? "play.fill" : "pause.fill", key: "all sharing") {
+            actions.pauseSharing(!paused)
+        }
+        .help(
+            paused
+                ? "Each thing's choice holds again."
+                : "A mind can use nothing of this Mac until you resume: the record, live watches, calls and Drive stop. Each choice is kept."
+        )
+        .accessibilityIdentifier("panel.pauseSharing")
+    }
+
+    /// While sharing is paused, at the top of the middle: what it means, and Resume.
+    private var pausedBlock: some View {
+        let shape = RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
+        return HStack(alignment: .center, spacing: 10) {
+            Image(systemName: "pause.circle.fill").font(.system(size: 18)).foregroundStyle(Theme.warnText)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Sharing is paused").font(.system(size: 12, weight: .semibold))
+                Text("A mind can use nothing of this Mac. Your choices are kept.")
+                    .font(.system(size: 11)).foregroundStyle(Theme.t2).fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+            Button("Resume") { actions.pauseSharing(false) }
+                .buttonStyle(FillButtonStyle(prominent: true))
+                .accessibilityIdentifier("panel.resumeSharing")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Theme.warnWash, in: shape)
+        .overlay(shape.strokeBorder(Theme.warnEdge))
     }
 
     private func actionButton(_ title: String, symbol: String, key: String, action: @escaping () -> Void) -> some View {
@@ -560,7 +606,7 @@ private struct CanUseSection: View {
                             isMissing: thing.power.permission.map(state.missing.contains) ?? false,
                             picture: state.displayPictures[thing.id], cameraLayer: cameraLayer, bigPicture: bigPicture,
                             choose: { choice in
-                                thing.sharing = choice
+                                thing.chosen = choice
                                 state.sharing[thing.id] = choice
                                 changed()
                             },
@@ -573,7 +619,7 @@ private struct CanUseSection: View {
 
     private func setAll(_ choice: Sharing) {
         for thing in state.things {
-            thing.sharing = choice
+            thing.chosen = choice
             state.sharing[thing.id] = choice
         }
         changed()
@@ -765,14 +811,14 @@ private struct LiveWatching: View {
 extension Panel {
     /// The phases `render` draws: the lend's, and the panel's own states.
     static let renderPhases = [
-        "connecting", "live", "reconnecting", "stopped", "not-allowed", "incompatible", "ringing", "busy", "blocked", "activity", "no-mind",
+        "connecting", "live", "reconnecting", "stopped", "not-allowed", "incompatible", "ringing", "busy", "blocked", "activity", "no-mind", "paused",
     ]
 
     /// Draws the panel to a PNG file, with the drawings' things, minds and acts (`Rendering`): it
     /// opens nothing on screen and starts no capture. `phase` is the lend's (live, reconnecting,
     /// stopped, not-allowed, incompatible or connecting, the default), or one of the panel's:
     /// `ringing` (a call's banner), `busy` (watched, recording, an act that runs), `blocked` (two
-    /// permissions not given), `activity` (the Activity page), `no-mind`.
+    /// permissions not given), `activity` (the Activity page), `no-mind`, `paused` (all sharing paused).
     @MainActor
     static func render(to file: URL, phase: String? = nil, dark: Bool = false) -> Bool {
         _ = NSApplication.shared
@@ -781,7 +827,7 @@ extension Panel {
         let model = AppModel()
         let sample = Rendering.Sample(phase: phase ?? "connecting")
         state.things = sample.things
-        state.sharing = Dictionary(uniqueKeysWithValues: sample.things.map { ($0.id, $0.sharing) })
+        state.sharing = Dictionary(uniqueKeysWithValues: sample.things.map { ($0.id, $0.chosen) })
         state.missing = sample.missing
         state.approvals = sample.approvals
         state.uses = sample.uses
@@ -790,6 +836,7 @@ extension Panel {
         state.lend = sampleLend(phase == "no-mind" ? nil : phase ?? "connecting")
         if phase == "no-mind" { state.lend.minds = [] }
         state.isActivityOpen = phase == "activity"
+        state.sharingPaused = phase == "paused"
         if phase == "ringing" { state.banner = BannerWindow.sample("ring") }
         ActivityLog.fillSample(model.acts, running: phase == "busy" || phase == "activity", older: phase == "activity" ? 12 : 0)
         sample.fix(model)
@@ -810,7 +857,7 @@ extension Panel {
         let live = #"{"state":"live","mind":"\#(mind)","name":"itx.\#(name)","again":false}"#
         let lines: [String] =
             switch phase {
-            case "live", "ringing", "busy", "blocked", "activity": [live]
+            case "live", "ringing", "busy", "blocked", "activity", "paused": [live]
             case "reconnecting": [live, #"{"state":"reconnecting","attempt":2,"of":14,"inMs":90000,"lastFailure":"fetch failed"}"#]
             case "not-allowed": [#"{"state":"notAllowed","why":"No member has allowed this key yet.","link":"https://\#(mind)/keys/enrol?provide=\#(name)","waiting":true}"#]
             case "incompatible": [#"{"state":"incompatible","why":"the statement is for another mind: this iterate CLI and the mind do not agree on the protocol"}"#]

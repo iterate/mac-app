@@ -213,9 +213,11 @@ final class DeviceRecord: ObservableObject {
         }
         // the record's switches, and live's watchers: the capture runs for both. The transcript
         // (README, "Listening") is recorded with the Microphone switch, and with Always listen.
-        var wanted = permitted(on)
-        let watched = permitted(live.union(call))
-        if session != nil, wanted.contains(.mics) || alwaysListens() { wanted.insert(.transcript) }
+        // while sharing is paused nothing is captured: the switches stay as they are
+        let isPaused = SharingPause.isOn
+        var wanted = isPaused ? [] : permitted(on)
+        let watched = isPaused ? [] : permitted(live.union(call))
+        if !isPaused, session != nil, wanted.contains(.mics) || alwaysListens() { wanted.insert(.transcript) }
         if wanted.union(watched).isEmpty { stopRecorder() }
         if let session, !wanted.union(watched).isEmpty {
             if recorder == nil {
@@ -249,13 +251,15 @@ final class DeviceRecord: ObservableObject {
                 }
             }
         }
-        lookForPermissions(session != nil && (wanted.subtracting([.transcript]) != on || watched != live.union(call)))
+        lookForPermissions(!isPaused && session != nil && (wanted.subtracting([.transcript]) != on || watched != live.union(call)))
         showState(waiting: session == nil ? 0 : waiting, isLent: session != nil)
     }
 
     private func showState(waiting: Int, isLent: Bool) {
         var parts: [String] = []
-        if !isLent {
+        if SharingPause.isOn {
+            parts.append(on.isEmpty ? "Off" : "Paused: all sharing is paused")
+        } else if !isLent {
             parts.append(on.isEmpty ? "Off" : "Waits for the Mac to be lent to a mind")
         } else if let recorder, !running.subtracting([.transcript]).isEmpty {
             let tracks = recorder.trackIDs.count
