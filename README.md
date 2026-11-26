@@ -400,6 +400,7 @@ again:
 | `device/live-watch-ended` | The watch ended                                                                                                                                                         | `watcher`, `who`, `seconds`, `why`                            |
 | `device/act-started`      | A mind's act with this Mac starts (above, "What a mind does with the Mac"). Its idempotency key is `device/act-started/<act>`                                    | `act`, `thing`, `doing`, `detail`                             |
 | `device/act-ended`        | The act is over. Its idempotency key is `device/act-ended/<act>`                                                                                                        | `act`, `did`, `failure`                                       |
+| `device/control-configured` | Always while the Mac is lent: at each connection, and when Control this Mac, Accessibility or a display's choice changes the offer. Kept (below, "Drive") | `kind`, `lend`, `control` (`"ask"`, `"shared"` or `null`), `displays`, `why` |
 | `device/input-submitted`  | You sent an input with ⌥⇧Space (below, "Input"). It goes to the mind you chose, which need not be the one this Mac is lent to                                             | `id`, `text`, `at`, `files`                                   |
 
 A key event holds the key itself, so what you type goes to the mind, but never a password
@@ -621,6 +622,7 @@ await mac.control.input({ session, events: [
   { t: "key", code: "KeyC", down: false, mods: ["meta"] },
   { t: "text", text: "Grüße" },                       // typed as it is, in any layout
 ] }); // { applied, paused, withheld?, skipped?, problem? }
+await mac.control.connect({ session, offer, iceServers }); // { answer }: a data channel for the batches (below, "Drive")
 await mac.control.paste({ session, text: "from my clipboard", press: true }); // the pasteboard, then ⌘V
 await mac.control.clipboard({ session }); // { text } of this Mac's pasteboard, at most 1 MB
 await mac.control.state(); // who drives which display, since when
@@ -655,8 +657,69 @@ the rules: the key table, the mapping of 0–1 to the display's points (any disp
 the moves folded into one, the click counts, the pause, the idle end, the sessions. The app's
 `RemoteControl.swift` posts what they say with `CGEvent` at the HID level, each event with a
 marker in its user data field; an event tap of the session tells the owner's input from the
-app's by that marker. A copy with a home of its own posts nothing (it counts) unless
+app's by that marker. A copy with a home of its own posts nothing (it counts), and so needs no Accessibility and no event tap, unless
 `ITERATE_CONTROL_POSTS=1`.
+
+## Drive: a person in a call drives this Mac
+
+In a call on meet.iterate.com (any page that uses the kit's call), a member presses **Drive** and
+chooses this Mac ("Jonas's Mac", or the lend's first word, "zaktop"). The page shows this Mac's
+screen large and sends the pointer, the wheel and the keys from over it. The gate is Control this
+Mac, as above: Ask asks you with Touch ID, and your own input always wins.
+
+**The offer is a fact in the mind, not a list in a config file.** The app says on `/devices/<name>`
+whether the Mac may be driven now:
+
+```js
+{ type: "device/control-configured", payload: { kind: "mac", lend: "jane.mac", control: "ask",
+  displays: [{ display: 0, name: "Built-in Retina Display", screen: "shared" }] } }
+{ type: "device/control-configured", payload: { kind: "mac", lend: "jane.mac", control: null,
+  why: "Control this Mac is Off" } }
+```
+
+- An offer needs Control this Mac at Ask or Shared, Accessibility, and one display at least whose
+  screen is not Off: the driver sees that screen in the call. `displays` lists those displays.
+- It is said at each connection of the mind's process, and again only when it changes (Control
+  this Mac, Accessibility, a display's choice, a display that comes or goes). `control: null`
+  says why it ends: Off, no Accessibility, every display Off, the app quits, the Mac is lent to
+  another mind. A Mac that goes away with no word leaves its last fact: the page also checks
+  that the lend is live.
+- The rules are `ControlOffer` and `ControlOfferTeller` in `VoiceMeetCore`, tested on their own;
+  `AppModel.tellControlOffer` says it.
+
+**The page** (`@iterate-com/ui`, call-engine.ts `listDrives`) reads, in the call and every 30 s:
+the live lends, the contexts under `/devices` whose types hold the fact, and the newest fact of
+each (its newest 200 offsets the first time, then the offsets since its last read). An offer
+older than that is read from the Mac's own `state()`. A choice then calls `control.start({
+display, by })`, puts the screen in the call (`call.publish`, or the publication that is there
+already: your own share is not ended by the driver), and sends each batch to `control.input`, one
+batch in flight. A driver not on a Mac presses Ctrl for ⌘. The driver's paste (⌘V or Ctrl+V)
+goes to `control.paste`. A guest gets no Drive menu in v0.
+
+**The direct path.** A batch through the mind takes about 110 ms there and back. So the page also
+offers a WebRTC data channel, `control`, straight to this Mac: `control.connect({ session, offer,
+iceServers })` answers this Mac's description, with its candidates in it. The mind carries only
+that one call. Each message on the channel is `{ id, events }`, applied as `control.input`, and
+the answer comes back on the channel as `{ id, applied, paused, … }`. Until the channel opens, and
+when it closes, the batches go through the mind. The channel uses the call's ICE servers (its
+TURN relay too). It belongs to its session: `control.end`, the session's end and the app's end
+close it. `ControlChannels` in `Sources/Live` holds it; its factory has the app's own audio device
+that sends nothing, so libwebrtc opens no microphone and no speaker. `control.state()` says
+`direct: true` for a session with an open channel.
+
+Measured on 2026-11-26, from a page on this Mac to a test copy of the app (`--home`, lent as
+`itx.drivetest.mac` to iterate.com), one batch of one move, its answer, then the next:
+
+| Path | p50 | p90 | max |
+| --- | --- | --- | --- |
+| Through the mind (`control.input`), 28 batches | 110.5 ms | 151.4 ms | 162.5 ms |
+| The data channel, 195 batches (a page of the test) | 0.6 ms | 1.2 ms | 5.6 ms |
+| The data channel, 200 batches (the kit's own engine) | 0.8 ms | 1.2 ms | 1.5 ms |
+
+The channel opened 0.8 s after the choice (Shared, no question). Both ends were on one Mac, so
+the channel's numbers are the app's and the browser's own cost; between two networks they add the
+network's round trip, which is still shorter than a trip through the mind. A copy with a home of
+its own posts nothing (it counts), so it needs no Accessibility to be driven in a test.
 
 ## This Mac's pages: a small site, served through the lend
 

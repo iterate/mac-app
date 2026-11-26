@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import Live
 import SwiftUI
 import VoiceMeetCore
 import os
@@ -51,12 +52,51 @@ final class RemoteControl: ObservableObject {
     private var latency = ControlLatency()
     private let log = AppLog("control")
 
+    /// The direct path of each session's batches: a data channel from the driver's page
+    /// (`control.connect`, README "Drive").
+    let channels = ControlChannels()
+
     init(poster: ControlPoster? = nil) {
         let posts = !AppEnvironment.current.hasOwnHome || ProcessInfo.processInfo.environment["ITERATE_CONTROL_POSTS"] == "1"
         self.poster = poster ?? (posts ? EventPoster(marker: Self.marker) : CountingPoster())
+        let log = self.log
+        channels.log = { line in log.info(line) }
+        // a batch of the channel is a batch of `control.input`, on the main actor as every call
+        channels.take = { [weak self] session, events, answer in
+            let arrived = DispatchTime.now().uptimeNanoseconds
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    guard let self else { return answer(["error": "the app is closing"]) }
+                    do { answer(try self.input(session, events: events, arrived: arrived)) } catch {
+                        answer(["error": (error as? EndpointRefusal)?.words ?? "\(error)"])
+                    }
+                }
+            }
+        }
+    }
+
+    /// `control.connect`: the driver's page offers a data channel for `session`; the answer is
+    /// this Mac's description. The session must run.
+    func connect(_ id: String, offer: String, iceServers: [[String: Any]]) async throws -> [String: Any] {
+        guard table.session(id) != nil else { throw Self.noSession(id) }
+        let sdp = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<String, Error>) in
+            channels.connect(session: id, offer: offer, iceServers: iceServers) { result in
+                continuation.resume(with: result.mapError { EndpointRefusal("control.connect: \($0.description)") })
+            }
+        }
+        // a session that ended meanwhile keeps no channel
+        guard table.session(id) != nil else {
+            channels.close(session: id)
+            throw Self.noSession(id)
+        }
+        return ["answer": sdp]
     }
 
     var isRunning: Bool { !table.isEmpty }
+
+    /// A test copy's poster only counts: nothing reaches this Mac's mouse or keys, so it needs no
+    /// Accessibility and no event tap (the owner has nothing to win against).
+    var postsNothing: Bool { poster is CountingPoster }
 
     func has(_ id: String) -> Bool { table.session(id) != nil }
 
@@ -133,6 +173,7 @@ final class RemoteControl: ObservableObject {
     /// `control.state`: who controls which display, since when; reading it is no use.
     func state() -> [String: Any] {
         let now = Date()
+        let direct = Set(channels.open)
         return [
             "sharing": Shareable.control.sharing.rawValue,
             "permitted": Shareable.control.isPermitted,
@@ -143,6 +184,7 @@ final class RemoteControl: ObservableObject {
                 return [
                     "session": session.id, "who": session.who, "display": display,
                     "since": Int(session.startedAt.timeIntervalSince1970 * 1000), "idleSeconds": Int(now.timeIntervalSince(session.lastInputAt)),
+                    "direct": direct.contains(session.id),
                 ]
             },
         ]
@@ -154,6 +196,7 @@ final class RemoteControl: ObservableObject {
         releases.forEach(poster.post)
         if let act = acts.removeValue(forKey: id) { finished(act, failure) }
         names[id] = nil
+        channels.close(session: id)
         log.info("\(session.who) no longer controls this Mac: \(why); \(latency.line)")
         if table.isEmpty { unwatch() }
         showBorders()
@@ -173,8 +216,9 @@ final class RemoteControl: ObservableObject {
     /// While a session runs: the owner's own input, the stop key, the idle limit, the displays.
     /// False when macOS gives no event tap (no Accessibility): then nobody may drive.
     private func watch() -> Bool {
-        guard tap.start() else { return false }
-        if !HotKey.register(Self.stopKey, pressed: { [weak self] in self?.endAll(why: "the owner pressed ⌃⌥⌘Esc") }) {
+        // a test copy that posts nothing has no owner to win against: no tap, no global key
+        guard tap.start() || postsNothing else { return false }
+        if !postsNothing, !HotKey.register(Self.stopKey, pressed: { [weak self] in self?.endAll(why: "the owner pressed ⌃⌥⌘Esc") }) {
             log.error("macOS refused ⌃⌥⌘Esc: the panel's End stops a session")
         }
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
