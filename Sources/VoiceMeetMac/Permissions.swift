@@ -2,6 +2,7 @@ import AVFoundation
 import AppKit
 import ApplicationServices
 import VoiceMeetCore
+import os
 
 /// The four permissions of macOS that the app holds for the mind. The app only reads them and
 /// opens the system's own prompt or settings pane: the person gives each one.
@@ -163,10 +164,26 @@ enum Sharing: String, CaseIterable, Identifiable {
 /// record, the live watches, a call's picture, Drive, the keyboard and mouse events and the window
 /// text stop. Each thing keeps its choice (`Shareable.chosen`), so Resume gives back what was
 /// shared. It is kept across runs: a pause ends only when the person ends it. A mind cannot end it.
+///
+/// The app alone writes it, so it is read from the defaults once and then held in memory: every
+/// gate reads it, and a read right after a write never depends on cfprefsd (on a CI runner a
+/// write of false was read back as true in the same call).
 enum SharingPause {
+    private static let held = OSAllocatedUnfairLock<Bool?>(initialState: nil)
+
     static var isOn: Bool {
-        get { AppEnvironment.current.defaults.bool(forKey: "sharing.paused") }
-        set { AppEnvironment.current.defaults.set(newValue, forKey: "sharing.paused") }
+        get {
+            held.withLock { value in
+                if let value { return value }
+                let stored = AppEnvironment.current.defaults.bool(forKey: "sharing.paused")
+                value = stored
+                return stored
+            }
+        }
+        set {
+            held.withLock { $0 = newValue }
+            AppEnvironment.current.defaults.set(newValue, forKey: "sharing.paused")
+        }
     }
 }
 
