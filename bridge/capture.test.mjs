@@ -31,10 +31,11 @@ function captureFolder() {
 
 /**
  * The capture with `lines`, each a step, and every line it said once `until(said)` is true. The
- * fake mind answers unless `refuse`.
+ * fake mind answers unless `refuse`, and has the `rules` on its root.
  */
-async function capture(folder, lines, { kept = false, refuse = false, heardBy, until = (said) => said.some((line) => line.copy) } = {}) {
+async function capture(folder, lines, { kept = false, refuse = false, heardBy, rules = {}, until = (said) => said.some((line) => line.copy) } = {}) {
   const mind = fakeMind();
+  Object.assign(mind.rules, rules);
   if (refuse) mind.refuseConnects = 1_000_000;
   const said = [];
   const link = mindLink({ name: "test.mac", connect: mind.connect, sleep: () => new Promise((resolve) => setTimeout(resolve, 5)), say: () => {} });
@@ -159,6 +160,48 @@ test("the last words after the movie still go in, capture.json goes up once, and
     assert.deepEqual(events, ["capture/ready", "events.iterate.com/itx/described", "capture/received"]);
   } finally {
     link.stop();
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a mind that has `itx.getScrawl`: the text names the capture's id and the one call, and holds no script", async () => {
+  const folder = keptFolder();
+  writeFileSync(join(folder, "1.jpg"), "a picture");
+  writeFileSync(join(folder, "2.jpg"), "another picture");
+  const id = basename(folder);
+  try {
+    const { said, mind } = await capture(folder, [{ finish: true }], {
+      kept: true,
+      rules: { "itx.getScrawl": { match: "itx.getScrawl", target: 'itx.builtins.cd("/").config.getScrawl(@)' } },
+      until: (said) => said.some((line) => line.done || line.failed),
+    });
+    assert.deepEqual(said.at(-1), { done: true });
+    const text = mind.files.get(`captures/${id}/summary.md`).bytes.toString();
+    assert.ok(text.includes(`the capture's id is ${id}`));
+    assert.ok(text.includes(`await itx.getScrawl("${id}")`));
+    // no script, no path of the mind and no link: the id is a name
+    assert.ok(!text.includes("const d ="));
+    assert.ok(!text.includes("/captures/"));
+    assert.ok(!text.includes("waitForEvent"));
+    assert.match(text, /#2 \(0:08\) clicked “this one”/);
+    // the text on the clipboard at the end is that text
+    assert.equal(said.filter((line) => line.copy).at(-1).copy, text);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a mind with no `itx.getScrawl` still gets the one script", async () => {
+  const folder = keptFolder();
+  writeFileSync(join(folder, "1.jpg"), "a picture");
+  writeFileSync(join(folder, "2.jpg"), "another picture");
+  const id = basename(folder);
+  try {
+    const { mind } = await capture(folder, [{ finish: true }], { kept: true, until: (said) => said.some((line) => line.done || line.failed) });
+    const text = mind.files.get(`captures/${id}/summary.md`).bytes.toString();
+    assert.ok(text.includes(`const d = "/captures/${id}/"`));
+    assert.ok(!text.includes("getScrawl"));
+  } finally {
     rmSync(folder, { recursive: true, force: true });
   }
 });

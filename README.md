@@ -785,8 +785,7 @@ to the pictures:
 The words point at red marks on the screen: look at the pictures before you answer. Each # is a numbered picture.
 Get the pictures in one of these ways, then answer from them and the lines below alone:
 - On jonas.mac: read sheet.jpg and 1.jpg, 2.jpg together, in /Users/…/iterate-mac-app/captures/<id> (open nothing else there).
-- Anywhere else, through the mind example.com: run this itx script. It answers the words, the marks and a download link for each picture ("urls") … The iterate MCP tool "run" takes it as it is. In your own codemode, or with the iterate CLI (iterate itx run --mind example.com --eval '…'), run only its body …
-async (itx) => { … one script: it waits for capture/ready, reads context.json, makes a signed link for each picture, and sends the pictures to an agent of the mind as images … }
+- Anywhere else, through the mind example.com: the capture's id is <id>, and one call answers its words, its marks and its pictures: await itx.getScrawl("<id>"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("<id>") and shows the pictures as images. An agent of the mind: your AGENTS.md says how you look at the pictures. With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.
 - #1 (0:06) drew “what is this here?”
 - #2 (0:12) clicked “Save” “and this is slow”
 ```
@@ -801,20 +800,32 @@ words: the sign that the microphone hears you. So at the end
 only your last words can be missing: the first text says so, and the same text with all the words
 takes its place on the clipboard a moment later, unless you copied something else.
 
-**Who reads the text, and what they get** (tested with real agents on 21 November 2026):
+**The boundary with the mind** (27 November 2026). This app makes the capture: its id, its files
+under `/captures/<id>/` and the two events below. The mind reads it: `itx.getScrawl(id, { waitMs?,
+urls? })` is code of the mind's own config (`apps/scrawl/` of iterate.com's config), behind
+the mind's rule `itx.getScrawl`. It answers `{ state: "ready", said, marks, pictures, "itx/images"
+}`, or `"pending"` while the capture still arrives (it waits up to 30 s for it first), or
+`"unknown"`. It reads and delivers nothing, and the mind decides who may read. So the text holds an id, which is a name and no
+key: no link, no path of the mind and no code. The app asks once, at a capture's start, whether the
+mind has the rule. In a mind that has none, the text holds one script in the call's place: it
+waits for `capture/ready`, reads `context.json`, makes a signed link for each picture, and sends
+the pictures to an agent of the mind as images.
+
+**Who reads the text, and what they get** (tested with real agents on 21 November 2026, with the
+script; the call does the same in each row):
 
 | The agent                                         | What it does                                | Does its model see the pictures?                                                                                                               |
 | ------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
 | On this Mac (Claude Code, Codex)                  | Reads the numbered pictures from the folder | Yes                                                                                                                                            |
-| In the mind (the Dash, Slack)                     | Runs the text's script                      | Yes: the script sends them to that agent as the files of a message                                                                             |
-| Elsewhere, with the mind's MCP tool and a shell   | Runs the text's script                      | Yes                                                                                                                                            |
+| In the mind (the Dash, Slack)                     | Makes the text's call (or runs its script) | Yes: the script sends them to that agent as the files of a message                                                                             |
+| Elsewhere, with the mind's MCP tool and a shell   | Makes the text's call (or runs its script) | Yes                                                                                                                                            |
 | Elsewhere, with the iterate CLI and a shell       | Runs the script's body with `iterate itx run --eval`, then downloads the links in `urls` | Yes, from the downloaded files (25 Nov 2026: an agent on Beelink found no way to the pictures before) |
-| With the mind's MCP tool alone (no shell, no web) | Runs the text's script                      | Yes: the tool answers the pictures as images. A mind that does not have that yet answers text, with `seen`: what a model read off each picture |
+| With the mind's MCP tool alone (no shell, no web) | Makes the text's call (or runs its script) | Yes: the tool answers the pictures as images. A mind that does not have that yet answers text, with `seen`: what a model read off each picture |
 
 Each of them answers in one turn: one reply to the one message with the text.
 
-The script waits for the event `capture/ready`, so a text that is pasted before the capture is
-whole still gives the whole capture. The folder stays on this Mac for 7 days.
+The call (and the script) waits for the event `capture/ready`, so a text that is pasted before the
+capture is whole still gives the whole capture. The folder stays on this Mac for 7 days.
 
 A capture is a set of **observations**, each with its time in milliseconds from the start. They
 are files of the mind under `/captures/<id>/`, and the capture is a context of its own at that
@@ -825,7 +836,7 @@ path, with two events: `capture/ready` (the words, the marks and the pictures ar
 | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `summary.md`           | The text on the clipboard, with all the words                                                                                                                                                                                                                                                                                 |
 | `1.jpg` …, `sheet.jpg` | The numbered pictures, at most 12, and all of them on one. A capture with no mark and no click has one: the display at the end                                                                                                                                                                                                |
-| `context.json`         | What the text's script answers: the words, the marks, and the pictures under `"itx/images"`                                                                                                                                                                                                                                   |
+| `context.json`         | What the text's call or script answers: the words, the marks, and the pictures under `"itx/images"`                                                                                                                                                                                                                                   |
 | `seen.json`            | What a model read under each mark, for a reader that gets no picture: a model's claim                                                                                                                                                                                                                                         |
 | `transcript.json`      | The words with their times (`segments`: `t`, `to`, `text`, `words`), as the speech model heard them (`by`: the one the rule picked at the start): a model's claim, not an observation                                                                                                                                                       |
 | `capture.json`         | The observations: `screen` and `voice` (the two files below), `window` (the app in front, its window's title, a browser's page URL, its accessibility tree: a new one at each change), `click` and `ink` (the points, and the accessibility element under them), `picture`; the numbered pictures (`panels`); and the display |

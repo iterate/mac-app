@@ -31,12 +31,24 @@
 //
 // WHO READS THE TEXT, AND HOW:
 //   - an agent on this Mac reads the numbered pictures from the folder;
-//   - any other agent runs the text's one script. It waits for `capture/ready` and answers
-//     context.json: the words, the marks, and the pictures under "itx/images", which the mind's
-//     MCP tool `run` answers as images. To an agent of the mind it also sends the pictures as the
-//     files of a message, the way such an agent is shown an image;
+//   - any other agent makes the text's one call, `itx.getScrawl("<id>")`: the mind's own lookup
+//     of a capture by its id (THE BOUNDARY, below). It answers the words, the marks, and the
+//     pictures under "itx/images", which the mind's MCP tool `run` answers as images. It
+//     delivers nothing: how an agent of the mind looks at the pictures is in that mind's
+//     AGENTS.md. While the capture still arrives it says `pending`;
+//   - in a mind that has no such lookup the text holds one script instead, which does the same
+//     with the mind's files: it waits for `capture/ready` and answers context.json;
 //   - a mind whose MCP tool answers no image gives text alone. For that reader a model reads each
 //     picture once (seen.json): a claim, not an observation.
+//
+// THE BOUNDARY with the mind (27 Nov 2026). This app makes the capture: its id, the files under
+// /captures/<id>/ (README, "Capture"), and the events `capture/ready` and `capture/received` on the
+// context /captures/<id>. The MIND reads it: `itx.getScrawl(id, { waitMs?, urls? })` is
+// code of the mind's config (apps/scrawl/ of iterate.com's config), behind the mind's rule
+// `itx.getScrawl`. It answers `{ state: "ready" | "pending" | "unknown", … }` from those files and
+// events alone, and it decides who may read. The app asks once, at a capture's start, whether the
+// mind has the rule (`itx.rewriteRules.get("itx.getScrawl")`), and writes the short text when it
+// has. The id is a name and no key: the text holds no link and no path of the mind.
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isConnectionError } from "./mind-connection.mjs";
@@ -78,6 +90,16 @@ export function captureUpload({
     onMind((itx) => itx.cd(directory).append({ type, payload, idempotencyKey: `${type}/${capture}` })).catch((error) => {
       if (error?.code !== "IDEMPOTENCY_CONFLICT") throw error;
     });
+  /** Does the mind have its own lookup of a capture, `itx.getScrawl` (THE BOUNDARY, above)? Asked
+   *  once, at the capture's start. Until the answer is here, and in a mind that has none, the text
+   *  holds the one script. */
+  let mindLooksUp = false;
+  const lookedFor = onMind((itx) => itx.rewriteRules.get("itx.getScrawl")).then(
+    (rule) => {
+      mindLooksUp = Boolean(rule);
+    },
+    () => {},
+  );
   /** What a file needs of the connection: its way through it when the signed route fails. */
   const r2 = { put: (...args) => onMind((itx) => itx.r2.put(...args)) };
 
@@ -223,9 +245,15 @@ export function captureUpload({
         ? `Get the pictures in one of these ways, then answer from them and the lines below alone:`
         : `Read the pictures, then answer from them and the lines below alone:`,
       `- On ${manifest.by.device}: read ${pictures}, in ${folder} (open nothing else there).`,
-      ...(inTheMind
+      ...(inTheMind && mindLooksUp
         ? [
-            // One script, whole in the text: an agent that is pointed at a file of code reads the code
+            // The mind has its own lookup: the text names the capture and the one call. A name and
+            // no key: who may read is the mind's to say.
+            `- Anywhere else, through the mind ${mind}: the capture's id is ${capture}, and one call answers its words, its marks and its pictures: await itx.getScrawl("${capture}"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("${capture}") and shows the pictures as images. An agent of the mind: your AGENTS.md says how you look at the pictures. With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.`,
+          ]
+        : inTheMind
+        ? [
+            // A mind with no lookup of its own. One script, whole in the text: an agent that is pointed at a file of code reads the code
             // before it runs it, which is one more call. The same text runs everywhere: the MCP tool
             // takes it as it is, a codemode block and the CLI take its body. It answers context.json
             // (whose "itx/images" the MCP tool shows as images) and a signed link for each picture,
@@ -237,7 +265,7 @@ export function captureUpload({
         : []),
       ...(wordsPending
         ? [
-            `The last words are not in this text yet: ${inTheMind ? "the script above waits for them, and " : ""}summary.md in that folder has them a moment after the capture.`,
+            `The last words are not in this text yet: ${inTheMind ? `the ${mindLooksUp ? "call" : "script"} above waits for them, and ` : ""}summary.md in that folder has them a moment after the capture.`,
           ]
         : []),
       ...lines.map(([, text]) => text),
@@ -383,6 +411,7 @@ export function captureUpload({
         }),
       );
       await put("context.json");
+      await lookedFor;
       const text = paste({ manifest, ...words });
       writeFileSync(join(folder, "summary.md"), text);
       await Promise.all([put("summary.md"), early]);
