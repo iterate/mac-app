@@ -770,7 +770,7 @@ How it is built: `bridge/pages.mjs` serves the files and the stream; it asks the
 ## Capture: show an agent what you mean
 
 Press **⌥⇧S** in any app, then talk, click, and hold **⇧** and move the mouse to draw on the
-screen in red (no button). Press ⌥⇧S again (or Send on the pill at the top of the display). A short
+screen in red (no button). Press ⌥⇧S again (or Send on the pill at the bottom of the display: the same pill a dictation shows, in the same place). A short
 text is on the clipboard at once: paste it to an agent. The capture also goes into the mind this
 Mac is lent to. The gesture and the shape of the text are
 [Scrawl](https://github.com/kitlangton/scrawl)'s, by Kit Langton. A capture is your own act, so it

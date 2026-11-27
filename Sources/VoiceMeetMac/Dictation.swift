@@ -133,7 +133,6 @@ final class Dictation: SpeechClient {
     private var trustWatch: NSObjectProtocol?
     private var guideOpened = false
     private let pill = DictationPillModel()
-    private var panel: NSPanel?
     private var hide: DispatchWorkItem?
     /// The start sound of a hold of fn, which waits `fnCueDelay`.
     private var startCue: DispatchWorkItem?
@@ -200,11 +199,10 @@ final class Dictation: SpeechClient {
         becameCapture = true
         key.ended()
         keyChanged()
+        // the pill stays until the capture draws in it: one pill, which changes in place (`Pill`)
+        Pill.shared.handOver(.dictation, orHideAfter: 5)
         becomeCapture()
-        pill.phase = .writing
-        pill.level = 0
         session.finish(self)
-        hidePill(after: 0)
         onChange()
     }
 
@@ -404,7 +402,14 @@ final class Dictation: SpeechClient {
             // the words before a capture are its first; a capture that did not start leaves them here
             if becameCapture {
                 becameCapture = false
-                if handToCapture(said) { return end("\(Spoken.wordCount(said)) words went into the capture at \(Lend.clock(Date()))", failed: nil) }
+                if handToCapture(said) {
+                    // the capture has the pill now: it is not hidden here
+                    lastLine = "\(Spoken.wordCount(said)) words went into the capture at \(Lend.clock(Date()))"
+                    lastFailed = false
+                    ends += 1
+                    log.info(lastLine ?? "")
+                    return onChange()
+                }
             }
             write(said)
         }
@@ -582,23 +587,18 @@ final class Dictation: SpeechClient {
         case .locked: keyState = "locked"
         }
         return [
-            "running": isRunning, "key": keyState, "locked": pill.locked, "pillVisible": panel?.isVisible ?? false, "phase": phase, "text": pill.text,
+            "running": isRunning, "key": keyState, "locked": pill.locked, "pillVisible": Pill.shared.isShown(.dictation), "phase": phase, "text": pill.text,
             "lastLine": lastLine ?? NSNull(), "ends": ends, "lastText": lastText ?? NSNull(),
         ]
     }
 
     // MARK: - The pill
 
+    /// The one pill at the bottom of the display under the pointer (`Pill`).
     private func showPill() {
         hide?.cancel()
-        let panel = self.panel ?? makePanel()
-        // at the bottom of the display under the pointer
-        let pointer = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(pointer, $0.frame, false) } ?? NSScreen.main
-        if let visible = screen?.visibleFrame {
-            panel.setFrameOrigin(NSPoint(x: visible.midX - panel.frame.width / 2, y: visible.minY + 90))
-        }
-        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
+        let pill = self.pill
+        Pill.shared.show(.dictation, width: DictationPill.width, takesClicks: false, view: DictationPill(model: pill))
     }
 
     private func hidePill(after seconds: Double) {
@@ -606,33 +606,13 @@ final class Dictation: SpeechClient {
         let work = DispatchWorkItem { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, !self.isRunning else { return }
-                self.panel?.orderOut(nil)
+                Pill.shared.hide(.dictation)
                 // nothing ticks while it is hidden
                 self.pill.clock = .none
             }
         }
         hide = work
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
-    }
-
-    private func makePanel() -> NSPanel {
-        let host = NSHostingView(rootView: DictationPill(model: pill))
-        // one size for every state: a new word lays out the pill, never the window
-        host.sizingOptions = []
-        host.frame = NSRect(origin: .zero, size: NSSize(width: DictationPill.width, height: DictationPill.height))
-        let panel = NSPanel(contentRect: host.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-        panel.level = .statusBar
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.hidesOnDeactivate = false
-        panel.isReleasedWhenClosed = false
-        // it takes no click and no key: the app in front keeps both
-        panel.ignoresMouseEvents = true
-        panel.contentView = host
-        self.panel = panel
-        return panel
     }
 }
 
@@ -661,9 +641,8 @@ struct DictationPill: View {
     @ObservedObject var model: DictationPillModel
 
     static let width: CGFloat = 460
-    static let height: CGFloat = 38
-    /// A capsule, as a rounded rectangle of half the height: a `Capsule` drew a hairline beside its ends.
-    static let shape = RoundedRectangle(cornerRadius: height / 2, style: .circular)
+    static let height = Pill.height
+    static let shape = Pill.shape
 
     var body: some View {
         HStack(spacing: 10) {
