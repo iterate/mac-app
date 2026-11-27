@@ -308,6 +308,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.capture = capture
         control?.toggleCapture = { capture.toggle() }
         control?.markCapture = { capture.mark($0) }
+        // a dictation kept on becomes a capture at a tap of ⇧, and fn ends it (README)
+        capture.paste = { [weak self] text in self?.dictation.paste(text) }
+        dictation.canBecomeCapture = { capture.canStartFromDictation }
+        dictation.becomeCapture = { capture.startFromDictation() }
+        dictation.handToCapture = { capture.saidBefore($0) }
+        dictation.captureTakesFn = { capture.takesFn }
+        dictation.endCapture = { capture.endFromFn() }
         if let combo = choices.captureKey { register(combo, "capture", "starts and ends one", pressed: { capture.toggle() }) }
     }
 
@@ -380,6 +387,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         control?.dictationReleased = { [weak self] in self?.dictation.holdEnded() }
         control?.dictationFn = { [weak self] down in self?.dictation.fnChanged(down: down) }
         control?.dictationEscape = { [weak self] in self?.dictation.escape() }
+        control?.dictationShift = { [weak self] in self?.dictation.shiftTapped() }
         dictation.watchKeys()
         register(.dictation, "dictation", "held, dictates; tapped, stays on", pressed: { [weak self] in self?.dictation.shortcutPressed() }, released: { [weak self] in self?.dictation.shortcutReleased() })
     }

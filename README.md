@@ -941,6 +941,20 @@ dictation on until the next press. The panel's **Dictate** button starts one tha
 at the bottom of the screen shows the words on one row while you talk, the newest at the right,
 with a lock while it stays on and the time since the start.
 
+### Dictation becomes a capture
+
+While a dictation stays on (fn tapped twice, or ⌥⇧D), you can switch to showing instead of
+telling. Tap **⇧** alone (down and up, with no other key in between). A capture starts at once
+on the display under the pointer ("Capture" below):
+- Hold ⇧ and move the pointer to draw, and click on things.
+- Your words from before the ⇧ go into the capture's transcript as its first words.
+- The next press of **fn** ends the capture and sends it.
+- The capture's text (its id and `itx.getScrawl`) is written where the cursor is, and it also
+  stays on the clipboard. ⌥⇧S ends it too.
+
+⇧ is heard only while a dictation stays on, and only when a capture can start now (Screen
+Recording given, no capture running). ⇧ with a letter is typing, not a tap.
+
 - **fn needs Accessibility.** The app hears fn with event taps of the session, which macOS
   gives only to an app with Accessibility (the permission that also writes the text for you). One
   tap hears the modifier keys; the tap for key presses is on only while fn is down or a dictation

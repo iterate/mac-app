@@ -210,6 +210,7 @@ final class KeyTapRuleTests: XCTestCase {
             case .fn(let down): acts.append(down ? key.down(at: zero) : key.up(at: zero.addingTimeInterval(1)))
             case .otherKey: acts.append(key.otherKey())
             case .escape: acts.append(key.escape())
+            case .shiftTapped: break
             }
         }
         XCTAssertEqual(acts, [.start, .cancel(quietly: true), .nothing])
@@ -269,5 +270,23 @@ final class KeyTapRuleTests: XCTestCase {
         }
         XCTAssertEqual(acts, [.start, .wait(until: at.addingTimeInterval(DictationKey.window)), .lock, .nothing])
         XCTAssertTrue(key.isLocked)
+    }
+
+    func testATapOfShiftAloneIsHeardOnlyWhileAskedAndAKeySpoilsIt() {
+        var rule = KeyTapRule()
+        XCTAssertNil(rule.flagsChanged(code: 56, fn: false, shift: true))
+        XCTAssertNil(rule.flagsChanged(code: 56, fn: false, shift: false), "not asked: nothing")
+        rule.hearsShift = true
+        XCTAssertTrue(rule.wantsKeyDowns)
+        XCTAssertNil(rule.flagsChanged(code: 60, fn: false, shift: true))
+        XCTAssertEqual(rule.flagsChanged(code: 60, fn: false, shift: false), .shiftTapped, "the right ⇧, down and up")
+        // ⇧A is typing, not a tap
+        _ = rule.flagsChanged(code: 56, fn: false, shift: true)
+        XCTAssertEqual(rule.keyDown(code: 0).heard, nil)
+        XCTAssertNil(rule.flagsChanged(code: 56, fn: false, shift: false))
+        // ⇧ with ⌘ is a combination
+        _ = rule.flagsChanged(code: 56, fn: false, shift: true)
+        _ = rule.flagsChanged(code: 55, fn: false, shift: true)
+        XCTAssertNil(rule.flagsChanged(code: 56, fn: false, shift: false))
     }
 }

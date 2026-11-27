@@ -9,7 +9,7 @@ import VoiceMeetCore
 ///
 /// - `capture.toggle`, `capture.mark {points}`, `input.toggle`: what ⌥⇧S, ink and ⌥⇧Space do.
 /// - `dictation.start`, `dictation.stop`: a hold of fn (its release at least `DictationKey.hold`
-///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc.
+///   after its press); `dictation.fn {down}`: fn down or up; `dictation.esc`: Esc; `dictation.shift`: a tap of ⇧ alone.
 /// - `listen.write`: what ⌥⇧W, "Paste the last transcript", does: the newest entry of the history
 ///   (a dictation, or a stretch of Always listen) is written (README, "Dictation").
 /// - `approval.answer {allow, keep?}`: answers the Ask question that waits, as its panel's buttons
@@ -45,6 +45,7 @@ final class ControlSocket {
     var dictationReleased: () -> Void = {}
     var dictationFn: (Bool) -> Void = { _ in }
     var dictationEscape: () -> Void = {}
+    var dictationShift: () -> Void = {}
     var writeSaid: () -> Void = {}
     /// The panel's Pause Sharing and Resume: the owner's alone, never a mind's.
     var pauseSharing: (Bool) -> Void = { _ in }
@@ -108,6 +109,8 @@ final class ControlSocket {
             dictationFn(down)
         case "dictation.esc":
             dictationEscape()
+        case "dictation.shift":
+            dictationShift()
         case "listen.write":
             writeSaid()
         case "sharing.pause":
@@ -246,7 +249,7 @@ final class ControlSocket {
             }
         default:
             throw EndpointRefusal(
-                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, ui.key, perf.reset, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, listen.write, approval.answer.")
+                "No method \"\(method)\". The methods are: ui.state, ui.tree, ui.press, ui.type, ui.scroll, ui.key, perf.reset, input.toggle, capture.toggle, capture.mark, dictation.start, dictation.stop, dictation.fn, dictation.esc, dictation.shift, listen.write, approval.answer.")
         }
         return [:]
     }

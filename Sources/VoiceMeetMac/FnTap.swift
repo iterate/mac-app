@@ -28,6 +28,7 @@ final class FnTap: @unchecked Sendable {
         case fn(down: Bool, at: Date)
         case escape
         case otherKey
+        case shiftTapped
     }
 
     /// What the dictation wants from the keys, set by the main actor.
@@ -36,6 +37,8 @@ final class FnTap: @unchecked Sendable {
         var escape = false
         /// A dictation is locked: Esc goes to it and to no app.
         var swallowsEscape = false
+        /// A dictation is locked: a tap of ⇧ alone makes it a capture.
+        var shift = false
     }
 
     private struct Taps {
@@ -66,6 +69,7 @@ final class FnTap: @unchecked Sendable {
         taps.withLock { taps in
             taps.rule.escape = wanted.escape
             taps.rule.swallowsEscape = wanted.swallowsEscape
+            taps.rule.hearsShift = wanted.shift
             taps.fit()
         }
     }
@@ -116,7 +120,7 @@ final class FnTap: @unchecked Sendable {
             defer { taps.fit() }
             switch type {
             case .flagsChanged:
-                return (taps.rule.flagsChanged(code: code(), fn: event.flags.contains(.maskSecondaryFn)), false)
+                return (taps.rule.flagsChanged(code: code(), fn: event.flags.contains(.maskSecondaryFn), shift: event.flags.contains(.maskShift)), false)
             case .keyDown:
                 return taps.rule.keyDown(code: code())
             case .tapDisabledByTimeout, .tapDisabledByUserInput:
@@ -141,6 +145,7 @@ final class FnTap: @unchecked Sendable {
         case .fn(let down): event = .fn(down: down, at: Date())
         case .escape: event = .escape
         case .otherKey: event = .otherKey
+        case .shiftTapped: event = .shiftTapped
         }
         let handle = handle
         DispatchQueue.main.async { MainActor.assumeIsolated { handle(event) } }

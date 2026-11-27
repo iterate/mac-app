@@ -85,6 +85,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     var session: MindSession?
     /// The guide to a permission of macOS (the app's delegate has it).
     var allow: (Permission) -> Void = { _ in }
+    /// Writes a text where the cursor is (the dictation's ⌘V).
+    var paste: (String) -> Void = { _ in }
     /// The one transcriber, and the word list of a mind.
     var transcriber: Transcriber?
     var words: (String?) -> WordList = { _ in .empty }
@@ -154,6 +156,48 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var finished: CheckedContinuation<Void, Never>?
     /// A read of the window in front is under way on the Accessibility queue: the next waits.
     private var isReadingWindow = false
+    /// A dictation kept on became this capture (README, "Dictation becomes a capture"): fn ends
+    /// it, and its text is written where the cursor is.
+    private var byDictation = false
+    /// The words the dictation heard before this capture, once they came: its first segment.
+    private var before: String?
+    private var pasted = false
+
+    /// The next press of fn ends this capture: a dictation became it.
+    var takesFn: Bool { byDictation && (phase == .starting || phase == .running) }
+
+    /// Whether a dictation kept on can become a capture now.
+    var canStartFromDictation: Bool { phase == .idle && Permission.screenRecording.isGranted }
+
+    /// ⇧ in a dictation kept on: a capture starts at once.
+    func startFromDictation() {
+        guard canStartFromDictation else { return }
+        byDictation = true
+        before = nil
+        pasted = false
+        Task { @MainActor in await start() }
+    }
+
+    /// The dictation's words before this capture. False when no capture that a dictation became
+    /// starts or runs: the dictation writes them itself.
+    func saidBefore(_ text: String) -> Bool {
+        guard takesFn || (byDictation && phase == .ending) else { return false }
+        before = text
+        if phase == .running || phase == .ending { sendBefore() }
+        return true
+    }
+
+    /// The words before, as the capture's first segment: at its start, with no time of their own.
+    private func sendBefore() {
+        guard let before, !before.isEmpty else { return }
+        upload(["segment": ["t": 0, "to": 0, "text": before, "words": [] as [Any], "before": true] as [String: Any]])
+    }
+
+    /// fn, in a capture that a dictation became: end and send.
+    func endFromFn() {
+        guard byDictation, phase == .running else { return }
+        Task { @MainActor in await end(send: true) }
+    }
 
     /// For `ui.state` on the control socket.
     func controlState() -> [String: Any] {
@@ -167,7 +211,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// ⌥⇧S: start, or end and send.
     func toggle() {
         switch phase.toggle {
-        case .start: Task { @MainActor in await start() }
+        case .start:
+            byDictation = false
+            Task { @MainActor in await start() }
         case .end: Task { @MainActor in await end(send: true) }
         case .nothing: log.info("capture: \(phase), the key waits")
         }
@@ -180,7 +226,12 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         guard Permission.screenRecording.isGranted else { return allow(.screenRecording) }
         // from here a press does nothing until the capture runs, or did not start
         phase = .starting
-        defer { if phase == .starting { phase = .idle } }
+        defer {
+            if phase == .starting {
+                phase = .idle
+                byDictation = false
+            }
+        }
         let status = AVCaptureDevice.authorizationStatus(for: .audio)
         var microphone = CapturePhase.microphone(hasOwnHome: AppEnvironment.current.hasOwnHome, isAuthorized: status == .authorized, isUndetermined: status == .notDetermined)
         if microphone == .ask { microphone = await AVCaptureDevice.requestAccess(for: .audio) ? .on : .off }
@@ -250,7 +301,8 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         isReadingWindow = false
         phase = .running
         isInkArmed = false
-        say("⇧ and move draws · ⌥⇧S sends", startedAt: zero)
+        say(byDictation ? "⇧ and move draws · fn sends" : "⇧ and move draws · ⌥⇧S sends", startedAt: zero)
+        if byDictation { sendBefore() }
         observeWindow()
         picture("start", after: 0.3)
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
@@ -818,6 +870,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
                 for segment in (segments ?? []).dropFirst(self.segmentsSent) { self.upload(["segment": segment.transcriptEntry]) }
             }
             guard self.id == capture else { return }
+            // a dictation's last words before the capture: at most 5 s more
+            for _ in 0..<100 where self.byDictation && self.before == nil {
+                try? await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard self.id == capture else { return }
             self.upload(["heard": true])
         }
     }
@@ -849,6 +906,11 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
             if line["failed"] == nil {
                 log.info("capture \(id): \(text.count) characters copied")
                 say("Copied: paste it to an agent", progress: pill.progress)
+                // a capture that a dictation became: its text where the cursor is, once
+                if byDictation, !pasted {
+                    pasted = true
+                    paste(text)
+                }
             }
         }
         if let reason = line["failed"] as? String {
