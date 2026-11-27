@@ -31,8 +31,12 @@
 //
 // WHO READS THE TEXT, AND HOW:
 //   - an agent on this Mac reads the numbered pictures from the folder;
-//   - any other agent makes the text's one call, `itx.getScrawl("<id>")`: the mind's own lookup
-//     of a capture by its id (THE BOUNDARY, below). It answers the words, the marks, and the
+//   - in a mind that has the lookup `itx.getScrawl`, the text on the clipboard is ONE LINE:
+//     `Run itx.getScrawl("<id>") on <mind> to see the scrawl` (Jonas, 27 Nov 2026: "the thing we
+//     actually post to an agent would be the itx expression to get the scrawl […] then we could
+//     update that on the server side and wouldn't be so reliant on the mac app"). Every word about
+//     how to read a capture is the mind's, in the lookup's answer. summary.md keeps the long text;
+//   - that call is the mind's own lookup of a capture by its id (THE BOUNDARY, below). It answers the words, the marks, and the
 //     pictures under "itx/images", which the mind's MCP tool `run` answers as images. It
 //     delivers nothing: how an agent of the mind looks at the pictures is in that mind's
 //     AGENTS.md. While the capture still arrives it says `pending`;
@@ -47,7 +51,7 @@
 // code of the mind's config (apps/scrawl/ of iterate.com's config), behind the mind's rule
 // `itx.getScrawl`. It answers `{ state: "ready" | "pending" | "unknown", … }` from those files and
 // events alone, and it decides who may read. The app asks once, at a capture's start, whether the
-// mind has the rule (`itx.rewriteRules.get("itx.getScrawl")`), and writes the short text when it
+// mind has the rule (`itx.rewriteRules.get("itx.getScrawl")`), and copies the one line when it
 // has. The id is a name and no key: the text holds no link and no path of the mind.
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -206,7 +210,11 @@ export function captureUpload({
   const clock = (ms) =>
     `${Math.floor(ms / 60_000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
 
-  /** The text a person pastes to an agent. It is short on purpose: a line for each numbered picture
+  /** The text on the clipboard in a mind that looks a capture up itself: the id and the one call,
+   *  and nothing about how to read the answer. That is the mind's to say, and to change. */
+  const handoff = () => `Run itx.getScrawl("${capture}") on ${mind} to see the scrawl`;
+
+  /** The long text: summary.md, and the clipboard's in a mind with no lookup. It is short on purpose: a line for each numbered picture
    *  with the words said at it, and the two ways to the pictures. `inTheMind` is false for a
    *  capture that stayed on this Mac. */
   function paste({ manifest, transcript, wordsPending, inTheMind = true }) {
@@ -359,16 +367,24 @@ export function captureUpload({
       return put("transcript.json").then(() => ({ transcript: transcriptSoFar() }));
     });
     // At once: everything this Mac knows now. The pictures went up while the person talked. One
-    // turn of the loop later, so that words that are whole already count as heard.
-    setImmediate(() =>
-      say({
-        copy: paste({
-          manifest,
-          transcript: transcriptSoFar(),
-          wordsPending: !isHeard && manifest.microphone,
+    // turn of the loop later, so that words that are whole already count as heard. The mind's
+    // answer about its lookup is here long before a capture ends; a capture first heard of at its
+    // end waits for it, at most 2 s, so that its first text is not the script.
+    let timer;
+    Promise.race([lookedFor, new Promise((resolve) => (timer = setTimeout(resolve, 2000)))]).then(() => {
+      clearTimeout(timer);
+      setImmediate(() =>
+        say({
+          copy: mindLooksUp
+            ? handoff()
+            : paste({
+                manifest,
+                transcript: transcriptSoFar(),
+                wordsPending: !isHeard && manifest.microphone,
+              }),
         }),
-      }),
-    );
+      );
+    });
     // capture.json goes once, at `finish`: it grows until then (the movie's and the voice's
     // observations), and nothing reads it in the mind before `capture/received`
     const early = Promise.all(filesIn().filter((file) => file.endsWith(".jpg")).map(put));
@@ -415,8 +431,9 @@ export function captureUpload({
       const text = paste({ manifest, ...words });
       writeFileSync(join(folder, "summary.md"), text);
       await Promise.all([put("summary.md"), early]);
-      // the same text with the last words: it takes the first one's place on the clipboard
-      say({ copy: text });
+      // the text with the last words takes the first one's place on the clipboard; the one line
+      // of a mind with a lookup is the same as before
+      say({ copy: mindLooksUp ? handoff() : text });
       await append("capture/ready", { capture, summary: `${directory}/summary.md`, pictures: manifest.panels.length });
     })();
     // a failure is told at `finish`, which awaits it

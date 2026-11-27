@@ -184,8 +184,11 @@ test("a mind that has `itx.getScrawl`: the text names the capture's id and the o
     assert.ok(!text.includes("/captures/"));
     assert.ok(!text.includes("waitForEvent"));
     assert.match(text, /#2 \(0:08\) clicked “this one”/);
-    // the text on the clipboard at the end is that text
-    assert.equal(said.filter((line) => line.copy).at(-1).copy, text);
+    // the clipboard holds one line, the first time too: the id and the call, and no more
+    assert.deepEqual(
+      said.filter((line) => line.copy).map((line) => line.copy),
+      Array(2).fill(`Run itx.getScrawl("${id}") on example.com to see the scrawl`),
+    );
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }
@@ -197,10 +200,11 @@ test("a mind with no `itx.getScrawl` still gets the one script", async () => {
   writeFileSync(join(folder, "2.jpg"), "another picture");
   const id = basename(folder);
   try {
-    const { mind } = await capture(folder, [{ finish: true }], { kept: true, until: (said) => said.some((line) => line.done || line.failed) });
+    const { said, mind } = await capture(folder, [{ finish: true }], { kept: true, until: (said) => said.some((line) => line.done || line.failed) });
     const text = mind.files.get(`captures/${id}/summary.md`).bytes.toString();
     assert.ok(text.includes(`const d = "/captures/${id}/"`));
     assert.ok(!text.includes("getScrawl"));
+    assert.equal(said.filter((line) => line.copy).at(-1).copy, text);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

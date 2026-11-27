@@ -777,8 +777,18 @@ Mac is lent to. The gesture and the shape of the text are
 has no switch in the panel; it needs macOS 15, Screen Recording, and the microphone for your
 voice. It ends by itself after 10 minutes. Discard on the pill throws it away.
 
-The text is a line for each **numbered picture** with the words you said at it, and the two ways
-to the pictures:
+In a mind that looks a capture up itself (the rule `itx.getScrawl`; "The boundary with the mind",
+below), the text on the clipboard is one line, the capture's id and the one call:
+
+```
+Run itx.getScrawl("<id>") on example.com to see the scrawl
+```
+
+How an agent reads the answer (look at the pictures first, what `pending` means, a link for each
+picture) is in that answer, as `how`: it is the mind's text, and it changes there with no release
+of this app. `summary.md` of the capture still holds the long text below. In a mind with no such
+rule, and for a capture that stayed on this Mac, the long text is on the clipboard: a line for
+each **numbered picture** with the words you said at it, and the two ways to the pictures:
 
 ```
 [capture 0:15 · Ghostty “my project” · jonas.mac → example.com]
@@ -797,8 +807,9 @@ GPT Live Transcribe at OpenAI when it can be reached, else the local model on th
 `words.md` list of the capture's mind. At OpenAI one socket serves the capture: each pause of
 0.7 s commits the sound so far, and its text is a segment with its times. The pill shows the last
 words: the sign that the microphone hears you. So at the end
-only your last words can be missing: the first text says so, and the same text with all the words
-takes its place on the clipboard a moment later, unless you copied something else.
+only your last words can be missing: the long text says so, and the same text with all the words
+takes its place on the clipboard a moment later, unless you copied something else. The one line
+does not change: the mind's lookup waits for the last words.
 
 **The boundary with the mind** (27 November 2026). This app makes the capture: its id, its files
 under `/captures/<id>/` and the two events below. The mind reads it: `itx.getScrawl(id, { waitMs?,
