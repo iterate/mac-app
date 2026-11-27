@@ -100,6 +100,18 @@ final class Dictation: SpeechClient {
     /// Opens the guide for a permission of macOS.
     var allow: (Permission) -> Void = { _ in }
     var onChange: () -> Void = {}
+    /// A dictation kept on becomes a capture (README, "Dictation becomes a capture"): whether one
+    /// can start now, its start, the words said before it (true: the capture took them), and the
+    /// capture's hold of the next press of fn, which ends it.
+    var canBecomeCapture: () -> Bool = { false }
+    var becomeCapture: () -> Void = {}
+    var handToCapture: (String) -> Bool = { _ in false }
+    var captureTakesFn: () -> Bool = { false }
+    var endCapture: () -> Void = {}
+    /// This dictation became a capture: its last words go to it, not where the cursor is.
+    private var becameCapture = false
+    /// The press of fn that ended a capture: its release does nothing.
+    private var fnUpIsCaptures = false
     /// How the last dictation ended, for the panel.
     private(set) var lastLine: String?
     /// The last dictation failed or wrote nothing where the cursor is: the panel draws its line in orange.
@@ -167,7 +179,33 @@ final class Dictation: SpeechClient {
 
     /// fn went down or up (the tap, or `dictation.fn` on the control socket).
     func fnChanged(down: Bool, at time: Date = Date()) {
+        // a capture that a dictation became ends at the next press of fn, and sends
+        if down, key.state == .idle, captureTakesFn() {
+            fnUpIsCaptures = true
+            log.info("fn: ends the capture")
+            return endCapture()
+        }
+        if !down, fnUpIsCaptures {
+            fnUpIsCaptures = false
+            return
+        }
         act(down ? key.down(.fn, at: time) : key.up(at: time))
+    }
+
+    /// ⇧ alone, tapped while the dictation is kept on (`dictation.shift` on the control socket):
+    /// it becomes a capture. The capture starts at once; the words so far go into it as its first.
+    func shiftTapped() {
+        guard key.isLocked, isRunning, canBecomeCapture() else { return }
+        log.info("⇧: the dictation becomes a capture")
+        becameCapture = true
+        key.ended()
+        keyChanged()
+        becomeCapture()
+        pill.phase = .writing
+        pill.level = 0
+        session.finish(self)
+        hidePill(after: 0)
+        onChange()
     }
 
     /// `dictation.start` on the control socket: fn down, as a hold.
@@ -194,6 +232,7 @@ final class Dictation: SpeechClient {
             guard Choices.shared.dictationOnFn || key.state != .idle else { return }
             fnChanged(down: down, at: time)
         case .escape: escape()
+        case .shiftTapped: shiftTapped()
         case .otherKey:
             if key.wantsOtherKeys { log.info("fn with another key: a combination, the dictation ends") }
             act(key.otherKey())
@@ -237,7 +276,7 @@ final class Dictation: SpeechClient {
             window?.cancel()
             window = nil
         }
-        tap.want(FnTap.Interest(escape: key.state != .idle, swallowsEscape: key.isLocked))
+        tap.want(FnTap.Interest(escape: key.state != .idle, swallowsEscape: key.isLocked, shift: key.isLocked && canBecomeCapture()))
     }
 
     /// Hears fn in every app: one event tap, made once macOS gives Accessibility.
@@ -347,6 +386,10 @@ final class Dictation: SpeechClient {
         case .level(let level):
             pill.level = level
         case .failed(let reason):
+            if becameCapture {
+                becameCapture = false
+                _ = handToCapture("")
+            }
             ended()
             // what it heard so far is kept, to get it back
             if !pill.text.isEmpty { keep(pill.text, .failed) }
@@ -358,6 +401,11 @@ final class Dictation: SpeechClient {
             if !isRunning { ended() }
             let said = spoken(text)
             keep(said, said.isEmpty ? .heardNothing : .written)
+            // the words before a capture are its first; a capture that did not start leaves them here
+            if becameCapture {
+                becameCapture = false
+                if handToCapture(said) { return end("\(Spoken.wordCount(said)) words went into the capture at \(Lend.clock(Date()))", failed: nil) }
+            }
             write(said)
         }
     }

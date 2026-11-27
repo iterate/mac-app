@@ -175,11 +175,16 @@ public struct KeyTapRule: Equatable, Sendable {
         case fn(down: Bool)
         case escape
         case otherKey
+        /// ⇧ went down and up with no key and no other modifier between, while `hearsShift`: a
+        /// dictation kept on with no key becomes a capture (README, "Dictation becomes a capture").
+        case shiftTapped
     }
 
     /// fn (63, `kVK_Function`), and the 🌐 key of some keyboards (179).
     public static let fnCodes: Set<Int64> = [63, 179]
     public static let escapeCode: Int64 = 53
+    /// The left and the right ⇧.
+    public static let shiftCodes: Set<Int64> = [56, 60]
 
     /// fn is down, as the tap's own events say.
     public private(set) var fnDown = false
@@ -187,18 +192,40 @@ public struct KeyTapRule: Equatable, Sendable {
     public var escape = false
     /// A dictation is locked: Esc goes to it and to no app.
     public var swallowsEscape = false
+    /// A dictation is locked: a tap of ⇧ alone matters (`shiftTapped`).
+    public var hearsShift = false {
+        didSet { if !hearsShift { shiftAlone = false } }
+    }
+    /// ⇧ is down, and nothing else happened since.
+    private var shiftAlone = false
 
     public init() {}
 
-    public var wantsKeyDowns: Bool { fnDown || escape }
+    /// A key spoils a tap of ⇧, so key presses matter while ⇧ is heard.
+    public var wantsKeyDowns: Bool { fnDown || escape || hearsShift }
 
     /// A modifier changed: fn itself, or another one, which is fn's combination while fn is down.
-    public mutating func flagsChanged(code: Int64, fn: Bool) -> Heard? {
+    /// `shift`: whether the event's flags hold ⇧.
+    public mutating func flagsChanged(code: Int64, fn: Bool, shift: Bool = false) -> Heard? {
         if Self.fnCodes.contains(code) {
             fnDown = fn
+            shiftAlone = false
             return .fn(down: fn)
         }
-        return fnDown ? .otherKey : nil
+        if fnDown {
+            shiftAlone = false
+            return .otherKey
+        }
+        guard hearsShift, Self.shiftCodes.contains(code) else {
+            shiftAlone = false
+            return nil
+        }
+        if shift {
+            shiftAlone = true
+            return nil
+        }
+        defer { shiftAlone = false }
+        return shiftAlone ? .shiftTapped : nil
     }
 
     /// A key went down. `swallow`: the key goes to no app.
@@ -206,6 +233,7 @@ public struct KeyTapRule: Equatable, Sendable {
         // macOS sends the 🌐 key as a key press too, when a short tap of it ends and fn is still
         // down: that is fn itself, not fn's combination, or every tap would be thrown away
         if Self.fnCodes.contains(code) { return (nil, false) }
+        shiftAlone = false
         if code == Self.escapeCode, escape { return (.escape, swallowsEscape) }
         return (fnDown ? .otherKey : nil, false)
     }
