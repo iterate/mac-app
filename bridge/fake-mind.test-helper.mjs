@@ -21,6 +21,8 @@ export function fakeMind({ stored = () => {} } = {}) {
   let server;
   const mind = {
     files: new Map(),
+    /** The rules of the mind's root, by their match: `itx.rewriteRules.get(match)` answers one. */
+    rules: {},
     failSignedPuts: undefined,
     order: [],
     repo: { tip: async () => "abc", files: {}, reads: [] },
@@ -91,6 +93,7 @@ export function fakeMind({ stored = () => {} } = {}) {
       if (!connection.isOpen) throw new Error(`Peer closed WebSocket: ${SIGN_IN_ENDED}`);
     };
     connection.itx = {
+      rewriteRules: { get: async (match) => (open(), mind.rules[match] ?? null) },
       r2: {
         async presign({ key }) {
           open();
