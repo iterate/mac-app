@@ -785,7 +785,7 @@ to the pictures:
 The words point at red marks on the screen: look at the pictures before you answer. Each # is a numbered picture.
 Get the pictures in one of these ways, then answer from them and the lines below alone:
 - On jonas.mac: read sheet.jpg and 1.jpg, 2.jpg together, in /Users/…/iterate-mac-app/captures/<id> (open nothing else there).
-- Anywhere else, through the mind example.com: the capture's id is <id>, and one call answers its words, its marks and its pictures: await itx.getScrawl("<id>"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("<id>") and shows the pictures as images. An agent of the mind adds its own path and gets them as images too: await itx.getScrawl("<id>", { showTo: "/agents/…" }). With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.
+- Anywhere else, through the mind example.com: the capture's id is <id>, and one call answers its words, its marks and its pictures: await itx.getScrawl("<id>"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("<id>") and shows the pictures as images. An agent of the mind: your AGENTS.md says how you look at the pictures. With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.
 - #1 (0:06) drew “what is this here?”
 - #2 (0:12) clicked “Save” “and this is slow”
 ```
@@ -802,10 +802,10 @@ takes its place on the clipboard a moment later, unless you copied something els
 
 **The boundary with the mind** (27 November 2026). This app makes the capture: its id, its files
 under `/captures/<id>/` and the two events below. The mind reads it: `itx.getScrawl(id, { waitMs?,
-showTo?, urls? })` is code of the mind's own config (`apps/scrawl/` of iterate.com's config), behind
+urls? })` is code of the mind's own config (`apps/scrawl/` of iterate.com's config), behind
 the mind's rule `itx.getScrawl`. It answers `{ state: "ready", said, marks, pictures, "itx/images"
 }`, or `"pending"` while the capture still arrives (it waits up to 30 s for it first), or
-`"unknown"`; and the mind decides who may read. So the text holds an id, which is a name and no
+`"unknown"`. It reads and delivers nothing, and the mind decides who may read. So the text holds an id, which is a name and no
 key: no link, no path of the mind and no code. The app asks once, at a capture's start, whether the
 mind has the rule. In a mind that has none, the text holds one script in the call's place: it
 waits for `capture/ready`, reads `context.json`, makes a signed link for each picture, and sends

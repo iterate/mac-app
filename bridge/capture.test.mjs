@@ -179,7 +179,6 @@ test("a mind that has `itx.getScrawl`: the text names the capture's id and the o
     const text = mind.files.get(`captures/${id}/summary.md`).bytes.toString();
     assert.ok(text.includes(`the capture's id is ${id}`));
     assert.ok(text.includes(`await itx.getScrawl("${id}")`));
-    assert.ok(text.includes(`{ showTo: "/agents/…" }`));
     // no script, no path of the mind and no link: the id is a name
     assert.ok(!text.includes("const d ="));
     assert.ok(!text.includes("/captures/"));

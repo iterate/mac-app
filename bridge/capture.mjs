@@ -33,9 +33,9 @@
 //   - an agent on this Mac reads the numbered pictures from the folder;
 //   - any other agent makes the text's one call, `itx.getScrawl("<id>")`: the mind's own lookup
 //     of a capture by its id (THE BOUNDARY, below). It answers the words, the marks, and the
-//     pictures under "itx/images", which the mind's MCP tool `run` answers as images; an agent of
-//     the mind names itself (`showTo`) and gets the pictures as the files of a message, the way
-//     such an agent is shown an image. While the capture still arrives it says `pending`;
+//     pictures under "itx/images", which the mind's MCP tool `run` answers as images. It
+//     delivers nothing: how an agent of the mind looks at the pictures is in that mind's
+//     AGENTS.md. While the capture still arrives it says `pending`;
 //   - in a mind that has no such lookup the text holds one script instead, which does the same
 //     with the mind's files: it waits for `capture/ready` and answers context.json;
 //   - a mind whose MCP tool answers no image gives text alone. For that reader a model reads each
@@ -43,7 +43,7 @@
 //
 // THE BOUNDARY with the mind (27 Nov 2026). This app makes the capture: its id, the files under
 // /captures/<id>/ (README, "Capture"), and the events `capture/ready` and `capture/received` on the
-// context /captures/<id>. The MIND reads it: `itx.getScrawl(id, { waitMs?, showTo?, urls? })` is
+// context /captures/<id>. The MIND reads it: `itx.getScrawl(id, { waitMs?, urls? })` is
 // code of the mind's config (apps/scrawl/ of iterate.com's config), behind the mind's rule
 // `itx.getScrawl`. It answers `{ state: "ready" | "pending" | "unknown", … }` from those files and
 // events alone, and it decides who may read. The app asks once, at a capture's start, whether the
@@ -249,7 +249,7 @@ export function captureUpload({
         ? [
             // The mind has its own lookup: the text names the capture and the one call. A name and
             // no key: who may read is the mind's to say.
-            `- Anywhere else, through the mind ${mind}: the capture's id is ${capture}, and one call answers its words, its marks and its pictures: await itx.getScrawl("${capture}"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("${capture}") and shows the pictures as images. An agent of the mind adds its own path and gets them as images too: await itx.getScrawl("${capture}", { showTo: "/agents/…" }). With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.`,
+            `- Anywhere else, through the mind ${mind}: the capture's id is ${capture}, and one call answers its words, its marks and its pictures: await itx.getScrawl("${capture}"). The iterate MCP tool "run" takes async (itx) => await itx.getScrawl("${capture}") and shows the pictures as images. An agent of the mind: your AGENTS.md says how you look at the pictures. With a shell and no image: add { urls: true } and download each link in "urls" (curl -o). A state "pending" says that the capture still arrives: ask again.`,
           ]
         : inTheMind
         ? [
