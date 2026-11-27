@@ -2,7 +2,7 @@
 // go to the numbered pictures and to transcript.json; the text for the clipboard comes before any
 // upload. Against the fake mind.
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -189,6 +189,22 @@ test("a mind that has `itx.getScrawl`: the text names the capture's id and the o
       said.filter((line) => line.copy).map((line) => line.copy),
       Array(2).fill(`Run itx.getScrawl("${id}") on example.com to see the scrawl`),
     );
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+test("a capture's 13th picture, and a file that no link was asked for, go up", async () => {
+  // 20261127T211958Z-0259 on jonas.mac: 12 pictures and the one of its end. "The upload of
+  // pictures/13.jpg failed: r2.presign is not a function", and the capture was never ready.
+  const folder = keptFolder();
+  mkdirSync(join(folder, "pictures"));
+  for (const file of ["1.jpg", "2.jpg", "pictures/13.jpg", "pictures/14.jpg"]) writeFileSync(join(folder, file), `the picture ${file}`);
+  const id = basename(folder);
+  try {
+    const { said, mind } = await capture(folder, [{ finish: true }], { kept: true, until: (said) => said.some((line) => line.done || line.failed) });
+    assert.deepEqual(said.at(-1), { done: true });
+    for (const file of ["pictures/13.jpg", "pictures/14.jpg"]) assert.equal(mind.files.get(`captures/${id}/${file}`).bytes.toString(), `the picture ${file}`);
   } finally {
     rmSync(folder, { recursive: true, force: true });
   }

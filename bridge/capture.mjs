@@ -105,7 +105,11 @@ export function captureUpload({
     () => {},
   );
   /** What a file needs of the connection: its way through it when the signed route fails. */
-  const r2 = { put: (...args) => onMind((itx) => itx.r2.put(...args)) };
+  const r2 = {
+    put: (...args) => onMind((itx) => itx.r2.put(...args)),
+    // for a file that `names` below does not list: its link is asked for when it goes
+    presign: (...args) => onMind((itx) => itx.r2.presign(...args)),
+  };
 
   // Every file a capture can have (Capture.swift): the links are asked for before the files exist.
   const names = [
@@ -114,8 +118,9 @@ export function captureUpload({
     "voice.m4a",
     "summary.md",
     "transcript.json",
+    // 12 while the capture runs and the one of its end (Capture.swift, `picture` and `finish`)
     ...Array.from(
-      { length: 12 },
+      { length: 13 },
       (_, index) => `pictures/${String(index + 1).padStart(2, "0")}.jpg`,
     ),
     // the numbered pictures: one for each mark and click, and all of them on one sheet
