@@ -146,7 +146,6 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     private var trees = 0
     private var windowKey = ""
     private var overlay: NSPanel?
-    private var pillPanel: NSPanel?
     private var ink: InkView?
     private var timer: Timer?
     private var clickMonitor: Any?
@@ -202,9 +201,9 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
     /// For `ui.state` on the control socket.
     func controlState() -> [String: Any] {
         [
-            "running": isRunning, "phase": "\(phase)", "pillVisible": pillPanel?.isVisible ?? false, "pill": pill.text, "lastLine": lastLine ?? NSNull(),
+            "running": isRunning, "phase": "\(phase)", "pillVisible": Pill.shared.isShown(.capture), "pill": pill.text, "lastLine": lastLine ?? NSNull(),
             // the pill is in no picture and no movie of the screen
-            "pillShared": pillPanel.map { $0.sharingType != .none } ?? false,
+            "pillShared": Pill.shared.isShown(.capture) && Pill.shared.isShared,
         ]
     }
 
@@ -967,34 +966,30 @@ final class Capture: NSObject, SCStreamDelegate, SCStreamOutput, SCRecordingOutp
         ink = nil
     }
 
-    /// The pill at the top of the display: what the capture does now. With `seconds`, it goes away after them.
+    /// The one pill at the bottom of the display (`Pill`), where a dictation's is: what the capture
+    /// does now. With `seconds`, it goes away after them.
     private func say(_ text: String, startedAt: Date? = nil, progress: Double? = nil, for seconds: Double? = nil) {
         pill.text = text
         pill.mind = pinned?.mind
         pill.startedAt = startedAt
         pill.progress = progress
-        let screen = self.screen ?? NSScreen.main
-        let width = CapturePillView.width(of: pill)
-        let frame = NSRect(
-            x: (screen?.frame.midX ?? 400) - width / 2, y: (screen?.visibleFrame.maxY ?? 800) - 48, width: width, height: CapturePillView.height)
-        let panel = pillPanel ?? self.panel(frame, level: NSWindow.Level.statusBar.rawValue + 1)
-        if pillPanel == nil {
-            // in no picture and no movie of the screen: the ink is, the pill is not
-            panel.sharingType = .none
-            panel.contentView = NSHostingView(
-                rootView: CapturePillView(
-                    pill: pill,
-                    send: { [weak self] in self?.toggle() },
-                    discard: { [weak self] in Task { @MainActor in await self?.end(send: false) } }))
-            pillPanel = panel
-        }
-        panel.setFrame(frame, display: true)
-        OffScreen.orderFront(panel) { panel.orderFrontRegardless() }
+        let pill = self.pill
+        Pill.shared.show(
+            .capture, width: CapturePillView.width(of: pill), on: screen, takesClicks: true,
+            view: CapturePillView(
+                pill: pill,
+                send: { [weak self] in self?.send() },
+                discard: { [weak self] in Task { @MainActor in await self?.end(send: false) } }))
         guard let seconds else { return }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
             // a newer line stays
-            if self?.pill.text == text { self?.pillPanel?.orderOut(nil) }
+            if self?.pill.text == text { Pill.shared.hide(.capture) }
         }
+    }
+
+    /// The pill's Send: as ⌥⇧S, or as fn for a capture that a dictation became.
+    private func send() {
+        if byDictation { endFromFn() } else { toggle() }
     }
 }
 
@@ -1005,14 +1000,15 @@ struct CapturePillView: View {
     /// A drawing's clock: the time since the start at that moment, with no timer.
     var now: Date?
 
-    static let height: CGFloat = 36
+    static let height = Pill.height
 
-    /// Room for the dot, the clock and the two buttons while it records, the face, the bar, the words.
+    /// Room for the dot, the clock and the two buttons while it records, the face, the bar, the
+    /// words: at least a dictation's width, so that a dictation that becomes a capture keeps its size.
     static func width(of pill: CapturePill) -> CGFloat {
         let controls: CGFloat = pill.startedAt == nil ? 60 : 250
         let face: CGFloat = pill.mind == nil ? 0 : 26
         let bar: CGFloat = pill.progress == nil ? 0 : 110
-        return min(controls + face + bar + CGFloat(pill.text.count * 8), 760)
+        return min(max(controls + face + bar + CGFloat(pill.text.count * 8), DictationPill.width), 760)
     }
 
     var body: some View {
@@ -1041,13 +1037,14 @@ struct CapturePillView: View {
                 Button("Send", action: send).buttonStyle(FillButtonStyle(prominent: true)).accessibilityIdentifier("capture.send")
             }
         }
-        .font(.system(size: 13))
+        .font(.system(size: Theme.Size.pillText))
         .foregroundStyle(Theme.t1)
-        .padding(.leading, pill.mind == nil ? 14 : 7)
-        .padding(.trailing, pill.startedAt == nil ? 14 : 5)
+        .padding(.leading, pill.mind == nil ? 15 : 7)
+        .padding(.trailing, pill.startedAt == nil ? 15 : 5)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Theme.surface, in: Capsule())
-        .overlay(Capsule().strokeBorder(Theme.edge, lineWidth: 1))
+        // the dictation's capsule: the same pill
+        .background(Theme.surface, in: Pill.shape)
+        .overlay(Pill.shape.strokeBorder(Theme.edge, lineWidth: 1))
     }
 }
 
